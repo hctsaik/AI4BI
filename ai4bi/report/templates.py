@@ -15,7 +15,7 @@ from ai4bi.query_spec import (
     VisualQuerySpec,
     VisualType,
 )
-from ai4bi.report_models import (
+from ai4bi.report.models import (
     ControlSpec,
     ExecutableReportSpec,
     ReportPageSpec,

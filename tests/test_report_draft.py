@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from ai4bi.analysis.executor import Executor
-from ai4bi.report_models import (
+from ai4bi.report.models import (
     DraftReportStore,
     ExecutableReportSpec,
     ReportChange,
@@ -14,8 +14,8 @@ from ai4bi.report_models import (
     apply_report_proposal,
     query_to_dict,
 )
-from ai4bi.report_proposals import controls_to_proposal, prompt_to_proposal
-from ai4bi.report_templates import build_semiconductor_queue_time_report
+from ai4bi.report.proposals import controls_to_proposal, prompt_to_proposal
+from ai4bi.report.templates import build_semiconductor_queue_time_report
 
 
 DATA_DIR = Path(__file__).parent.parent / "data" / "semiconductor_demo"

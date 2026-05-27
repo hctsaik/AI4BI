@@ -9,12 +9,12 @@ from pathlib import Path
 import streamlit as st
 
 from ai4bi.analysis.executor import Executor
-from ai4bi.report_models import DraftReportStore, ExecutableReportSpec, ReportProposal
-from ai4bi.report_proposals import controls_to_proposal, prompt_to_proposal
-from ai4bi.report_templates import build_semiconductor_queue_time_report
+from ai4bi.report.models import DraftReportStore, ExecutableReportSpec, ReportProposal
+from ai4bi.report.proposals import controls_to_proposal, prompt_to_proposal
+from ai4bi.report.templates import build_semiconductor_queue_time_report
 from ai4bi.ui.cache import QueryCache
 from ai4bi.ui.render_visual import render_visual
-from ai4bi.ui import report_workspace as workspace
+from ai4bi.ui import workspace
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
 _BLOCKS_DIR = _DEMO_ROOT / "blocks"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ai4bi.report_models import (
+from ai4bi.report.models import (
     ExecutableReportSpec,
     ReportChange,
     ReportProposal,
