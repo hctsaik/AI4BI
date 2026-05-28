@@ -39,6 +39,9 @@ from ai4bi.ui.upload import render_upload_panel, _USER_BLOCKS_KEY, _USER_BLOCK_M
 from ai4bi.report.user_report import build_report_from_block
 from ai4bi.ai.suggestions import generate_suggestions, detect_anomalies, AnomalyObservation, ChartSuggestion
 from ai4bi.report.retail_template import build_retail_demo_report, build_retail_sales_block
+from ai4bi.ui.data_model import render_join_builder, render_data_model_view, get_user_semantic_model
+from ai4bi.ui.workspace_manager import render_workspace_panel  # Round 039
+from ai4bi.ui.audit_trail import render_audit_trail, record_change  # Round 040
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
 _BLOCKS_DIR = _DEMO_ROOT / "blocks"
@@ -769,9 +772,12 @@ def _render_draft_controls(
 
         st.markdown("---")
 
-        # ── Zone 3: 報告草稿 (collapsible) ──────────────────────────────
-        with st.expander("📋 報告草稿", expanded=False):
-            st.caption(f"版本 {report.revision} | `{report.semantic_model_ref}`")
+        # ── Zone 3: 工作區 (Round 039) ───────────────────────────────────
+        render_workspace_panel(store, cache)
+
+        # ── Zone 3 (legacy controls inline — undo/redo/title/cache) ─────
+        with st.expander("⚙️ 報表設定", expanded=False):
+            st.caption(f"版本 {report.revision}")
 
             if not report.read_only:
                 new_title = st.text_input("報表標題", value=report.title, key="widget_report_title")
@@ -797,32 +803,21 @@ def _render_draft_controls(
             button_cols = st.columns(2)
             with button_cols[0]:
                 if st.button("復原", disabled=not workspace.can_undo(), width="stretch"):
+                    _rev_before = report.revision
                     workspace.undo()
+                    record_change("Undo", "Undid last proposal", report.report_id, _rev_before, workspace.current_report().revision)
                     _clear_visual_assistant_context()
                     _request_widget_sync()
                     cache.invalidate_all()
                     st.rerun()
             with button_cols[1]:
                 if st.button("重做", disabled=not workspace.can_redo(), width="stretch"):
+                    _rev_before = report.revision
                     workspace.redo()
+                    record_change("Redo", "Redid last proposal", report.report_id, _rev_before, workspace.current_report().revision)
                     _clear_visual_assistant_context()
                     _request_widget_sync()
                     cache.invalidate_all()
-                    st.rerun()
-            if st.button("儲存草稿", width="stretch", disabled=report.read_only):
-                path = store.save(report)
-                workspace.set_message(f"Saved local draft: {path.name}")
-                st.rerun()
-            available = store.list_paths()
-            if available:
-                chosen = st.selectbox("已儲存的草稿", available, format_func=lambda path: path.stem)
-                if st.button("載入草稿", width="stretch"):
-                    try:
-                        workspace.replace_with_loaded(store.load(chosen))
-                        _request_widget_sync()
-                        cache.invalidate_all()
-                    except (OSError, ValueError, json.JSONDecodeError) as exc:
-                        workspace.set_message(f"Draft load rejected: {exc}")
                     st.rerun()
             if st.button("清除查詢快取", width="stretch"):
                 cache.invalidate_all()
@@ -851,6 +846,12 @@ def _render_draft_controls(
                     cache.invalidate_all()
                     st.rerun()
 
+        # ── Zone 3c: 資料關聯設定 (Round 037) ────────────────────────────────
+        render_join_builder()
+
+        # ── Zone 3d: 資料模型 (Round 038) ─────────────────────────────────
+        render_data_model_view()
+
         st.markdown("---")
 
         # ── Zone 4a: 手動新增圖表（進階） ──────────────────────────────────
@@ -865,7 +866,10 @@ def _render_draft_controls(
             st.markdown("---")
             _render_published_snapshot_browser(report, cache)
 
-        # ── Zone 4c: 系統工具 (hidden by default) ────────────────────────
+        # ── Zone 4c: 變更記錄 (Round 040) ───────────────────────────────────
+        render_audit_trail()
+
+        # ── Zone 4d: 系統工具 (hidden by default) ────────────────────────
         with st.expander("🔧 系統工具", expanded=False):
             st.caption("資料積木資訊與版本鎖定（進階使用者）。")
             _render_pin_versions_panel(report)
@@ -1202,11 +1206,13 @@ def _render_visual_assistant(report: ExecutableReportSpec, cache: QueryCache) ->
             disabled=report.read_only,
         )
         if st.button("送出請求", type="primary", disabled=report.read_only, width="stretch"):
-            # Load semantic model for LLM governance context
+            # Load semantic model — merge demo SM with user-defined relationships (Round 037)
             try:
                 _sm = json.loads(_SEMANTIC_MODEL.read_text(encoding="utf-8"))
             except Exception:  # noqa: BLE001
-                _sm = None
+                _sm = {"relationships": [], "metrics": []}
+            _user_sm = get_user_semantic_model()
+            _sm["relationships"] = _sm.get("relationships", []) + _user_sm.get("relationships", [])
             _contracts = _load_all_contracts()
             result = prompt_to_proposal(prompt, report, selected, semantic_model=_sm, contracts=_contracts)
             _store_visual_assistant_context(result)
@@ -1246,7 +1252,12 @@ def _render_visual_assistant(report: ExecutableReportSpec, cache: QueryCache) ->
             actions = st.columns(2)
             with actions[0]:
                 if st.button("Apply Proposal", type="primary", width="stretch"):
+                    _rev_before = workspace.current_report().revision
+                    _pending = workspace.pending_proposal()
                     if workspace.accept_pending():
+                        _rev_after = workspace.current_report().revision
+                        _desc = _pending.description if _pending else "提案已套用"
+                        record_change("Apply Proposal", _desc, workspace.current_report().report_id, _rev_before, _rev_after)
                         _request_widget_sync()
                         cache.invalidate_all()
                     _clear_visual_assistant_context()
