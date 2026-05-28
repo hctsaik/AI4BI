@@ -27,7 +27,7 @@ from ai4bi.blocks.registry import FilesystemBlockRegistry, BlockNotFoundError, N
 from ai4bi.report.proposals import build_page_delete_proposal, build_title_proposal, controls_to_proposal, pin_block_version_proposal, prompt_to_proposal, unpin_block_version_proposal
 from ai4bi.report.publication import GateCheckResult, run_publication_gate
 from ai4bi.report.templates import build_semiconductor_queue_time_report
-from ai4bi.query_spec import FilterOperator, FilterSpec, VisualQuerySpec, VisualType
+from ai4bi.query_spec import AggFunction, BlockRef, FilterOperator, FilterSpec, MetricRef, VisualizationSpec, VisualQuerySpec, VisualType
 from ai4bi.ui.cache import QueryCache
 from ai4bi.ui.render_visual import get_metadata, render_visual
 from ai4bi.ui import workspace
@@ -35,6 +35,8 @@ from ai4bi.ui.viewer import get_draft_path_from_params, is_readonly_mode, render
 from ai4bi.report.metric_catalog import MetricCatalogService, MetricZone
 from ai4bi.report.block_library import build_block_library, LIFECYCLE_BADGE
 from ai4bi.blocks.contracts import LifecycleStatus
+from ai4bi.ui.upload import render_upload_panel, _USER_BLOCKS_KEY, _USER_BLOCK_META_KEY
+from ai4bi.report.user_report import build_report_from_block
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
 _BLOCKS_DIR = _DEMO_ROOT / "blocks"
@@ -161,7 +163,7 @@ def _apply_cross_filter_to_query(
 
 
 def _load_all_contracts() -> dict[str, DataBlockContract]:
-    """Load all block contracts from the demo blocks directory."""
+    """Load all block contracts from the demo blocks directory plus user-uploaded blocks."""
     loader = BlockLoader()
     contracts: dict[str, DataBlockContract] = {}
     if _BLOCKS_DIR.exists():
@@ -171,6 +173,9 @@ def _load_all_contracts() -> dict[str, DataBlockContract]:
                 contracts[contract.block_id] = contract
             except Exception:  # noqa: BLE001
                 pass
+    # Merge session-state user-uploaded blocks (Round 028)
+    user_blocks: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
+    contracts.update(user_blocks)
     return contracts
 
 
@@ -585,6 +590,8 @@ def _render_add_visual_panel(
 
 
 def _sync_widget_values(report: ExecutableReportSpec, *, force: bool = False) -> None:
+    if not all(k in report.controls for k in ("process_step", "product_family", "breakdown")):
+        return
     mappings = {
         "widget_process_step": report.controls["process_step"].value,
         "widget_product_family": report.controls["product_family"].value,
@@ -607,43 +614,56 @@ def _render_draft_controls(
     with st.sidebar:
         st.title("AI for BI")
 
+        # Back-to-demo button when viewing a user-uploaded report
+        _is_user_report = report.audit.report_id.startswith("upload_")
+        if _is_user_report:
+            if st.button("← 回到示範報表", key="back_to_demo"):
+                workspace.replace_with_loaded(build_semiconductor_queue_time_report())
+                cache.invalidate_all()
+                st.rerun()
+            st.markdown("---")
+
         # ── Zone 0: 想觀察的數字 (spec 8.1 primary entry) ────────────────
         _render_metric_first_entry(report, cache)
 
         st.markdown("---")
 
-        # ── Zone 1: 篩選條件 ─────────────────────────────────────────────
-        st.subheader("篩選條件")
-        steps = st.multiselect(
-            report.controls["process_step"].label,
-            report.controls["process_step"].options,
-            key="widget_process_step",
-            disabled=report.read_only,
+        # ── Zone 1: 篩選條件（僅限示範報表）────────────────────────────────
+        _has_demo_controls = all(
+            k in report.controls for k in ("process_step", "product_family", "breakdown")
         )
-        products = st.multiselect(
-            report.controls["product_family"].label,
-            report.controls["product_family"].options,
-            key="widget_product_family",
-            disabled=report.read_only,
-        )
-        breakdown = st.selectbox(
-            report.controls["breakdown"].label,
-            report.controls["breakdown"].options,
-            key="widget_breakdown",
-            disabled=report.read_only,
-        )
-        proposal = controls_to_proposal(
-            report,
-            steps=steps,
-            products=products,
-            breakdown=breakdown,
-        )
-        if proposal and not report.read_only:
-            if workspace.apply_immediately(proposal):
-                cache.invalidate_all()
-                st.rerun()
+        if _has_demo_controls:
+            st.subheader("篩選條件")
+            steps = st.multiselect(
+                report.controls["process_step"].label,
+                report.controls["process_step"].options,
+                key="widget_process_step",
+                disabled=report.read_only,
+            )
+            products = st.multiselect(
+                report.controls["product_family"].label,
+                report.controls["product_family"].options,
+                key="widget_product_family",
+                disabled=report.read_only,
+            )
+            breakdown = st.selectbox(
+                report.controls["breakdown"].label,
+                report.controls["breakdown"].options,
+                key="widget_breakdown",
+                disabled=report.read_only,
+            )
+            proposal = controls_to_proposal(
+                report,
+                steps=steps,
+                products=products,
+                breakdown=breakdown,
+            )
+            if proposal and not report.read_only:
+                if workspace.apply_immediately(proposal):
+                    cache.invalidate_all()
+                    st.rerun()
 
-        st.markdown("---")
+            st.markdown("---")
 
         # ── Zone 2: 對這張圖說話 ─────────────────────────────────────────
         _render_visual_assistant(report, cache)
@@ -709,6 +729,31 @@ def _render_draft_controls(
                 cache.invalidate_all()
                 st.rerun()
 
+        # ── Zone 3b: 上傳資料 (Round 028) ───────────────────────────────────
+        render_upload_panel()
+        _user_blocks: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
+        _user_meta: dict = st.session_state.get(_USER_BLOCK_META_KEY, {})
+        if _user_blocks:
+            with st.expander("📊 從上傳資料建立報表", expanded=False):
+                bid_choice = st.selectbox(
+                    "選擇已匯入的資料",
+                    list(_user_blocks.keys()),
+                    key="create_report_block_sel",
+                )
+                if st.button("建立新報表", key="create_report_from_upload", type="primary"):
+                    _meta = _user_meta.get(bid_choice, {})
+                    _contract = _user_blocks[bid_choice]
+                    _new_report = build_report_from_block(
+                        _contract,
+                        _meta.get("metric_names", []),
+                        _meta.get("dim_names", []),
+                    )
+                    workspace.replace_with_loaded(_new_report)
+                    cache.invalidate_all()
+                    st.rerun()
+
+        st.markdown("---")
+
         # ── Zone 4a: 手動新增圖表（進階） ──────────────────────────────────
         with st.expander("➕ 手動新增圖表", expanded=False):
             st.caption("自訂指標、維度與圖表類型（進階使用者）。")
@@ -739,7 +784,7 @@ def _render_draft_controls(
         _status = "AI 輔助中" if _is_llm else "規則模式"
         st.caption(f"{_dot} {_status}　|　草稿模式，尚未認證發布")
 
-    return report.merged_filters()
+    return report.merged_filters() if report.controls else {}
 
 
 def _proposal_rows(proposal: ReportProposal) -> list[dict[str, str]]:
@@ -893,8 +938,7 @@ def _render_metric_first_entry(report: ExecutableReportSpec, cache: QueryCache) 
     try:
         sm = json.loads(_SEMANTIC_MODEL.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
-        st.caption("無法載入指標清單")
-        return
+        sm = {"relationships": []}
 
     from ai4bi.report.catalog import build_catalog
     from ai4bi.report.builder import build_add_visual_proposal, build_visual_from_selection
@@ -904,6 +948,37 @@ def _render_metric_first_entry(report: ExecutableReportSpec, cache: QueryCache) 
         return
 
     existing_ids = set(report.pages.get("main", type("_", (), {"visuals": {}})()).visuals.keys())
+
+    # Show user-uploaded block metrics directly (not in semantic model catalog)
+    _user_contracts: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
+    _user_meta: dict = st.session_state.get(_USER_BLOCK_META_KEY, {})
+    for _ubid, _uc in _user_contracts.items():
+        if not _uc.metrics:
+            continue
+        st.caption(f"**{_ubid}** _(上傳資料)_")
+        for _m in _uc.metrics[:4]:
+            _col_info, _col_btn = st.columns([5, 1])
+            with _col_info:
+                st.caption(f"**{_m.name}** `[SUM]`")
+            with _col_btn:
+                _btn_key = f"metric_add_user_{_ubid}_{_m.name}"
+                if st.button("＋", key=_btn_key, help=f"加入 {_m.name}"):
+                    _kpi_id = f"kpi_{_m.name}"
+                    _c = 1
+                    while _kpi_id in existing_ids:
+                        _kpi_id = f"kpi_{_m.name}_{_c}"; _c += 1
+                    _kpi_q = VisualQuerySpec(
+                        _kpi_id,
+                        [BlockRef(_ubid)],
+                        metrics=[MetricRef(_ubid, _m.name, _m.name, AggFunction.sum)],
+                    )
+                    _kpi_v = VisualizationSpec(VisualType.kpi_card, title=f"Total {_m.name}")
+                    workspace.stage_proposal(build_add_visual_proposal("main", _kpi_id, _kpi_q, _kpi_v))
+                    workspace.accept_pending()
+                    existing_ids.add(_kpi_id)
+                    cache.invalidate_all()
+                    workspace.set_message(f"已加入「{_m.name}」KPI。")
+                    st.rerun()
 
     for block_catalog in catalog:
         for metric_entry in block_catalog.metrics[:4]:  # show top 4 per block
@@ -1299,7 +1374,12 @@ def main() -> None:
     _sync_widget_values(report, force=force_sync)
     cache = QueryCache(use_l1=False)
     store = DraftReportStore(_DRAFT_STORE)
-    executor = Executor(registry_root=_BLOCKS_DIR, semantic_model_path=_SEMANTIC_MODEL)
+    _user_blocks_exec: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
+    executor = Executor(
+        registry_root=_BLOCKS_DIR,
+        semantic_model_path=_SEMANTIC_MODEL,
+        extra_contracts=_user_blocks_exec or None,
+    )
 
     active_filters = _render_draft_controls(report, cache, store)
     report = workspace.current_report()

@@ -139,10 +139,12 @@ class Executor:
         loader: Optional[BlockLoader] = None,
         semantic_model_path: Optional[str | Path] = None,
         registry: Optional[BlockRegistryProtocol] = None,
+        extra_contracts: Optional[dict[str, "DataBlockContract"]] = None,
     ) -> None:
         self._registry_root = Path(registry_root) if registry_root else _DEFAULT_REGISTRY
         self._loader = loader or BlockLoader()
         self._registry = registry  # optional BlockRegistryProtocol for versioned resolution
+        self._extra_contracts: dict[str, DataBlockContract] = extra_contracts or {}
         inferred_model = self._registry_root.parent / "semantic_model.json"
         configured_model = Path(semantic_model_path) if semantic_model_path else inferred_model
         self._semantic_model = (
@@ -178,10 +180,11 @@ class Executor:
         """
         Resolve a BlockRef to a DataBlockContract.
 
-        If a BlockRegistryProtocol was supplied at construction time, it is
-        used (supporting pinned_version and version_snapshot).  Otherwise the
-        legacy filesystem-path convention is used via _resolve_block_path().
+        Checks extra_contracts (user-uploaded blocks) first, then the
+        BlockRegistryProtocol (if configured), then the filesystem.
         """
+        if ref.block_id in self._extra_contracts:
+            return self._extra_contracts[ref.block_id]
         if self._registry is not None:
             return self._registry.resolve(
                 ref.block_id,

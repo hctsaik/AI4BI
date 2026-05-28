@@ -389,8 +389,10 @@ class ExecutableReportSpec:
     def revision(self, value: int) -> None:
         self.audit.revision = value
 
+    _VALID_STATUSES = {"validated_demo_draft", "user_draft"}
+
     def validate(self) -> None:
-        if self.status != "validated_demo_draft":
+        if self.status not in self._VALID_STATUSES:
             raise ReportValidationError("Only validated demo drafts are supported in this MVP.")
         if not self.pages:
             raise ReportValidationError("A report must contain at least one page.")
