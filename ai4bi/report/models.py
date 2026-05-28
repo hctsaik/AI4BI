@@ -269,12 +269,14 @@ class ReportVisualSpec:
     component_id: str
     query: VisualQuerySpec
     visualization: VisualizationSpec
+    col_span: int = 12  # Round 030: 12-column grid (3=25%, 4=33%, 6=50%, 12=100%)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "component_id": self.component_id,
             "query": query_to_dict(self.query),
             "visualization": visualization_to_dict(self.visualization),
+            "col_span": self.col_span,
         }
 
     @classmethod
@@ -283,6 +285,7 @@ class ReportVisualSpec:
             component_id=payload["component_id"],
             query=query_from_dict(payload["query"]),
             visualization=visualization_from_dict(payload["visualization"]),
+            col_span=int(payload.get("col_span", 12)),
         )
 
 
@@ -528,6 +531,8 @@ def _get_path(report: ExecutableReportSpec, path: str) -> Any:
         visual = report.pages[parts[1]].visuals[parts[3]]
         if parts[4:6] == ["visualization", "extra"] and parts[6] in _ALLOWLISTED_VISUAL_EXTRA_KEYS:
             return visual.visualization.extra.get(parts[6])
+    if len(parts) == 5 and parts[0] == "pages" and parts[2] == "visuals" and parts[4] == "col_span":
+        return report.pages[parts[1]].visuals[parts[3]].col_span
     if len(parts) == 6 and parts[0] == "pages" and parts[2] == "visuals":
         visual = report.pages[parts[1]].visuals[parts[3]]
         if parts[4:] == ["visualization", "title"]:
@@ -619,6 +624,9 @@ def _set_path(report: ExecutableReportSpec, path: str, value: Any) -> None:
         if parts[4:6] == ["visualization", "extra"] and parts[6] in _ALLOWLISTED_VISUAL_EXTRA_KEYS:
             visual.visualization.extra[parts[6]] = value
             return
+    if len(parts) == 5 and parts[0] == "pages" and parts[2] == "visuals" and parts[4] == "col_span":
+        report.pages[parts[1]].visuals[parts[3]].col_span = int(value)
+        return
     if len(parts) == 6 and parts[0] == "pages" and parts[2] == "visuals":
         visual = report.pages[parts[1]].visuals[parts[3]]
         if parts[4:] == ["visualization", "title"]:

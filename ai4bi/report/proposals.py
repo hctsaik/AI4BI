@@ -85,6 +85,33 @@ def controls_to_proposal(
     return ReportProposal("Manual report control update", changes)
 
 
+def build_resize_visual_proposal(
+    page_id: str,
+    visual_id: str,
+    new_col_span: int,
+    current_col_span: int,
+) -> ReportProposal:
+    """Create a proposal that changes a visual's col_span (grid width). Round 030."""
+    _VALID_SPANS = {3, 4, 6, 12}
+    if new_col_span not in _VALID_SPANS:
+        raise ReportValidationError(
+            f"col_span must be one of {sorted(_VALID_SPANS)}, got {new_col_span}."
+        )
+    _LABEL = {12: "100%", 6: "50%", 4: "33%", 3: "25%"}
+    change = ReportChange(
+        path=f"pages/{page_id}/visuals/{visual_id}/col_span",
+        label=f"Visual width → {_LABEL.get(new_col_span, str(new_col_span))}",
+        before=current_col_span,
+        after=new_col_span,
+        affects_data=False,
+    )
+    return ReportProposal(
+        description=f"Resize '{visual_id}' to {_LABEL.get(new_col_span, str(new_col_span))}",
+        changes=[change],
+        target_component_id=visual_id,
+    )
+
+
 def build_title_proposal(
     current_title: str,
     new_title: str,

@@ -24,7 +24,7 @@ from ai4bi.report.models import (
     ReportProposal,
 )
 from ai4bi.blocks.registry import FilesystemBlockRegistry, BlockNotFoundError, NoCertifiedVersionError
-from ai4bi.report.proposals import build_page_delete_proposal, build_title_proposal, controls_to_proposal, pin_block_version_proposal, prompt_to_proposal, unpin_block_version_proposal
+from ai4bi.report.proposals import build_page_delete_proposal, build_resize_visual_proposal, build_title_proposal, controls_to_proposal, pin_block_version_proposal, prompt_to_proposal, unpin_block_version_proposal
 from ai4bi.report.publication import GateCheckResult, run_publication_gate
 from ai4bi.report.templates import build_semiconductor_queue_time_report
 from ai4bi.query_spec import AggFunction, BlockRef, FilterOperator, FilterSpec, MetricRef, VisualizationSpec, VisualQuerySpec, VisualType
@@ -1182,51 +1182,137 @@ def _render_visual_assistant(report: ExecutableReportSpec, cache: QueryCache) ->
                     st.rerun()
 
 
-def _render_reorder_buttons(
+_SPAN_LABELS: dict[int, str] = {12: "100%", 6: "50%", 4: "33%", 3: "25%"}
+_SPAN_OPTIONS: list[int] = [12, 6, 4, 3]
+
+
+def _pack_grid_rows(
+    visual_order: list[str],
+    visuals: dict,
+) -> list[list[str]]:
+    """Pack visuals into grid rows of 12 columns total.
+
+    Adjacent KPI cards with default col_span=12 are automatically paired
+    into col_span=6 rows so they render side-by-side (legacy behaviour).
+    """
+    # Auto-pair adjacent KPI cards that haven't been manually resized
+    order = list(visual_order)
+    effective_spans: dict[str, int] = {}
+    i = 0
+    while i < len(order):
+        vid = order[i]
+        visual = visuals[vid]
+        span = visual.col_span
+        # Auto-pair: two adjacent full-width KPI cards → render as 6+6
+        if (
+            span == 12
+            and visual.visualization.visual_type == VisualType.kpi_card
+            and i + 1 < len(order)
+            and visuals[order[i + 1]].visualization.visual_type == VisualType.kpi_card
+            and visuals[order[i + 1]].col_span == 12
+        ):
+            effective_spans[vid] = 6
+            effective_spans[order[i + 1]] = 6
+            i += 2
+        else:
+            effective_spans[vid] = span
+            i += 1
+
+    rows: list[list[str]] = []
+    current_row: list[str] = []
+    current_total = 0
+    for vid in order:
+        span = effective_spans[vid]
+        if current_total + span > 12 and current_row:
+            rows.append(current_row)
+            current_row = [vid]
+            current_total = span
+        else:
+            current_row.append(vid)
+            current_total += span
+    if current_row:
+        rows.append(current_row)
+    return rows, effective_spans
+
+
+def _render_visual_cell(
     report: ExecutableReportSpec,
     page_id: str,
-    visual_id: str,
+    component_id: str,
     idx: int,
     order_len: int,
+    contracts: dict,
+    cache: QueryCache,
+    executor: "Executor",
+    active_filters: dict,
 ) -> None:
-    """Render inline up/down arrow buttons for reordering a visual."""
-    if report.read_only:
-        return
-    btn_cols = st.columns([1, 1, 10])
-    with btn_cols[0]:
-        if st.button(
-            "↑",
-            key=f"reorder_up_{visual_id}",
-            disabled=(idx == 0),
-            help="Move visual up",
-        ):
-            current_order = list(report.pages[page_id].visual_order)
-            proposal = build_reorder_visual_proposal(
-                page_id=page_id,
-                visual_id=visual_id,
-                direction="up",
-                current_order=current_order,
+    """Render one visual cell (header + chart + explanation)."""
+    page = report.pages[page_id]
+    visual = page.visuals[component_id]
+    title = visual.visualization.title or component_id
+    is_sandbox = _is_sandbox_visual(visual, contracts)
+
+    # Header row: title | ↑ | ↓ | width selector
+    if not report.read_only:
+        h_cols = st.columns([5, 1, 1, 3])
+    else:
+        h_cols = st.columns([8, 1, 1])
+
+    with h_cols[0]:
+        if is_sandbox:
+            st.markdown(f"**{title}** &nbsp; {_SANDBOX_BADGE_HTML}", unsafe_allow_html=True)
+        else:
+            st.markdown(f"**{title}**")
+
+    if not report.read_only:
+        with h_cols[1]:
+            if st.button("↑", key=f"up_{page_id}_{component_id}", disabled=(idx == 0), help="上移"):
+                workspace.stage_proposal(build_reorder_visual_proposal(
+                    page_id, component_id, "up", list(page.visual_order)
+                ))
+                st.rerun()
+        with h_cols[2]:
+            if st.button("↓", key=f"dn_{page_id}_{component_id}", disabled=(idx == order_len - 1), help="下移"):
+                workspace.stage_proposal(build_reorder_visual_proposal(
+                    page_id, component_id, "down", list(page.visual_order)
+                ))
+                st.rerun()
+        with h_cols[3]:
+            current_span = visual.col_span
+            new_label = st.selectbox(
+                "寬度",
+                options=list(_SPAN_LABELS.values()),
+                index=list(_SPAN_OPTIONS).index(current_span) if current_span in _SPAN_OPTIONS else 0,
+                key=f"span_sel_{page_id}_{component_id}",
+                label_visibility="collapsed",
             )
-            workspace.stage_proposal(proposal)
-            workspace.set_message(f"Staged: move '{visual_id}' up.")
-            st.rerun()
-    with btn_cols[1]:
-        if st.button(
-            "↓",
-            key=f"reorder_down_{visual_id}",
-            disabled=(idx == order_len - 1),
-            help="Move visual down",
-        ):
-            current_order = list(report.pages[page_id].visual_order)
-            proposal = build_reorder_visual_proposal(
-                page_id=page_id,
-                visual_id=visual_id,
-                direction="down",
-                current_order=current_order,
-            )
-            workspace.stage_proposal(proposal)
-            workspace.set_message(f"Staged: move '{visual_id}' down.")
-            st.rerun()
+            new_span = _SPAN_OPTIONS[list(_SPAN_LABELS.values()).index(new_label)]
+            if new_span != current_span:
+                workspace.stage_proposal(
+                    build_resize_visual_proposal(page_id, component_id, new_span, current_span)
+                )
+                workspace.accept_pending()
+                cache.invalidate_all()
+                st.rerun()
+    else:
+        with h_cols[1]:
+            if st.button("↑", key=f"up_{page_id}_{component_id}", disabled=(idx == 0), help="上移"):
+                workspace.stage_proposal(build_reorder_visual_proposal(
+                    page_id, component_id, "up", list(page.visual_order)
+                ))
+                st.rerun()
+        with h_cols[2]:
+            if st.button("↓", key=f"dn_{page_id}_{component_id}", disabled=(idx == order_len - 1), help="下移"):
+                workspace.stage_proposal(build_reorder_visual_proposal(
+                    page_id, component_id, "down", list(page.visual_order)
+                ))
+                st.rerun()
+
+    st.session_state["_current_render_page_id"] = page_id
+    query = replace(visual.query, data_version=f"draft-r{report.revision}")
+    query = _apply_cross_filter_to_query(query, _active_cross_filter_for_page(page_id), component_id)
+    render_visual(query, visual.visualization, cache, executor, active_filters)
+    _render_explanation_panel(component_id, visual)
 
 
 def _render_page(
@@ -1236,90 +1322,33 @@ def _render_page(
     executor: Executor,
     active_filters: dict[str, object],
 ) -> None:
-    """Render all visuals for a single page."""
+    """Render all visuals for a single page using a 12-column grid layout."""
     page = report.pages[page_id]
     visuals = page.visuals
     contracts = _load_all_contracts()
-
-    def render(component_id: str, idx: int, order_len: int) -> None:
-        visual = visuals[component_id]
-        title = visual.visualization.title or component_id
-        is_sandbox = _is_sandbox_visual(visual, contracts)
-
-        header_cols = st.columns([8, 1, 1])
-        with header_cols[0]:
-            if is_sandbox:
-                st.markdown(
-                    f"**{title}** &nbsp; {_SANDBOX_BADGE_HTML}",
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(f"**{title}**")
-        if not report.read_only:
-            with header_cols[1]:
-                if st.button(
-                    "↑",
-                    key=f"reorder_up_{page_id}_{component_id}",
-                    disabled=(idx == 0),
-                    help="Move visual up",
-                ):
-                    current_order = list(report.pages[page_id].visual_order)
-                    proposal = build_reorder_visual_proposal(
-                        page_id=page_id,
-                        visual_id=component_id,
-                        direction="up",
-                        current_order=current_order,
-                    )
-                    workspace.stage_proposal(proposal)
-                    workspace.set_message(f"Staged: move '{component_id}' up.")
-                    st.rerun()
-            with header_cols[2]:
-                if st.button(
-                    "↓",
-                    key=f"reorder_down_{page_id}_{component_id}",
-                    disabled=(idx == order_len - 1),
-                    help="Move visual down",
-                ):
-                    current_order = list(report.pages[page_id].visual_order)
-                    proposal = build_reorder_visual_proposal(
-                        page_id=page_id,
-                        visual_id=component_id,
-                        direction="down",
-                        current_order=current_order,
-                    )
-                    workspace.stage_proposal(proposal)
-                    workspace.set_message(f"Staged: move '{component_id}' down.")
-                    st.rerun()
-        st.session_state["_current_render_page_id"] = page_id
-        query = replace(visual.query, data_version=f"draft-r{report.revision}")
-        query = _apply_cross_filter_to_query(
-            query,
-            _active_cross_filter_for_page(page_id),
-            component_id,
-        )
-        render_visual(query, visual.visualization, cache, executor, active_filters)
-        _render_explanation_panel(component_id, visual)
-
-    # Render visuals in visual_order, pairing adjacent kpi_cards into two columns.
     order = page.visual_order
-    i = 0
-    while i < len(order):
-        vid = order[i]
-        visual = visuals[vid]
-        from ai4bi.query_spec import VisualType as _VT
-        if visual.visualization.visual_type == _VT.kpi_card and i + 1 < len(order):
-            next_vid = order[i + 1]
-            next_visual = visuals[next_vid]
-            if next_visual.visualization.visual_type == _VT.kpi_card:
-                cols = st.columns(2)
-                with cols[0]:
-                    render(vid, i, len(order))
-                with cols[1]:
-                    render(next_vid, i + 1, len(order))
-                i += 2
-                continue
-        render(vid, i, len(order))
-        i += 1
+    order_len = len(order)
+
+    rows, effective_spans = _pack_grid_rows(order, visuals)
+
+    for row in rows:
+        if len(row) == 1:
+            vid = row[0]
+            idx = order.index(vid)
+            _render_visual_cell(
+                report, page_id, vid, idx, order_len,
+                contracts, cache, executor, active_filters,
+            )
+        else:
+            spans = [effective_spans[vid] for vid in row]
+            cols = st.columns(spans)
+            for col, vid in zip(cols, row):
+                idx = order.index(vid)
+                with col:
+                    _render_visual_cell(
+                        report, page_id, vid, idx, order_len,
+                        contracts, cache, executor, active_filters,
+                    )
 
 
 def _render_canvas(

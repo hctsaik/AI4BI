@@ -17,12 +17,8 @@ def _new_app() -> AppTest:
 
 
 def _visual_selectbox(app: AppTest):
-    """Return the '① 選擇圖表' selectbox (the visual selector, not a slicer)."""
-    for sb in app.selectbox:
-        if sb.value in app.session_state.get("report_spec", type("_", (), {"pages": {}})()).pages.get("main", type("_", (), {"visuals": {}})()).visuals if False else True:
-            pass
-    # selectbox[0] = Breakdown (slicer), selectbox[1] = visual selector
-    return app.selectbox[1]
+    """Return the '① 選擇圖表' selectbox, looked up by its stable widget key."""
+    return next(sb for sb in app.selectbox if sb.key == "selected_component_id")
 
 
 def test_style_prompt_previews_applies_and_undoes_without_changing_metrics():
