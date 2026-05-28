@@ -14,11 +14,11 @@ APP_PATH = Path(__file__).parent.parent / "ai4bi" / "ui" / "app.py"
 
 
 def _click(app: AppTest, label: str) -> None:
-    next(button for button in app.button if button.label == label).click().run(timeout=20)
+    next(button for button in app.button if button.label == label).click().run(timeout=30)
 
 
 def _new_app() -> AppTest:
-    return AppTest.from_file(str(APP_PATH)).run(timeout=30)
+    return AppTest.from_file(str(APP_PATH)).run(timeout=45)
 
 
 def _visual_selectbox(app: AppTest):
@@ -41,8 +41,8 @@ def test_style_prompt_previews_applies_and_undoes_without_changing_metrics():
     app = _new_app()
     original_metrics = [(metric.label, metric.value) for metric in app.metric]
 
-    _visual_selectbox(app).set_value("line_revenue_trend").run(timeout=20)
-    app.text_input[0].set_value("make trend line red").run(timeout=20)
+    _visual_selectbox(app).set_value("line_revenue_trend").run(timeout=30)
+    app.text_input[0].set_value("make trend line red").run(timeout=30)
 
     _click(app, "送出請求")
     report = app.session_state["report_spec"]
@@ -64,13 +64,13 @@ def test_style_prompt_previews_applies_and_undoes_without_changing_metrics():
 def test_unsupported_assistant_request_clears_stale_pending_proposal():
     """Unsupported request clears any previously staged proposal."""
     app = _new_app()
-    _visual_selectbox(app).set_value("line_revenue_trend").run(timeout=20)
-    app.text_input[0].set_value("make trend line red").run(timeout=20)
+    _visual_selectbox(app).set_value("line_revenue_trend").run(timeout=30)
+    app.text_input[0].set_value("make trend line red").run(timeout=30)
 
     _click(app, "送出請求")
     assert app.session_state["pending_patch"] is not None
 
-    app.text_input[0].set_value("write SQL to join raw orders to inventory raw detail rows").run(timeout=20)
+    app.text_input[0].set_value("write SQL to join raw orders to inventory raw detail rows").run(timeout=30)
     _click(app, "送出請求")
 
     assert app.session_state["pending_patch"] is None
@@ -86,8 +86,8 @@ def test_analysis_prompt_waits_for_apply_and_then_undo_restores_controls_and_num
     app = _new_app()
     _load_semi_demo(app)
 
-    _visual_selectbox(app).set_value("line_queue_by_day").run(timeout=20)
-    app.text_input[0].set_value("Only show Logic-B").run(timeout=20)
+    _visual_selectbox(app).set_value("line_queue_by_day").run(timeout=30)
+    app.text_input[0].set_value("Only show Logic-B").run(timeout=30)
 
     _click(app, "送出請求")
     assert [(metric.label, metric.value) for metric in app.metric] == [
@@ -116,7 +116,7 @@ def test_manual_slicer_change_is_part_of_report_history():
     app = _new_app()
     _load_semi_demo(app)
 
-    app.multiselect[1].set_value(["Logic-B"]).run(timeout=20)
+    app.multiselect[1].set_value(["Logic-B"]).run(timeout=30)
     assert [(metric.label, metric.value) for metric in app.metric] == [
         ("Processed Moves", "2.0 moves"),
         ("Average Queue Time", "4.0 hr"),

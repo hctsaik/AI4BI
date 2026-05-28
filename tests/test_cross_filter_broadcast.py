@@ -46,7 +46,28 @@ def test_apply_cross_filter_skips_source_visual():
     assert updated is query
 
 
-def test_apply_cross_filter_skips_incompatible_visual():
+def test_apply_cross_filter_semantic_match_on_primary_block():
+    """Round 044: Cross-filter now uses semantic matching.
+
+    If the cross-filter column (tool_id) exists in the target visual's primary
+    block (process_move_fact, which is denormalized and has tool_id), the filter
+    IS applied — the KPI responds to the bar chart click.
+    """
+    from ai4bi.blocks.loader import BlockLoader
+    from pathlib import Path
+
+    # Load the semiconductor contracts so semantic matching has schema info
+    blocks_dir = Path(__file__).parent.parent / "data" / "semiconductor_demo" / "blocks"
+    loader = BlockLoader()
+    contracts = {}
+    if blocks_dir.exists():
+        for path in blocks_dir.glob("*.json"):
+            try:
+                c = loader.load_json(str(path))
+                contracts[c.block_id] = c
+            except Exception:
+                pass
+
     report = build_semiconductor_queue_time_report()
     query = report.pages["main"].visuals["kpi_move_count"].query
     payload = {
@@ -56,9 +77,13 @@ def test_apply_cross_filter_skips_incompatible_visual():
         "value": "ETCH-01",
     }
 
-    updated = _apply_cross_filter_to_query(query, payload, "kpi_move_count")
+    updated = _apply_cross_filter_to_query(query, payload, "kpi_move_count", contracts=contracts)
 
-    assert updated is query
+    # Round 044: filter IS applied because process_move_fact has tool_id column
+    assert updated is not query
+    injected = updated.filters[-1]
+    assert injected.column_name == "tool_id"
+    assert injected.value == ["ETCH-01"]
 
 
 def test_apply_cross_filter_appends_filter_for_compatible_target():

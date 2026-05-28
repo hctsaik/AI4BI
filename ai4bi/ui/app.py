@@ -42,6 +42,8 @@ from ai4bi.report.retail_template import build_retail_demo_report, build_retail_
 from ai4bi.ui.data_model import render_join_builder, render_data_model_view, get_user_semantic_model
 from ai4bi.ui.workspace_manager import render_workspace_panel  # Round 039
 from ai4bi.ui.audit_trail import render_audit_trail, record_change  # Round 040
+from ai4bi.ui.report_slicer import render_report_slicer, get_slicer_filters, SlicerDefinition  # Round 041
+from ai4bi.ui.connector_panel import render_connector_panel  # Round 043
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
 _BLOCKS_DIR = _DEMO_ROOT / "blocks"
@@ -130,8 +132,16 @@ def _apply_cross_filter_to_query(
     query: VisualQuerySpec,
     cross_filter: dict | None,
     target_component_id: str,
+    contracts: "dict | None" = None,
 ) -> VisualQuerySpec:
-    """Inject a page-scoped cross-filter into compatible target visuals."""
+    """Inject a page-scoped cross-filter into compatible target visuals.
+
+    Round 044: Enhanced cross-filter matching —
+    1. Exact: source block is in target visual's block_refs (original behaviour)
+    2. Semantic: source column name exists in the target visual's primary block
+       (enables cross-table filtering when both tables share the same column name,
+       e.g. store_name in sales_fact AND store_name in nps_fact)
+    """
     if not cross_filter:
         return query
     if cross_filter.get("source_spec_id") == target_component_id:
@@ -142,28 +152,45 @@ def _apply_cross_filter_to_query(
     value = cross_filter.get("value")
     if not block_id or not column_name or value is None:
         return query
-    if block_id not in query.all_block_ids:
-        return query
 
     values = value if isinstance(value, list) else [value]
+    target_all_block_ids = query.all_block_ids
+
+    # Exact match: source block is referenced by target visual
+    effective_block = block_id if block_id in target_all_block_ids else None
+
+    # Round 044: Semantic match — find the same column name in target's primary block
+    if effective_block is None:
+        # Use passed contracts or fall back to session_state cache
+        _eff_contracts = contracts or st.session_state.get("_cached_all_contracts") or {}
+        primary_id = query.primary_block_id
+        primary_contract = _eff_contracts.get(primary_id)
+        if primary_contract is not None:
+            primary_col_names = {c.name for c in primary_contract.columns}
+            if column_name in primary_col_names:
+                effective_block = primary_id
+
+    if effective_block is None:
+        return query
+
     filters = [
         filter_spec
         for filter_spec in query.filters
         if not (
-            filter_spec.block_id == block_id
+            filter_spec.block_id == effective_block
             and filter_spec.column_name == column_name
         )
     ]
     filters.append(
         FilterSpec(
-            block_id=block_id,
+            block_id=effective_block,
             column_name=column_name,
             operator=FilterOperator.in_,
             value=values,
             inherit_global_filter=False,
         )
     )
-    version_token = f"{query.data_version}:xf:{block_id}.{column_name}:{values}"
+    version_token = f"{query.data_version}:xf:{effective_block}.{column_name}:{values}"
     return replace(query, filters=filters, data_version=version_token)
 
 
@@ -730,11 +757,12 @@ def _render_draft_controls(
 
         st.markdown("---")
 
-        # ── Zone 1: 篩選條件（僅限示範報表）────────────────────────────────
+        # ── Zone 1: 篩選條件 ────────────────────────────────────────────────
         _has_demo_controls = all(
             k in report.controls for k in ("process_step", "product_family", "breakdown")
         )
         if _has_demo_controls:
+            # Semiconductor demo: use existing report controls
             st.subheader("篩選條件")
             steps = st.multiselect(
                 report.controls["process_step"].label,
@@ -764,8 +792,12 @@ def _render_draft_controls(
                 if workspace.apply_immediately(proposal):
                     cache.invalidate_all()
                     st.rerun()
+        else:
+            # Round 041: Universal slicer for user data / retail demo
+            _active_slicers = render_report_slicer(_load_all_contracts(), cache)
+            st.session_state["_active_slicers"] = _active_slicers
 
-            st.markdown("---")
+        st.markdown("---")
 
         # ── Zone 2: 對這張圖說話 ─────────────────────────────────────────
         _render_visual_assistant(report, cache)
@@ -825,6 +857,8 @@ def _render_draft_controls(
 
         # ── Zone 3b: 上傳資料 (Round 028) ───────────────────────────────────
         render_upload_panel()
+        # ── Zone 3b2: 外部資料庫連接器 (Round 043) ──────────────────────────
+        render_connector_panel()
         _user_blocks: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
         _user_meta: dict = st.session_state.get(_USER_BLOCK_META_KEY, {})
         if _user_blocks:
@@ -1432,7 +1466,16 @@ def _render_visual_cell(
 
     st.session_state["_current_render_page_id"] = page_id
     query = replace(visual.query, data_version=f"draft-r{report.revision}")
-    query = _apply_cross_filter_to_query(query, _active_cross_filter_for_page(page_id), component_id)
+    query = _apply_cross_filter_to_query(query, _active_cross_filter_for_page(page_id), component_id, contracts)
+    # Round 041: inject report-level slicer filters
+    _slicers = st.session_state.get("_active_slicers", [])
+    if _slicers:
+        _slicer_filters = get_slicer_filters(_slicers)
+        # Only inject filters for columns that exist in this visual's block refs
+        _visual_blocks = {ref.block_id for ref in query.block_refs}
+        _applicable = [f for f in _slicer_filters if f.block_id in _visual_blocks]
+        if _applicable:
+            query = replace(query, filters=list(query.filters) + _applicable)
     render_visual(query, visual.visualization, cache, executor, active_filters)
     # Round 032: show human-readable data source summary below visual
     _meta = get_metadata(component_id)
@@ -1453,6 +1496,8 @@ def _render_page(
     page = report.pages[page_id]
     visuals = page.visuals
     contracts = _load_all_contracts()
+    # Cache contracts for _apply_cross_filter_to_query semantic matching
+    st.session_state["_cached_all_contracts"] = contracts
     order = page.visual_order
     order_len = len(order)
 

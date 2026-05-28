@@ -46,6 +46,7 @@ from ai4bi.report.models import (
 )
 
 _BLOCK_ID = "retail_sales"
+_CACHED_BLOCK: "DataBlockContract | None" = None  # module-level cache — generated once per process
 
 
 # ---------------------------------------------------------------------------
@@ -102,9 +103,16 @@ def _generate_records() -> list[dict]:
 
 
 def build_retail_sales_block() -> DataBlockContract:
-    """Return the retail_sales DataBlockContract with inline demo records."""
+    """Return the retail_sales DataBlockContract with inline demo records.
+
+    Result is module-level cached so the 500-row generation only happens once
+    per Python process, avoiding AppTest timeout issues.
+    """
+    global _CACHED_BLOCK
+    if _CACHED_BLOCK is not None:
+        return _CACHED_BLOCK
     records = _generate_records()
-    return DataBlockContract(
+    block = DataBlockContract(
         block_id=_BLOCK_ID,
         block_type=BlockType.fact,
         grain="one row per product sold per store per day",
@@ -156,6 +164,8 @@ def build_retail_sales_block() -> DataBlockContract:
         data_source=InlineDataSource(records=records),
         policy=PolicySpec(data_classification=DataClassification.internal),
     )
+    _CACHED_BLOCK = block
+    return block
 
 
 # ---------------------------------------------------------------------------
