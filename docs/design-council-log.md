@@ -2825,3 +2825,61 @@ Round 018 candidates:
 > 2. `dimension_change` — 「改用月份分組」，affects_data=True，改 query/dimensions（僅允許 semantic model 已認證維度）
 > 3. `add_metric` — 「也加上 move_count 指標」，affects_data=True，必須先驗證指標在 semantic model 中且 owner block 已認證
 > 每個 intent 必須同時測試「non-certified 被拒」case（governance 防護）。
+
+---
+
+### Round 019 — NL2Proposal Enhancement: 3 New Governed Intents
+
+| 欄位 | 記錄 |
+| --- | --- |
+| Status | `completed` |
+| Date | `2026-05-28` |
+| Goal | 依 AI Safety Agent 安全邊界設計，新增 chart_type_change / dimension_change / add_metric 三個受治理 NL2 intent |
+| Agent perspectives | Architecture Agent (planning) + NL2 Safety Review Agent (governance boundaries) |
+| Input | design-council-log.md 005-B Mock LLM Parser，NL2 safety review agent output |
+
+#### 019-A. 三個新 Intent
+
+**`chart_type_change`（bar ↔ line only，affects_data=False）**：
+- 允許：bar ↔ line 互換（相同 query contract）
+- 封鎖：table/kpi_card（不同 query contract；kpi_card 無 dimension，table 暴露 row-level data）
+- path：`pages/{page_id}/visuals/{visual_id}/visualization/visual_type`
+- 在 style_change 之前優先偵測（避免 "line"/"bar" 觸發顏色意圖）
+
+**`dimension_change`（日期粒度，affects_data=True）**：
+- 支援：月份/週/日/季/年 + 英文對應
+- block_id 從 visual.query.metrics[0].block_id 推導（確保同 block）
+- 找現有 dimensions 中的時間欄位，修改其 truncate_date_to
+- 需確認 proposal → apply_report_proposal 完整 roundtrip
+
+**`add_metric`（semantic model 雙重驗證，affects_data=True）**：
+- 必須在 semantic_model["metrics"] 中存在 → 否則 GovernanceRefusal (risk=high)
+- owner_block 必須已在 visual.query.block_refs → 否則 GovernanceRefusal (risk=high)
+- 最多 3 個 metric per visual（設計共識 003-E）
+- 不可新增重複 metric
+
+#### 019-B. 模型層新增路徑
+
+`models.py _get_path / _set_path` 新增：
+- `pages/{page_id}/visuals/{visual_id}/visualization/visual_type`
+- `pages/{page_id}/visuals/{visual_id}/query/metrics`
+
+#### 019-C. Bug Fix
+
+`_store_visual_assistant_context` 改用 `getattr` defensive access 防止 Streamlit hot-reload
+module cache 導致的 `'ProposalResult' object has no attribute 'analysis_plan'` 錯誤。
+
+#### 019-D. 驗收測試
+
+- **Unit tests** (`tests/test_nl2_round019.py`)：28 tests — 所有 intent happy path + governance refusal + affects_data assertion + model path roundtrip
+- **Playwright E2E** (`tests/e2e/test_round019_nl2_intents.py`)：10 tests — no-crash guarantee + SQL refusal + proposal workflow
+
+| 指標 | 結果 |
+| Unit tests | 357 passed (28 new) |
+| Playwright E2E | 10 passed |
+
+#### Next Round Candidates
+
+1. **R2 Data Block View** — 獨立頁面或 tab 顯示 BlockRegistry 中所有 block 的 lifecycle/schema/metrics/relationships
+2. **Breaking Change Detection** — `validate_upgrade()` 函數偵測 DataBlockContract 版本升級的 breaking vs non-breaking change
+3. **Date Filter Intent** — NL2 第四個 intent：「只看最近 3 個月」→ 自動計算 from/to date 並加入 FilterSpec

@@ -27,8 +27,9 @@ python -m pytest tests/ -q             # run full test suite
 | **Round 016** | ✅ Done | `global_filters`/`merged_filters()`, `build_global_filter_proposal`, title editing proposal, `created_at` first-save fix, `display_name`/`add_page()`, multi-page `st.tabs()` canvas | +34 |
 | **Round 017** | ✅ Done | `cross_filter_emit`, page-scoped `cross_filters`, page delete proposal, published snapshot browser/load, published readonly URL fix | +15 |
 | **Round 018** | ✅ Done | `MetricCatalogService` (3-zone: certified_ready/needs_blocks/sandbox), Metric Catalog sidebar panel, sandbox amber banner, per-visual 🔬 badge, Playwright E2E test suite | +25 (14 unit + 11 E2E) |
+| **Round 019** | ✅ Done | NL2 intent: `chart_type_change` (bar↔line), `dimension_change` (月份/週/日), `add_metric` (owner_block certified check, max 3); new `visualization/visual_type` + `query/metrics` paths; `_store_visual_assistant_context` hot-reload fix | +38 (28 unit + 10 E2E) |
 
-**Total tests: 329 passing + 11 E2E** (updated each round)
+**Total tests: 357 unit + 21 E2E passing** (updated each round)
 
 ## Architecture
 

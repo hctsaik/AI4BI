@@ -686,8 +686,9 @@ def _clear_visual_assistant_context() -> None:
 
 
 def _store_visual_assistant_context(result) -> None:
-    st.session_state[_ASSISTANT_PLAN_KEY] = result.analysis_plan
-    st.session_state[_ASSISTANT_TRUST_KEY] = tuple(result.trust_notes)
+    # Use getattr for robustness against Streamlit hot-reload module cache mismatches.
+    st.session_state[_ASSISTANT_PLAN_KEY] = getattr(result, "analysis_plan", None)
+    st.session_state[_ASSISTANT_TRUST_KEY] = tuple(getattr(result, "trust_notes", ()))
 
 
 def _render_visual_assistant_context() -> None:

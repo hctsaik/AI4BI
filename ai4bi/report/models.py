@@ -503,6 +503,9 @@ class ReportProposal:
         return any(change.affects_data for change in self.changes)
 
 
+_ALLOWLISTED_VISUAL_EXTRA_KEYS = {"line_color", "bar_color"}
+
+
 def _get_path(report: ExecutableReportSpec, path: str) -> Any:
     parts = path.split("/")
     if len(parts) == 2 and parts[0] == "global_filters":
@@ -521,12 +524,14 @@ def _get_path(report: ExecutableReportSpec, path: str) -> Any:
         return report.pages[parts[1]].display_name
     if len(parts) == 7 and parts[0] == "pages" and parts[2] == "visuals":
         visual = report.pages[parts[1]].visuals[parts[3]]
-        if parts[4:] == ["visualization", "extra", "line_color"]:
-            return visual.visualization.extra.get("line_color")
+        if parts[4:6] == ["visualization", "extra"] and parts[6] in _ALLOWLISTED_VISUAL_EXTRA_KEYS:
+            return visual.visualization.extra.get(parts[6])
     if len(parts) == 6 and parts[0] == "pages" and parts[2] == "visuals":
         visual = report.pages[parts[1]].visuals[parts[3]]
         if parts[4:] == ["visualization", "title"]:
             return visual.visualization.title
+        if parts[4:] == ["visualization", "visual_type"]:
+            return visual.visualization.visual_type.value
         if parts[4:] == ["query", "dimensions"]:
             return [
                 {
@@ -536,6 +541,16 @@ def _get_path(report: ExecutableReportSpec, path: str) -> Any:
                     "truncate_date_to": dimension.truncate_date_to,
                 }
                 for dimension in visual.query.dimensions
+            ]
+        if parts[4:] == ["query", "metrics"]:
+            return [
+                {
+                    "block_id": metric.block_id,
+                    "metric_name": metric.metric_name,
+                    "alias": metric.alias,
+                    "agg_override": metric.agg_override.value if metric.agg_override else None,
+                }
+                for metric in visual.query.metrics
             ]
     if len(parts) == 8 and parts[0] == "pages" and parts[2] == "visuals" and parts[4] == "query" and parts[5] == "block_refs" and parts[7] == "pinned_version":
         visual = report.pages[parts[1]].visuals[parts[3]]
@@ -588,13 +603,16 @@ def _set_path(report: ExecutableReportSpec, path: str, value: Any) -> None:
         return
     if len(parts) == 7 and parts[0] == "pages" and parts[2] == "visuals":
         visual = report.pages[parts[1]].visuals[parts[3]]
-        if parts[4:] == ["visualization", "extra", "line_color"]:
-            visual.visualization.extra["line_color"] = value
+        if parts[4:6] == ["visualization", "extra"] and parts[6] in _ALLOWLISTED_VISUAL_EXTRA_KEYS:
+            visual.visualization.extra[parts[6]] = value
             return
     if len(parts) == 6 and parts[0] == "pages" and parts[2] == "visuals":
         visual = report.pages[parts[1]].visuals[parts[3]]
         if parts[4:] == ["visualization", "title"]:
             visual.visualization.title = str(value)
+            return
+        if parts[4:] == ["visualization", "visual_type"]:
+            visual.visualization.visual_type = VisualType(value)
             return
         if parts[4:] == ["query", "dimensions"]:
             visual.query.dimensions = [
@@ -605,6 +623,19 @@ def _set_path(report: ExecutableReportSpec, path: str, value: Any) -> None:
                     truncate_date_to=dimension.get("truncate_date_to"),
                 )
                 for dimension in value
+            ]
+            return
+        if parts[4:] == ["query", "metrics"]:
+            visual.query.metrics = [
+                MetricRef(
+                    block_id=m["block_id"],
+                    metric_name=m["metric_name"],
+                    alias=m.get("alias"),
+                    agg_override=(
+                        AggFunction(m["agg_override"]) if m.get("agg_override") else None
+                    ),
+                )
+                for m in value
             ]
             return
     if len(parts) == 8 and parts[0] == "pages" and parts[2] == "visuals" and parts[4] == "query" and parts[5] == "block_refs" and parts[7] == "pinned_version":
