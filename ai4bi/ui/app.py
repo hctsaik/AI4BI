@@ -9,17 +9,245 @@ from pathlib import Path
 import streamlit as st
 
 from ai4bi.analysis.executor import Executor
-from ai4bi.report.models import DraftReportStore, ExecutableReportSpec, ReportProposal
+from ai4bi.blocks.loader import BlockLoader
+from ai4bi.blocks.contracts import DataBlockContract
+from ai4bi.report.builder import build_visual_from_selection
+from ai4bi.report.catalog import build_catalog
+from ai4bi.report.models import (
+    DraftReportStore,
+    ExecutableReportSpec,
+    ReportProposal,
+    ReportVisualSpec,
+)
 from ai4bi.report.proposals import controls_to_proposal, prompt_to_proposal
+from ai4bi.report.publication import GateCheckResult, run_publication_gate
 from ai4bi.report.templates import build_semiconductor_queue_time_report
+from ai4bi.query_spec import VisualType
 from ai4bi.ui.cache import QueryCache
 from ai4bi.ui.render_visual import render_visual
 from ai4bi.ui import workspace
+from ai4bi.ui.viewer import get_draft_path_from_params, is_readonly_mode, render_readonly_banner
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
 _BLOCKS_DIR = _DEMO_ROOT / "blocks"
 _SEMANTIC_MODEL = _DEMO_ROOT / "semantic_model.json"
 _DRAFT_STORE = _DEMO_ROOT / "draft_reports"
+
+
+def _load_all_contracts() -> dict[str, DataBlockContract]:
+    """Load all block contracts from the demo blocks directory."""
+    loader = BlockLoader()
+    contracts: dict[str, DataBlockContract] = {}
+    if _BLOCKS_DIR.exists():
+        for path in _BLOCKS_DIR.glob("*.json"):
+            try:
+                contract = loader.load_json(str(path))
+                contracts[contract.block_id] = contract
+            except Exception:  # noqa: BLE001
+                pass
+    return contracts
+
+
+def _gate_check_icon(check: GateCheckResult) -> str:
+    if check.passed:
+        return "✅"
+    if check.blocking:
+        return "❌"
+    return "⚠️"
+
+
+def _render_publication_readiness(report: ExecutableReportSpec) -> None:
+    """Render the Publication Readiness expander in the sidebar."""
+    with st.expander("Publication Readiness", expanded=False):
+        contracts = _load_all_contracts()
+        semantic_model = json.loads(_SEMANTIC_MODEL.read_text(encoding="utf-8"))
+        gate = run_publication_gate(report, contracts, semantic_model)
+
+        if gate.can_publish:
+            st.success("All blocking checks passed — report may be published.")
+        else:
+            st.error("One or more blocking checks failed — not ready to publish.")
+
+        for check in gate.checks:
+            icon = _gate_check_icon(check)
+            label = check.check_name.replace("_", " ").title()
+            st.markdown(f"{icon} **{label}**")
+            st.caption(check.message)
+
+
+# ---------------------------------------------------------------------------
+# Add Visual panel
+# ---------------------------------------------------------------------------
+
+_VISUAL_TYPE_OPTIONS: list[str] = ["kpi_card", "line_chart", "bar_chart", "table"]
+_VISUAL_TYPE_LABELS: dict[str, str] = {
+    "kpi_card": "KPI Card",
+    "line_chart": "Line Chart",
+    "bar_chart": "Bar Chart",
+    "table": "Table",
+}
+
+
+def _render_add_visual_panel(
+    report: ExecutableReportSpec,
+    cache: QueryCache,
+) -> None:
+    """Render the '+ Add Visual' expander in the sidebar.
+
+    Steps
+    -----
+    1. Select block (primary fact block from semantic model).
+    2. Select metrics (multiselect, max 2).
+    3. Select dimensions (multiselect, max 2, optional).
+    4. Select visual type.
+    5. Preview VisualQuerySpec as JSON.
+    6. 'Add to Report' → adds visual to current page and increments revision.
+    """
+    with st.expander("＋ Add Visual", expanded=False):
+        if report.read_only:
+            st.warning("Read-only mode — adding visuals is disabled.")
+            return
+
+        # Load contracts and semantic model once (cached by Streamlit widget state
+        # — reloaded on each rerun, acceptable for a demo draft tool).
+        contracts = _load_all_contracts()
+        try:
+            semantic_model = json.loads(_SEMANTIC_MODEL.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not load semantic model: {exc}")
+            return
+
+        catalog = build_catalog(semantic_model, contracts)
+        if not catalog:
+            st.info("No fact blocks with metrics are available in the loaded contracts.")
+            return
+
+        # --- Step 1: Select block ---
+        block_display_names = {bc.block_id: bc.display_name for bc in catalog}
+        selected_block_id = st.selectbox(
+            "1. Select block",
+            list(block_display_names.keys()),
+            format_func=lambda bid: block_display_names[bid],
+            key="add_visual_block",
+        )
+        block_catalog = next((bc for bc in catalog if bc.block_id == selected_block_id), None)
+        if block_catalog is None:
+            return
+
+        # --- Step 2: Select metrics (max 2) ---
+        metric_options = [m.metric_name for m in block_catalog.metrics]
+        metric_labels = {
+            m.metric_name: f"{m.display_name} [{m.aggregation}]"
+            for m in block_catalog.metrics
+        }
+        selected_metrics = st.multiselect(
+            "2. Select metric(s) — max 2",
+            metric_options,
+            format_func=lambda mn: metric_labels.get(mn, mn),
+            max_selections=2,
+            key="add_visual_metrics",
+        )
+
+        # --- Step 3: Select dimensions (max 2, optional) ---
+        # Build dimension option keys as "block_id.column_name"
+        dim_options: list[str] = []
+        dim_labels: dict[str, str] = {}
+        for de in block_catalog.dimensions:
+            key = f"{de.block_id}.{de.column_name}"
+            dim_options.append(key)
+            dim_labels[key] = de.display_name
+
+        selected_dims = st.multiselect(
+            "3. Select dimension(s) — max 2, optional",
+            dim_options,
+            format_func=lambda dk: dim_labels.get(dk, dk),
+            max_selections=2,
+            key="add_visual_dims",
+        )
+
+        # --- Step 4: Select visual type ---
+        selected_vtype_str = st.selectbox(
+            "4. Select visual type",
+            _VISUAL_TYPE_OPTIONS,
+            format_func=lambda vt: _VISUAL_TYPE_LABELS.get(vt, vt),
+            key="add_visual_type",
+        )
+        visual_type = VisualType(selected_vtype_str)
+
+        # --- Validate & show Step 5: preview ---
+        validation_error: str | None = None
+        query_spec = None
+        viz_spec = None
+
+        if selected_metrics:
+            try:
+                # Generate a candidate visual_id (not yet in the report).
+                existing_ids = set(report.pages["main"].visuals.keys())
+                base_id = f"user_{selected_block_id}_{selected_vtype_str}"
+                visual_id = base_id
+                counter = 1
+                while visual_id in existing_ids:
+                    visual_id = f"{base_id}_{counter}"
+                    counter += 1
+
+                query_spec, viz_spec = build_visual_from_selection(
+                    visual_id=visual_id,
+                    block_id=selected_block_id,
+                    metric_names=selected_metrics,
+                    dimension_names=selected_dims,
+                    visual_type=visual_type,
+                    contracts=contracts,
+                    semantic_model=semantic_model,
+                )
+            except ValueError as exc:
+                validation_error = str(exc)
+
+        if validation_error:
+            st.warning(f"Cannot add visual: {validation_error}")
+
+        if query_spec is not None:
+            with st.expander("5. Preview VisualQuerySpec (JSON)", expanded=False):
+                from ai4bi.report.models import query_to_dict
+                st.json(query_to_dict(query_spec))
+
+        # --- Step 6: Add to Report button ---
+        add_disabled = (
+            not selected_metrics
+            or validation_error is not None
+            or query_spec is None
+        )
+        if st.button(
+            "Add to Report",
+            type="primary",
+            disabled=add_disabled,
+            key="add_visual_submit",
+        ):
+            if query_spec is not None and viz_spec is not None:
+                # Mutate a deep copy of the report via workspace commit.
+                new_report = workspace.current_report().deep_copy()
+                page = new_report.pages["main"]
+                new_visual = ReportVisualSpec(
+                    component_id=visual_id,
+                    query=query_spec,
+                    visualization=viz_spec,
+                )
+                page.visuals[visual_id] = new_visual
+                page.visual_order.append(visual_id)
+                new_report.revision += 1
+                new_report.saved_at = None
+                try:
+                    new_report.validate()
+                    # Use workspace internal commit helper via apply_immediately bypass.
+                    # We directly commit because there is no proposal path for "add visual".
+                    import ai4bi.ui.workspace as _ws
+                    _ws._commit(new_report)  # noqa: SLF001
+                    workspace.set_message(
+                        f"Visual '{viz_spec.title or visual_id}' added to report."
+                    )
+                    cache.invalidate_all()
+                except Exception as exc:  # noqa: BLE001
+                    workspace.set_message(f"Add visual failed: {exc}")
+                st.rerun()
 
 
 def _sync_widget_values(report: ExecutableReportSpec, *, force: bool = False) -> None:
@@ -111,6 +339,13 @@ def _render_draft_controls(
         if st.button("Clear query cache", width="stretch"):
             cache.invalidate_all()
             st.rerun()
+
+        st.markdown("---")
+        _render_add_visual_panel(report, cache)
+
+        st.markdown("---")
+        _render_publication_readiness(report)
+
     return report.active_filters()
 
 
@@ -202,8 +437,31 @@ def _render_canvas(
 
 def main() -> None:
     st.set_page_config(page_title="AI for BI - Fab Explorer", page_icon="BI", layout="wide")
+
+    # Determine read-only mode from URL query parameters (?mode=readonly&draft=<path>)
+    readonly = is_readonly_mode()
+    draft_path_param = get_draft_path_from_params()
+
     workspace.init_report(build_semiconductor_queue_time_report())
+
+    # If a draft path is provided via URL, load it once per session
+    if draft_path_param and "readonly_draft_loaded" not in st.session_state:
+        _store = DraftReportStore(_DRAFT_STORE)
+        try:
+            loaded = _store.load(Path(draft_path_param))
+            workspace.replace_with_loaded(loaded)
+            st.session_state["readonly_draft_loaded"] = True
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+
     report = workspace.current_report()
+
+    # Enforce read_only flag when URL mode=readonly
+    if readonly and not report.read_only:
+        report = replace(report, read_only=True)
+        workspace.replace_with_loaded(report)
+        report = workspace.current_report()
+
     force_sync = st.session_state.pop("_sync_widgets_from_report", False)
     _sync_widget_values(report, force=force_sync)
     cache = QueryCache(use_l1=False)
@@ -214,25 +472,39 @@ def main() -> None:
     report = workspace.current_report()
 
     st.title(report.title)
-    st.caption(
-        "Editable validated demo draft: process movement facts use a certified direct "
-        "relationship path to tool dimensions."
-    )
+
+    # Show read-only banner or normal caption
+    if readonly:
+        render_readonly_banner()
+    else:
+        st.caption(
+            "Editable validated demo draft: process movement facts use a certified direct "
+            "relationship path to tool dimensions."
+        )
+
     if workspace.message():
         st.info(workspace.message())
 
-    canvas, assistant = st.columns([3, 2])
-    with assistant:
-        _render_visual_assistant(report, cache)
-    with canvas:
+    _trusted_markdown = (
+        "- Demo status: data blocks are validated fixtures, not a published certified report.\n"
+        "- Relationship path: `process_move_fact -> tool_dim`, certified direct `many_to_one` left join.\n"
+        "- Metric rule: `queue_time_hr` uses approved `AVG`; `move_count` uses approved `SUM`.\n"
+        "- Deliberately unavailable: fact-to-fact yield comparison, weighted-yield KPI and formal sharing."
+    )
+
+    if readonly:
+        # Read-only layout: full-width canvas, Visual Assistant panel hidden
         _render_canvas(report, cache, executor, active_filters)
         with st.expander("Why this result is trusted"):
-            st.markdown(
-                "- Demo status: data blocks are validated fixtures, not a published certified report.\n"
-                "- Relationship path: `process_move_fact -> tool_dim`, certified direct `many_to_one` left join.\n"
-                "- Metric rule: `queue_time_hr` uses approved `AVG`; `move_count` uses approved `SUM`.\n"
-                "- Deliberately unavailable: fact-to-fact yield comparison, weighted-yield KPI and formal sharing."
-            )
+            st.markdown(_trusted_markdown)
+    else:
+        canvas, assistant = st.columns([3, 2])
+        with assistant:
+            _render_visual_assistant(report, cache)
+        with canvas:
+            _render_canvas(report, cache, executor, active_filters)
+            with st.expander("Why this result is trusted"):
+                st.markdown(_trusted_markdown)
 
 
 if __name__ == "__main__":

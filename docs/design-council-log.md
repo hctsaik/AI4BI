@@ -2017,6 +2017,9 @@ class FilesystemBlockRegistry:
 | Open questions | OQ-1 _meta.json schema + SQLite 遷移共存策略 |
 | Open questions | OQ-2 Block-level freshness_sla 驅動的強制 snapshot refresh 邏輯 |
 | Open questions | OQ-3 BlockVersionNotFoundError 修復操作的授權模型（owner vs Data Manager vs viewer） |
+| Consensus | 009-B cross-filter 協定：`in_` operator（value 永遠 list）；`dict[source_spec_id, CrossFilterEntry]` 存入 `st.session_state["cross_filters"]`；`VisualQuerySpec.cross_filter_emit: DimensionRef | None`；`build_active_filters(spec, global_filters, cross_filters)` 三段合併；Badge Bar UI；生命週期跨 page 持續、Reset 不清除 |
+| Consensus | 009-C P3 Sprint 選定：bar_chart + data_table + 跨頁 global filter 同步（scatter/export 延至 P4/P5）；`ai4bi/ui/components/bar_chart.py` 與 `data_table.py` 已實作 |
+| Consensus | 009-D CompositeUndoEntry：undo stack 改為 `list[UndoRecord]`（含 `before_report_spec` + `style_rollback: dict[visual_id, VisualQuerySpec] | None` + `origin: "style"/"analysis"/"composite"/"style_only_confirmed"`）；Staging 逾時 30 分鐘、在 `init_state()` rerun-hook 掃描、auto_reject；`PromptExecutionState` 新增 `COMPOSITE_STYLE_FAILED` 與 `STYLE_ONLY_CONFIRMED` 終止態 |
 | Decisions recorded | design-council-log.md Round 009 |
 
 #### Next Round Prompt
@@ -2364,3 +2367,129 @@ or safe cross-fact yield composition.
 ### 012-I. Next Round Prompt
 
 > Round 013 聚焦 builder 與治理：在 executable draft workspace 之上，加入由已核准 metric/dimension catalog 驅動的「新增 visual」流程與只讀 draft viewer；同時設計 publication gate（block lifecycle、role policy、version pin fail-closed、audit metadata），使 local draft 未來能安全升級為可分享報表。跨 fact composition 仍需以 aggregate-then-compose planner 與 weighted-yield expression compiler 分開評估。
+
+---
+
+## Round 013 — Visual Builder, Publication Gate, Composition Planner (2026-05-28)
+
+### 013-A. Session Context
+
+Round 013 continues from Round 012's executable draft workspace.  Goal: add a governed visual-builder flow driven by a certified metric/dimension catalog, a read-only draft viewer URL mode, a publication-readiness gate, and a cross-fact aggregate-then-compose planner.  Four agents were launched in parallel; three completed; one timed out.
+
+### 013-B. Agents and Outcomes
+
+| Agent ID | Task | Status | Tests Added |
+| --- | --- | --- | --- |
+| a4517e8c94603f44b | 013-A Visual Builder + CatalogBrowser | Completed | +21 (149 total) |
+| ab7ad761113452158 | 013-B Publication Gate + ReadonlyMode | Completed | +10 (159 total) |
+| a66be4b71bdbbe591 | 013-C Composition Planner + CompositionExecutor | Completed | +23 (197 total) |
+| af44607e33f399c8d | 013-D BlockRegistry FilesystemBlockRegistry | FAILED — 600 s stall, zero output | 0 |
+
+**Final passing test count: 197**
+
+### 013-C. Decisions Made
+
+#### Visual Builder (013-A)
+
+- **CatalogBrowser (`ai4bi/report/catalog.py`)** builds `list[BlockCatalog]` from the semantic_model + DataBlockContracts.  Each `BlockCatalog` holds `list[MetricEntry]` and `list[DimensionEntry]`.
+- **`build_visual_from_selection()` (`ai4bi/report/builder.py`)** takes `(visual_id, block_id, metric_names, dimension_names, visual_type, contracts)` and returns `(VisualQuerySpec, VisualizationSpec)`.  Safety rules enforced at build time:
+  - `kpi_card` no dimensions allowed.
+  - `line_chart` / `bar_chart` / `data_table` at least one dimension required.
+  - Maximum 2 metrics and 2 dimensions per visual.
+  - Cross-block dimensions must have a certified relationship in the semantic model.
+- **Sidebar Add-Visual panel** in `app.py` exposes a 6-step expander: pick block, pick metrics, pick dimensions, pick visual type, preview, add to canvas.
+
+#### Publication Gate (013-B)
+
+- **`run_publication_gate(report, contracts, semantic_model)`** (`ai4bi/report/publication.py`) runs 5 ordered checks and returns `PublicationGateResult(can_publish, checks)`.
+  1. `block_lifecycle` — all referenced blocks must be CERTIFIED or ARCHIVED_STABLE.
+  2. `version_pin_safety` — if a version is pinned, it must match the current certified semver (no stale pins).
+  3. `relationship_certified` — every join used by a visual must appear in `semantic_model.certified_joins`.
+  4. `policy_check` — no policy block attached to the report may be in a DRAFT state.
+  5. `audit_metadata` — report must carry a non-empty `report_id` and a saved revision >= 1.
+- **ReadonlyMode (`ai4bi/ui/viewer.py`)** parses `?mode=readonly&draft=<path>` URL params via `st.query_params`; renders a banner and hides the prompt bar and sidebar edit controls.
+
+#### Composition Planner (013-C)
+
+- **`RatioMetricExpr`** (`ai4bi/planning/composition_plan.py`): `SUM(numerator)/SUM(denominator)*scale`.  Blocks `AVG(yield_pct)` at the type level — only ratio form is expressible.
+- **`AggStep`**: single-fact aggregation unit with `block_id`, `group_by`, `metrics`, `filters`, and `validate_column_ownership()` which rejects columns that do not belong to that block.
+- **`ComposeStep`**: joins two AggStep results on `join_key`.  Never touches raw fact tables — only operates on CTE aliases produced by its child AggSteps.
+- **`CompositionPlan`**: validates 2-fact maximum and requires `join_key` to appear in both child `group_by` lists.
+- **`CompositionPlanner`**: auto-detects single-fact vs cross-fact and routes to `SafeJoinPlanner` or `CompositionPlan` accordingly.
+- **`CompositionExecutor`** (`ai4bi/analysis/composition_executor.py`): emits CTE-based SQL.  `_build_agg_sql()` produces per-fact CTE fragments; `_build_compose_sql()` joins the two CTE aliases.  `run_from_registry()` is a convenience method.
+- **`build_etch_queue_vs_yield_plan()`** factory: cross-fact demo ETCH queue time vs wafer yield by product family.
+
+#### BlockRegistry (013-D — DEFERRED)
+
+Agent timed out with no output.  Task deferred to Round 014:
+- Implement `ai4bi/blocks/registry.py`: `FilesystemBlockRegistry` with `_meta.json` atomic write (write-to-temp, rename).
+- `_meta.json` schema: `{block_id, version, status, certified_at, certified_by, changelog}`.
+- Integrate registry lookup into `Executor` path resolution.
+- Create `data/semiconductor_demo/registry/` with one `_meta.json` per block (8 files).
+- Add `tests/test_block_registry.py`.
+
+### 013-D. New File Inventory
+
+| File | Type | Purpose |
+| --- | --- | --- |
+| `ai4bi/report/catalog.py` | New | `MetricEntry`, `DimensionEntry`, `BlockCatalog`, `build_catalog()` |
+| `ai4bi/report/builder.py` | New | `build_visual_from_selection()` with safety validation |
+| `ai4bi/report/publication.py` | New | `run_publication_gate()` — 5-check publication gate |
+| `ai4bi/ui/viewer.py` | New | `is_readonly_mode()`, `get_draft_path_from_params()`, `render_readonly_banner()` |
+| `ai4bi/planning/composition_plan.py` | New | `AggStep`, `ComposeStep`, `CompositionPlan`, `CompositionPlanner`, `RatioMetricExpr` |
+| `ai4bi/analysis/composition_executor.py` | New | `CompositionExecutor` — CTE-based cross-fact SQL |
+| `tests/test_catalog_builder.py` | New | 21 tests |
+| `tests/test_publication_gate.py` | New | 10 tests |
+| `tests/test_composition_planner.py` | New | 23 tests |
+
+### 013-E. Validated Data Contract Additions
+
+```python
+@dataclass
+class RatioMetricExpr:
+    numerator: str
+    denominator: str
+    scale: float = 100.0
+
+@dataclass
+class AggStep:
+    step_id: str
+    block_id: str
+    group_by: list[str]
+    metrics: list[SimpleMetricExpr | RatioMetricExpr]
+    filters: dict[str, list[str]]
+
+@dataclass
+class ComposeStep:
+    step_id: str
+    left_step: AggStep
+    right_step: AggStep
+    join_key: str
+
+@dataclass
+class GateCheckResult:
+    check_name: str
+    passed: bool
+    message: str
+    blocking: bool
+
+@dataclass
+class PublicationGateResult:
+    can_publish: bool
+    checks: list[GateCheckResult]
+```
+
+### 013-F. Open Questions -> Round 014
+
+1. **Dynamic canvas render loop**: Canvas currently renders a fixed visual list.  Round 014 must add `visual_order: list[str]` to `ReportPageSpec` and render visuals dynamically so newly added visuals appear without hardcoded layout changes.
+2. **Filter inheritance for new visuals**: When `build_visual_from_selection()` adds a visual, it should inherit the current global filter set (`inherit_global_filter` strategy).
+3. **BlockRef pin workflow in UI**: Which user action triggers a version pin?  When should the UI surface `pin_reason`?
+4. **audit_metadata placement**: A dedicated `AuditMetadata` field on `ExecutableReportSpec` (rather than top-level fields) would make the schema cleaner.
+5. **AggStep filter parameterized queries**: `_build_agg_sql()` interpolates filter values directly into SQL strings.  Must replace with DuckDB parameterized queries to prevent SQL injection.
+6. **Multi-grain join_key completeness**: `CompositionPlan.validate()` checks `join_key` presence but does not verify compatible grain.  A `grain_check()` mechanism is needed.
+7. **BlockRegistry (deferred from 013-D)**: `FilesystemBlockRegistry` + `_meta.json` atomic writes + Executor integration + 8 demo files.
+8. **Cross-page global filter sync**: Still not implemented (P3 item pending).
+
+### 013-G. Next Round Prompt
+
+> Round 014 聚焦三件事：(1) **Dynamic Canvas** — `ReportPageSpec` 加入 `visual_order: list[str]`，canvas loop 依序渲染，新增 visual 自動插入底部並繼承當前 global filter；(2) **BlockRegistry** (013-D 補做) — `FilesystemBlockRegistry` + `_meta.json` atomic write + Executor 整合 + 8 個 demo _meta.json + tests；(3) **AggStep SQL injection hardening** — 將 `_build_agg_sql()` 的 filter 插值改為 DuckDB parameterized query。`grain_check()` 與 `AuditMetadata` dataclass 可作為次要目標。

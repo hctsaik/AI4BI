@@ -1,0 +1,218 @@
+"""Publication Gate — validate a local draft before formal publication.
+
+Round 012 decision: local drafts are explicitly non-published.  This module
+defines the gate checks that must all pass before a draft can transition to a
+published report.  Currently no check passes for a standard validated_demo_draft;
+the gate is intentionally strict so that the UI can show an honest readiness
+summary.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from ai4bi.blocks.contracts import DataBlockContract, LifecycleStatus
+from ai4bi.report.models import ExecutableReportSpec
+
+
+# ---------------------------------------------------------------------------
+# Result dataclasses
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class GateCheckResult:
+    """Result of a single publication gate check."""
+
+    check_name: str
+    passed: bool
+    message: str
+    blocking: bool  # True = must fix before publish; False = warning only
+
+
+@dataclass
+class PublicationGateResult:
+    """Aggregated result of all gate checks."""
+
+    can_publish: bool
+    checks: list[GateCheckResult] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Individual check helpers
+# ---------------------------------------------------------------------------
+
+
+def _check_block_lifecycle(
+    report: ExecutableReportSpec,
+    contracts: dict[str, DataBlockContract],
+) -> GateCheckResult:
+    """All referenced blocks must be in the 'certified' lifecycle stage."""
+    non_certified: list[str] = []
+    for page in report.pages.values():
+        for visual in page.visuals.values():
+            for block_ref in visual.query.block_refs:
+                contract = contracts.get(block_ref.block_id)
+                if contract is None:
+                    non_certified.append(f"{block_ref.block_id} (contract not found)")
+                elif contract.block_lifecycle != LifecycleStatus.certified:
+                    non_certified.append(
+                        f"{block_ref.block_id} (status={contract.block_lifecycle.value})"
+                    )
+
+    if non_certified:
+        return GateCheckResult(
+            check_name="block_lifecycle",
+            passed=False,
+            message=(
+                "The following blocks are not certified: "
+                + ", ".join(sorted(set(non_certified)))
+            ),
+            blocking=True,
+        )
+    return GateCheckResult(
+        check_name="block_lifecycle",
+        passed=True,
+        message="All referenced blocks are certified.",
+        blocking=True,
+    )
+
+
+def _check_version_pin_safety(report: ExecutableReportSpec) -> GateCheckResult:
+    """All BlockRefs must have an explicit pinned_version before publication."""
+    unpinned: list[str] = []
+    for page in report.pages.values():
+        for visual in page.visuals.values():
+            for block_ref in visual.query.block_refs:
+                if block_ref.pinned_version is None:
+                    unpinned.append(block_ref.block_id)
+
+    if unpinned:
+        return GateCheckResult(
+            check_name="version_pin_safety",
+            passed=False,
+            message=(
+                "BlockRefs without a pinned version (must be resolved before publish): "
+                + ", ".join(sorted(set(unpinned)))
+            ),
+            blocking=True,
+        )
+    return GateCheckResult(
+        check_name="version_pin_safety",
+        passed=True,
+        message="All BlockRefs carry an explicit pinned_version.",
+        blocking=True,
+    )
+
+
+def _check_relationship_certified(
+    report: ExecutableReportSpec,
+    semantic_model: dict,
+) -> GateCheckResult:
+    """Every block-to-block join used in the report must have a certified relationship in the semantic model."""
+    certified_pairs: set[tuple[str, str]] = set()
+    for rel in semantic_model.get("relationships", []):
+        if rel.get("status") == "certified":
+            certified_pairs.add((rel["from_block"], rel["to_block"]))
+
+    uncertified: list[str] = []
+    for page in report.pages.values():
+        for visual_id, visual in page.visuals.items():
+            block_ids = [ref.block_id for ref in visual.query.block_refs]
+            if len(block_ids) < 2:
+                continue
+            # Check each consecutive pair (first block is assumed to be the fact)
+            fact = block_ids[0]
+            for dim in block_ids[1:]:
+                if (fact, dim) not in certified_pairs:
+                    uncertified.append(f"{visual_id}: {fact} → {dim}")
+
+    if uncertified:
+        return GateCheckResult(
+            check_name="relationship_certified",
+            passed=False,
+            message=(
+                "Joins without a certified semantic-model relationship: "
+                + "; ".join(uncertified)
+            ),
+            blocking=True,
+        )
+    return GateCheckResult(
+        check_name="relationship_certified",
+        passed=True,
+        message="All block joins are backed by certified semantic-model relationships.",
+        blocking=True,
+    )
+
+
+def _check_policy(
+    report: ExecutableReportSpec,  # noqa: ARG001
+    contracts: dict[str, DataBlockContract],  # noqa: ARG001
+) -> GateCheckResult:
+    """Audience role policy check — not yet enforced in this MVP."""
+    return GateCheckResult(
+        check_name="policy_check",
+        passed=True,
+        message="Not yet enforced — role-based policy checks are deferred to a future gate version.",
+        blocking=False,
+    )
+
+
+def _check_audit_metadata(report: ExecutableReportSpec) -> GateCheckResult:
+    """Report must declare author, purpose, and valid_period metadata fields."""
+    # ExecutableReportSpec does not yet carry these fields; mark as a warning.
+    missing = []
+    if not hasattr(report, "author") or not getattr(report, "author", None):
+        missing.append("author")
+    if not hasattr(report, "purpose") or not getattr(report, "purpose", None):
+        missing.append("purpose")
+    if not hasattr(report, "valid_period") or not getattr(report, "valid_period", None):
+        missing.append("valid_period")
+
+    if missing:
+        return GateCheckResult(
+            check_name="audit_metadata",
+            passed=False,
+            message=(
+                "Missing audit metadata fields (add to ExecutableReportSpec): "
+                + ", ".join(missing)
+            ),
+            blocking=False,
+        )
+    return GateCheckResult(
+        check_name="audit_metadata",
+        passed=True,
+        message="All required audit metadata fields are present.",
+        blocking=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+
+def run_publication_gate(
+    report: ExecutableReportSpec,
+    contracts: dict[str, DataBlockContract],
+    semantic_model: dict,
+) -> PublicationGateResult:
+    """Run all publication gate checks and return an aggregated result.
+
+    A report can only be published when every *blocking* check passes.
+    Non-blocking checks produce warnings that should be reviewed but do not
+    prevent publication.
+    """
+    checks: list[GateCheckResult] = [
+        _check_block_lifecycle(report, contracts),
+        _check_version_pin_safety(report),
+        _check_relationship_certified(report, semantic_model),
+        _check_policy(report, contracts),
+        _check_audit_metadata(report),
+    ]
+
+    can_publish = all(
+        check.passed for check in checks if check.blocking
+    )
+
+    return PublicationGateResult(can_publish=can_publish, checks=checks)

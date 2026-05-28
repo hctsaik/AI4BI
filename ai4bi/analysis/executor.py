@@ -13,6 +13,7 @@ import pandas as pd
 
 from ai4bi.blocks.contracts import DataBlockContract, DisaggregationMethod
 from ai4bi.blocks.loader import BlockLoader
+from ai4bi.blocks.registry import BlockRegistryProtocol
 from ai4bi.planning.join_planner import QueryPlanningError, ResolvedJoin, SafeJoinPlanner
 from ai4bi.query_spec import (
     AggFunction,
@@ -112,9 +113,11 @@ class Executor:
         registry_root: Optional[str | Path] = None,
         loader: Optional[BlockLoader] = None,
         semantic_model_path: Optional[str | Path] = None,
+        registry: Optional[BlockRegistryProtocol] = None,
     ) -> None:
         self._registry_root = Path(registry_root) if registry_root else _DEFAULT_REGISTRY
         self._loader = loader or BlockLoader()
+        self._registry = registry  # optional BlockRegistryProtocol for versioned resolution
         inferred_model = self._registry_root.parent / "semantic_model.json"
         configured_model = Path(semantic_model_path) if semantic_model_path else inferred_model
         self._semantic_model = (
@@ -125,6 +128,12 @@ class Executor:
         self._planner = SafeJoinPlanner(self._semantic_model)
 
     def _resolve_block_path(self, ref: BlockRef) -> Path:
+        """
+        Resolve a BlockRef to a filesystem Path.
+
+        Backward-compatible: if no BlockRegistry was provided at construction
+        time, falls back to the original filesystem-convention logic.
+        """
         if ref.pinned_version:
             versioned = self._registry_root / ref.block_id / f"{ref.pinned_version}.json"
             if versioned.exists():
@@ -135,6 +144,26 @@ class Executor:
                 ref.block_id,
             )
         return self._registry_root / f"{ref.block_id}.json"
+
+    def _resolve_block_contract(
+        self,
+        ref: BlockRef,
+        version_snapshot: Optional[dict[str, str]] = None,
+    ) -> DataBlockContract:
+        """
+        Resolve a BlockRef to a DataBlockContract.
+
+        If a BlockRegistryProtocol was supplied at construction time, it is
+        used (supporting pinned_version and version_snapshot).  Otherwise the
+        legacy filesystem-path convention is used via _resolve_block_path().
+        """
+        if self._registry is not None:
+            return self._registry.resolve(
+                ref.block_id,
+                ref.pinned_version or None,
+                version_snapshot=version_snapshot,
+            )
+        return self._loader.load_json(str(self._resolve_block_path(ref)))
 
     @staticmethod
     def _apply_active_filters(
@@ -261,6 +290,7 @@ class Executor:
         self,
         spec: VisualQuerySpec,
         active_filters: Optional[dict[str, Any]] = None,
+        version_snapshot: Optional[dict[str, str]] = None,
     ) -> pd.DataFrame:
         if active_filters is not None:
             spec = self._apply_active_filters(spec, active_filters)
@@ -269,7 +299,7 @@ class Executor:
         contracts: dict[str, DataBlockContract] = {}
         try:
             for ref in spec.block_refs:
-                contract = self._loader.load_json(str(self._resolve_block_path(ref)))
+                contract = self._resolve_block_contract(ref, version_snapshot=version_snapshot)
                 contracts[ref.block_id] = contract
                 self._loader.register_to_duckdb(contract, ref.block_id, conn)
 
