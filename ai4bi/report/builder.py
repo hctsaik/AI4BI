@@ -353,3 +353,38 @@ def build_add_visual_proposal(
         description=f"Add visual '{visual_id}' to page '{page_id}'",
         changes=[change],
     )
+
+def build_global_filter_proposal(
+    filter_key: str,
+    before_values: list,
+    after_values: list,
+) -> ReportProposal:
+    """Build a ReportProposal that sets a global filter.
+
+    Parameters
+    ----------
+    filter_key:
+        The key for the global filter, e.g. "process_move_fact.product_family".
+    before_values:
+        The current list of allowed values (empty list or [] means key is absent).
+    after_values:
+        The new list of allowed values (empty list removes the key).
+
+    Returns
+    -------
+    ReportProposal
+        A single-change proposal with affects_data=True and path
+        "global_filters/{filter_key}".
+    """
+    change = ReportChange(
+        path=f"global_filters/{filter_key}",
+        label=f"Set global filter '{filter_key}'",
+        before=before_values if before_values else None,
+        after=after_values if after_values else None,
+        affects_data=True,
+    )
+    return ReportProposal(
+        description=f"Set global filter '{filter_key}' to {after_values!r}",
+        changes=[change],
+    )
+

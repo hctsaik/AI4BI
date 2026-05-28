@@ -2675,3 +2675,75 @@ Round 015 continues from Round 014 baseline (234 tests). Goal: wire the publicat
 ### 015-F. Next Round Prompt
 
 > Round 016 聚焦三件事：(1) **Cross-page global filter sync** — `ExecutableReportSpec` 加入 `global_filters: dict[str, FilterSpec]`，canvas 套用時同步到所有 page 的 visuals；(2) **Report title editing** — proposal path `"title"` with `new_value: str`，sidebar 加一個 text_input；(3) **created_at fix** — `DraftReportStore.save()` 只在 `audit.created_at is None` 時設定，確保初次儲存時間被保留。`AuditMetadata` 的 `PublishedReportStore.publish()` 也要同步設定 `created_by` / `last_modified_by` from `ANALYST_NAME`。Multi-page tab switcher 可作為次要目標。
+
+---
+
+## Round 016 — Global Filters, Title Editing, Multi-page Tabs, created_at Fix (2026-05-28)
+
+### 016-A. Session Context
+
+Round 016 continues from Round 015 baseline (261 tests). Three agents ran in parallel; all three completed.
+
+### 016-B. Agents and Outcomes
+
+| Agent ID | Task | Status | Tests Added |
+| --- | --- | --- | --- |
+| a0bdbf73fd7bad256 | 016-A Cross-page Global Filter Sync | Completed | +25 (286 total) |
+| a71be6b5432a3ce9d | 016-B Report Title Editing + created_at Fix | Completed | +10 (271 total) |
+| a7028f8405cc4458c | 016-C Multi-page Tab Switcher | Completed | +9 (295 total combined) |
+
+**Final passing test count: 295**
+
+### 016-C. Decisions Made
+
+#### Cross-page Global Filter Sync (016-A)
+
+- **`ExecutableReportSpec.global_filters: dict[str, Any]`** — new field, default `{}`. Keys are `"{block_id}.{column_name}"` strings; values are lists of allowed values.
+- **`set_global_filter(key, values)`**: adds key if `values` non-empty; removes key on empty list.
+- **`merged_filters()`**: returns `active_filters()` merged with `global_filters`; `global_filters` wins on conflict. Canvas uses `merged_filters()` for all query execution (replaces `active_filters()` calls in `app.py`).
+- **Proposal path `"global_filters/{key}"`**: supported in `_get_path()` and `_set_path()` for atomic proposal-driven updates.
+- **`build_global_filter_proposal(filter_key, before_values, after_values)`** in `builder.py`: `affects_data=True`.
+- `to_dict()` / `from_dict()` backward-compatible: missing `"global_filters"` key deserializes to `{}`.
+
+#### Report Title Editing + created_at Fix + PublishedReportStore ANALYST_NAME (016-B)
+
+- **`"title"` proposal path**: `_get_path()` returns `report.title`; `_set_path()` sets it (raises `ReportValidationError` on empty/whitespace string).
+- **`build_title_proposal(current_title, new_title)`** in `proposals.py`: `affects_data=False`.
+- **Sidebar title widget**: `st.text_input("Report title", value=report.title)` in draft controls; on change stages a title proposal and reruns.
+- **`created_at` fix**: `DraftReportStore.save()` sets `audit.created_at` only when it is `None` (first save); always updates `audit.last_modified_at`. Preserves original creation timestamp across subsequent saves.
+- **`PublishedReportStore.publish()`**: sets `snapshot.audit.last_modified_by = os.environ.get("ANALYST_NAME", "unknown")` after copying the snapshot.
+
+#### Multi-page Tab Switcher (016-C)
+
+- **`ReportPageSpec.display_name: str = ""`** — new field. When empty, UI falls back to `page_id`. `to_dict()` / `from_dict()` backward-compatible.
+- **`"pages/{page_id}/display_name"` proposal path**: supported in `_get_path()` and `_set_path()`.
+- **`build_page_rename_proposal(page_id, current_name, new_name)`** in `proposals.py`: `affects_data=False`.
+- **`ExecutableReportSpec.add_page(page_id, page_spec)`**: raises `ReportValidationError` if `page_id` already exists.
+- **Canvas multi-page rendering**: single-page → renders directly (backward-compatible); multi-page → `st.tabs(tab_labels)` with one tab per page. Tab labels come from `display_name or page_id`. Button keys namespaced by `page_id` to avoid Streamlit key collisions.
+- **Template**: `build_semiconductor_queue_time_report()` sets `display_name="ETCH Queue-Time"` on the `"main"` page.
+
+### 016-D. Updated File Inventory
+
+| File | Change | Purpose |
+| --- | --- | --- |
+| `ai4bi/report/models.py` | Modified | `global_filters`, `merged_filters()`, `set_global_filter()`, `display_name`, `add_page()`, title path, created_at fix |
+| `ai4bi/report/proposals.py` | Modified | `build_title_proposal()`, `build_page_rename_proposal()` |
+| `ai4bi/report/builder.py` | Modified | `build_global_filter_proposal()` |
+| `ai4bi/report/templates.py` | Modified | `display_name="ETCH Queue-Time"` on main page |
+| `ai4bi/ui/app.py` | Modified | `merged_filters()` in canvas, title text_input, `_render_page()` extraction, `st.tabs()` multi-page |
+| `tests/test_global_filters.py` | New | 25 tests |
+| `tests/test_title_and_audit.py` | New | 10 tests |
+| `tests/test_multipage.py` | New | 9 tests |
+
+### 016-E. Open Questions -> Round 017
+
+1. **Undo after publish**: Publishing writes a permanent file. Should the undo stack treat publish as a reversible action? Current answer: no — publish is a lifecycle action, not a draft edit.
+2. **Published snapshot browser UI**: `list_published()` exists but there is no UI to browse, compare, or restore published versions.
+3. **Cross-filter broadcast**: `cross_filter_emit` on `VisualQuerySpec` (designed in earlier rounds) allows one visual's selection to filter others on the same page. This is not yet wired to `merged_filters()`.
+4. **Page delete / hide**: `add_page()` exists but there is no `delete_page()`. A delete proposal with proper undo support is needed.
+5. **Report-level metric summary**: No high-level "what metrics does this report cover?" view. A `ReportSummary` dataclass derived from the catalog at render time would help business users orient.
+6. **AppTest coverage**: Pin versions panel, global filter widget, title input, and tab switcher all have model-layer tests but no Streamlit AppTest smoke tests.
+
+### 016-F. Next Round Prompt
+
+> Round 017 聚焦三件事：(1) **Cross-filter broadcast** — `VisualQuerySpec.cross_filter_emit: DimensionRef | None` 設計已存在；Round 017 把 emit 值寫入 `st.session_state["cross_filters"]` 並在 `merged_filters()` 中套用，讓一個 visual 的點擊可以 filter 同 page 其他 visuals；(2) **Page delete proposal** — `delete_page(page_id)` on `ExecutableReportSpec`，proposal path `"pages/{page_id}/delete"`，undo 可恢復整個 page；(3) **Published snapshot browser** — sidebar 加一個 "Published versions" expander，呼叫 `list_published()` 顯示時間戳清單，點擊 "Load" 可以 stage 一個 restore proposal（只讀預覽）。`ReportSummary` dataclass 可作為次要目標。

@@ -24,7 +24,7 @@ from ai4bi.report.models import (
     ReportProposal,
 )
 from ai4bi.blocks.registry import FilesystemBlockRegistry, BlockNotFoundError, NoCertifiedVersionError
-from ai4bi.report.proposals import controls_to_proposal, pin_block_version_proposal, prompt_to_proposal, unpin_block_version_proposal
+from ai4bi.report.proposals import build_title_proposal, controls_to_proposal, pin_block_version_proposal, prompt_to_proposal, unpin_block_version_proposal
 from ai4bi.report.publication import GateCheckResult, run_publication_gate
 from ai4bi.report.templates import build_semiconductor_queue_time_report
 from ai4bi.query_spec import VisualType
@@ -382,6 +382,15 @@ def _render_draft_controls(
         st.markdown("---")
         st.subheader("Draft Report")
         st.caption(f"Revision {report.revision} | `{report.semantic_model_ref}`")
+
+        # Report title editor
+        if not report.read_only:
+            new_title = st.text_input("Report title", value=report.title, key="widget_report_title")
+            if new_title != report.title:
+                title_proposal = build_title_proposal(report.title, new_title)
+                workspace.stage_proposal(title_proposal)
+                st.rerun()
+
         button_cols = st.columns(2)
         with button_cols[0]:
             if st.button("Undo", disabled=not workspace.can_undo(), width="stretch"):
@@ -423,7 +432,7 @@ def _render_draft_controls(
         st.markdown("---")
         _render_publication_readiness(report)
 
-    return report.active_filters()
+    return report.merged_filters()
 
 
 def _proposal_rows(proposal: ReportProposal) -> list[dict[str, str]]:
@@ -533,13 +542,15 @@ def _render_reorder_buttons(
             st.rerun()
 
 
-def _render_canvas(
+def _render_page(
     report: ExecutableReportSpec,
+    page_id: str,
     cache: QueryCache,
     executor: Executor,
     active_filters: dict[str, object],
 ) -> None:
-    page = report.pages["main"]
+    """Render all visuals for a single page."""
+    page = report.pages[page_id]
     visuals = page.visuals
 
     def render(component_id: str, idx: int, order_len: int) -> None:
@@ -552,13 +563,13 @@ def _render_canvas(
             with header_cols[1]:
                 if st.button(
                     "↑",
-                    key=f"reorder_up_{component_id}",
+                    key=f"reorder_up_{page_id}_{component_id}",
                     disabled=(idx == 0),
                     help="Move visual up",
                 ):
-                    current_order = list(report.pages["main"].visual_order)
+                    current_order = list(report.pages[page_id].visual_order)
                     proposal = build_reorder_visual_proposal(
-                        page_id="main",
+                        page_id=page_id,
                         visual_id=component_id,
                         direction="up",
                         current_order=current_order,
@@ -569,13 +580,13 @@ def _render_canvas(
             with header_cols[2]:
                 if st.button(
                     "↓",
-                    key=f"reorder_down_{component_id}",
+                    key=f"reorder_down_{page_id}_{component_id}",
                     disabled=(idx == order_len - 1),
                     help="Move visual down",
                 ):
-                    current_order = list(report.pages["main"].visual_order)
+                    current_order = list(report.pages[page_id].visual_order)
                     proposal = build_reorder_visual_proposal(
-                        page_id="main",
+                        page_id=page_id,
                         visual_id=component_id,
                         direction="down",
                         current_order=current_order,
@@ -606,6 +617,23 @@ def _render_canvas(
                 continue
         render(vid, i, len(order))
         i += 1
+
+
+def _render_canvas(
+    report: ExecutableReportSpec,
+    cache: QueryCache,
+    executor: Executor,
+    active_filters: dict[str, object],
+) -> None:
+    page_ids = list(report.pages.keys())
+    if len(page_ids) == 1:
+        _render_page(report, page_ids[0], cache, executor, active_filters)
+    else:
+        tab_labels = [report.pages[pid].display_name or pid for pid in page_ids]
+        tabs = st.tabs(tab_labels)
+        for tab, page_id in zip(tabs, page_ids):
+            with tab:
+                _render_page(report, page_id, cache, executor, active_filters)
 
 
 def main() -> None:

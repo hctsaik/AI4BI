@@ -74,6 +74,24 @@ def controls_to_proposal(
     return ReportProposal("Manual report control update", changes)
 
 
+def build_title_proposal(
+    current_title: str,
+    new_title: str,
+) -> ReportProposal:
+    """Creates a proposal to rename the report title. affects_data=False."""
+    change = ReportChange(
+        path="title",
+        label="Report title",
+        before=current_title,
+        after=new_title,
+        affects_data=False,
+    )
+    return ReportProposal(
+        description=f"Rename report title to '{new_title}'",
+        changes=[change],
+    )
+
+
 def pin_block_version_proposal(
     report: ExecutableReportSpec,
     page_id: str,
@@ -142,6 +160,25 @@ def unpin_block_version_proposal(
     )
     return ReportProposal(
         description=f"Unpin block '{block_id}' (restore to latest certified)",
+        changes=[change],
+    )
+
+
+def build_page_rename_proposal(
+    page_id: str,
+    current_name: str,
+    new_name: str,
+) -> ReportProposal:
+    """Renames a page's display_name. affects_data=False."""
+    change = ReportChange(
+        path=f"pages/{page_id}/display_name",
+        label=f"Rename page '{page_id}' display name",
+        before=current_name,
+        after=new_name,
+        affects_data=False,
+    )
+    return ReportProposal(
+        description=f"Rename page '{page_id}' to '{new_name}'",
         changes=[change],
     )
 

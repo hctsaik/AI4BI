@@ -272,6 +272,7 @@ class ReportPageSpec:
     title: str
     visuals: dict[str, ReportVisualSpec]
     visual_order: list[str]
+    display_name: str = ""
 
     def validate(self) -> None:
         if set(self.visual_order) != set(self.visuals):
@@ -283,6 +284,7 @@ class ReportPageSpec:
             "title": self.title,
             "visuals": {key: visual.to_dict() for key, visual in self.visuals.items()},
             "visual_order": list(self.visual_order),
+            "display_name": self.display_name,
         }
 
     @classmethod
@@ -295,6 +297,7 @@ class ReportPageSpec:
                 for key, value in payload["visuals"].items()
             },
             visual_order=list(payload["visual_order"]),
+            display_name=payload.get("display_name", ""),
         )
         page.validate()
         return page
@@ -347,6 +350,7 @@ class ExecutableReportSpec:
     controls: dict[str, ControlSpec]
     read_only: bool = False
     saved_at: str | None = None
+    global_filters: dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
     # Backward-compat properties so existing code using report.report_id
@@ -385,6 +389,25 @@ class ExecutableReportSpec:
             if control.filter_key
         }
 
+    def set_global_filter(self, key: str, values: list) -> None:
+        """Sets a global filter. Empty list removes the key."""
+        if values:
+            self.global_filters[key] = values
+        else:
+            self.global_filters.pop(key, None)
+
+    def merged_filters(self) -> dict[str, list]:
+        """Returns active_filters() merged with global_filters. global_filters wins on conflict."""
+        merged = dict(self.active_filters())
+        merged.update(self.global_filters)
+        return merged
+
+    def add_page(self, page_id: str, page_spec: "ReportPageSpec") -> None:
+        """Adds a new page. Raises ReportValidationError if page_id already exists."""
+        if page_id in self.pages:
+            raise ReportValidationError(f"Page '{page_id}' already exists")
+        self.pages[page_id] = page_spec
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "spec_version": "2.0-draft",
@@ -396,6 +419,7 @@ class ExecutableReportSpec:
             "controls": {key: control.to_dict() for key, control in self.controls.items()},
             "read_only": self.read_only,
             "saved_at": self.saved_at,
+            "global_filters": copy.deepcopy(self.global_filters),
         }
 
     @classmethod
@@ -425,6 +449,7 @@ class ExecutableReportSpec:
             },
             read_only=bool(payload.get("read_only", False)),
             saved_at=payload.get("saved_at"),
+            global_filters=copy.deepcopy(payload.get("global_filters", {})),
         )
         report.validate()
         return report
@@ -452,6 +477,8 @@ class ReportProposal:
 
 def _get_path(report: ExecutableReportSpec, path: str) -> Any:
     parts = path.split("/")
+    if len(parts) == 2 and parts[0] == "global_filters":
+        return report.global_filters.get(parts[1])
     if len(parts) == 3 and parts[0] == "controls" and parts[2] == "value":
         return report.controls[parts[1]].value
     if len(parts) == 3 and parts[0] == "pages" and parts[2] == "add_visual":
@@ -459,6 +486,8 @@ def _get_path(report: ExecutableReportSpec, path: str) -> Any:
         return None
     if len(parts) == 3 and parts[0] == "pages" and parts[2] == "reorder_visual":
         return list(report.pages[parts[1]].visual_order)
+    if len(parts) == 3 and parts[0] == "pages" and parts[2] == "display_name":
+        return report.pages[parts[1]].display_name
     if len(parts) == 7 and parts[0] == "pages" and parts[2] == "visuals":
         visual = report.pages[parts[1]].visuals[parts[3]]
         if parts[4:] == ["visualization", "extra", "line_color"]:
@@ -484,11 +513,16 @@ def _get_path(report: ExecutableReportSpec, path: str) -> Any:
             if ref.block_id == block_id:
                 return ref.pinned_version
         raise ReportValidationError(f"BlockRef '{block_id}' not found in visual '{parts[3]}'.")
+    if path == "title":
+        return report.title
     raise ReportValidationError(f"Unsupported proposal path '{path}'.")
 
 
 def _set_path(report: ExecutableReportSpec, path: str, value: Any) -> None:
     parts = path.split("/")
+    if len(parts) == 2 and parts[0] == "global_filters":
+        report.set_global_filter(parts[1], value if value is not None else [])
+        return
     if len(parts) == 3 and parts[0] == "controls" and parts[2] == "value":
         report.controls[parts[1]].value = copy.deepcopy(value)
         return
@@ -498,6 +532,9 @@ def _set_path(report: ExecutableReportSpec, path: str, value: Any) -> None:
         visual_id = value["visual_id"]
         visual_spec = ReportVisualSpec.from_dict(value["visual"])
         page.add_visual(visual_id, visual_spec)
+        return
+    if len(parts) == 3 and parts[0] == "pages" and parts[2] == "display_name":
+        report.pages[parts[1]].display_name = str(value) if value is not None else ""
         return
     if len(parts) == 3 and parts[0] == "pages" and parts[2] == "reorder_visual":
         # value is {"visual_id": str, "direction": "up" | "down"}
@@ -545,6 +582,11 @@ def _set_path(report: ExecutableReportSpec, path: str, value: Any) -> None:
                     ref.pin_reason = "manually pinned by user"
                 return
         raise ReportValidationError(f"BlockRef '{block_id}' not found in visual '{parts[3]}'.")
+    if path == "title":
+        if not isinstance(value, str) or not value.strip():
+            raise ReportValidationError("Report title must be a non-empty string.")
+        report.title = value
+        return
     raise ReportValidationError(f"Unsupported proposal path '{path}'.")
 
 
@@ -584,7 +626,10 @@ class DraftReportStore:
         report.validate()
         saved = report.deep_copy()
         saved.saved_at = datetime.now().astimezone().isoformat(timespec="seconds")
-        saved.audit.last_modified_at = datetime.now(timezone.utc).isoformat()
+        now_utc = datetime.now(timezone.utc).isoformat()
+        if saved.audit.created_at is None:
+            saved.audit.created_at = now_utc
+        saved.audit.last_modified_at = now_utc
         saved.audit.last_modified_by = os.environ.get("ANALYST_NAME", "unknown")
         self.directory.mkdir(parents=True, exist_ok=True)
         path = self.directory / f"{self._safe_name(saved.report_id)}.json"
@@ -637,6 +682,7 @@ class PublishedReportStore:
 
         snapshot = report.deep_copy()
         snapshot.audit.last_modified_at = now.isoformat()
+        snapshot.audit.last_modified_by = os.environ.get("ANALYST_NAME", "unknown")
 
         file_path = report_dir / f"{timestamp}.json"
         file_path.write_text(

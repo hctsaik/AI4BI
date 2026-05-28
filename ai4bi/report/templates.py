@@ -160,6 +160,7 @@ def build_semiconductor_queue_time_report() -> ExecutableReportSpec:
                     "bar_queue_by_tool_dimension",
                     "table_queue_by_tool_dimension",
                 ],
+                display_name="ETCH Queue-Time",
             )
         },
         controls={

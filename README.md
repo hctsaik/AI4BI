@@ -24,9 +24,10 @@ python -m pytest tests/ -q             # run full test suite
 | **Round 013** | ✅ Done | `CatalogBrowser`, `build_visual_from_selection`, `PublicationGate` (5 checks), `ReadonlyMode`, `CompositionPlanner`/`CompositionExecutor` (CTE cross-fact SQL), `RatioMetricExpr` | +54 |
 | **Round 014** | ✅ Done | `visual_order` dynamic canvas, `build_add_visual_proposal`, filter inheritance, `AuditMetadata`, `pin_block_version_proposal`, `grain_check()`, parameterized SQL in `CompositionExecutor` | +37 |
 | **Round 015** | ✅ Done | `PublishedReportStore` (share URL), `unpin_block_version_proposal`, Pin versions sidebar, `move_visual_up/down`, reorder proposal, `ANALYST_NAME` identity | +27 |
-| **Round 016** | 🔄 In Progress | Cross-page global filter sync, report title editing, `created_at` fix | — |
+| **Round 016** | ✅ Done | `global_filters`/`merged_filters()`, `build_global_filter_proposal`, title editing proposal, `created_at` first-save fix, `display_name`/`add_page()`, multi-page `st.tabs()` canvas | +34 |
+| **Round 017** | 🔄 In Progress | Cross-filter broadcast, page delete proposal, published snapshot browser | — |
 
-**Total tests: 261 passing** (updated each round)
+**Total tests: 295 passing** (updated each round)
 
 ## Architecture
 
