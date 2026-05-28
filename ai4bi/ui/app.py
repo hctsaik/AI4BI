@@ -33,6 +33,7 @@ from ai4bi.ui.render_visual import render_visual
 from ai4bi.ui import workspace
 from ai4bi.ui.viewer import get_draft_path_from_params, is_readonly_mode, render_readonly_banner
 from ai4bi.report.metric_catalog import MetricCatalogService, MetricZone
+from ai4bi.report.block_library import build_block_library, LIFECYCLE_BADGE
 from ai4bi.blocks.contracts import LifecycleStatus
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
@@ -239,6 +240,71 @@ def _load_published_snapshot(path: Path) -> ExecutableReportSpec:
     """Load a published snapshot as a read-only report preview."""
     report = PublishedReportStore(_PROJECT_ROOT / "published").load(path)
     return replace(report, read_only=True)
+
+
+def _render_block_library_panel() -> None:
+    """Render the Data Block View sidebar panel (Round 021, design-council 001-F)."""
+    with st.expander("Data Block Library", expanded=False):
+        contracts = _load_all_contracts()
+        if not contracts:
+            st.info("No data blocks loaded.")
+            return
+
+        # Search input
+        search = st.text_input(
+            "Search blocks",
+            placeholder="block name, type…",
+            key="block_library_search",
+        )
+
+        cards = build_block_library(contracts, search_query=search)
+
+        if not cards:
+            st.info("No blocks match your search.")
+            return
+
+        st.caption(f"{len(cards)} block{'s' if len(cards) != 1 else ''} found")
+
+        for card in cards:
+            badge = card.lifecycle_badge
+            header_md = (
+                f"{card.type_icon} **`{card.block_id}`** "
+                f"<span style='color:{badge['color']};font-size:0.8em;'>"
+                f"{badge['emoji']} {badge['label']}</span>"
+            )
+            with st.expander(f"{card.type_icon} {card.block_id} · {badge['label']}", expanded=False):
+                # Header row
+                st.markdown(header_md, unsafe_allow_html=True)
+                st.caption(card.summary_line)
+
+                # Description + grain
+                if card.description:
+                    st.markdown(f"_{card.description}_")
+                if card.grain:
+                    st.caption(f"**Grain:** {card.grain[:120]}")
+
+                # Metrics
+                if card.metric_names:
+                    st.markdown("**Metrics:**")
+                    for mname in card.metric_names:
+                        st.markdown(f"- `{mname}`")
+                else:
+                    st.caption("No metrics defined.")
+
+                # Columns (first 8)
+                if card.column_names:
+                    visible_cols = card.column_names[:8]
+                    extra = len(card.column_names) - 8
+                    cols_text = "  ".join(f"`{c}`" for c in visible_cols)
+                    if extra > 0:
+                        cols_text += f"  _+{extra} more_"
+                    st.markdown(f"**Columns:** {cols_text}")
+
+                # Relationships
+                if card.relationships:
+                    st.markdown("**Relationships:**")
+                    for rel in card.relationships:
+                        st.caption(f"→ `{rel.target_block_id}` ({rel.status})")
 
 
 def _render_published_snapshot_browser(
@@ -664,6 +730,9 @@ def _render_draft_controls(
 
         st.markdown("---")
         _render_published_snapshot_browser(report, cache)
+
+        st.markdown("---")
+        _render_block_library_panel()
 
     return report.merged_filters()
 

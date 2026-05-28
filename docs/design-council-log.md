@@ -2930,3 +2930,55 @@ module cache 導致的 `'ProposalResult' object has no attribute 'analysis_plan'
 | 指標 | 結果 |
 | Unit regression | 411 passed |
 | E2E | 6 passed |
+
+---
+
+### Round 021 — Data Block View (Block Library Sidebar Panel)
+
+| 欄位 | 記錄 |
+| --- | --- |
+| Status | `completed` |
+| Date | `2026-05-28` |
+| Goal | 實作設計共識 001-F Data Block View：業務可瀏覽可用積木、了解 grain/metrics/相容性/認證狀態 |
+| Agent perspectives | Round 021 Data Block View Design Agent（選 Option C Sidebar Expander） |
+| Input | design-council-log.md 001-F, 002-E, 003-E |
+
+#### 021-A. 實作決策
+
+設計 Agent 建議：**Option C（Sidebar Expander）** — 最小侵入，不動 canvas 邏輯，約 60 行。
+
+理由：`main()` 已固定為 `st.columns([3,2])` 雙欄布局；多頁需 `st.navigation` 且 session_state 跨頁共享複雜；加 tab 需重構 canvas/assistant columns。
+
+#### 021-B. 新模組與元件
+
+**`ai4bi/report/block_library.py`**：
+- `LIFECYCLE_BADGE`：覆蓋全部 5 個 LifecycleStatus，對應顏色/emoji（002-E 色彩規則）
+- `BLOCK_TYPE_ICON`：覆蓋全部 10 個 BlockType
+- `BlockCard` dataclass：`block_id, block_type, lifecycle, version, description, grain, metric_names, column_names, relationships`
+  - properties：`type_icon, lifecycle_badge, is_certified, is_sandbox, header, summary_line`
+- `build_block_library(contracts, search_query) -> list[BlockCard]`
+  - 搜尋：case-insensitive，match block_id/type/description
+  - 排序：certified → validated → draft → deprecated；同 lifecycle 再按 block_type + block_id
+
+**`app.py` 新增 `_render_block_library_panel()`**：
+- Sidebar expander "Data Block Library"
+- `st.text_input` 搜尋框（placeholder "block name, type…"）
+- 每個 block 一個 nested expander：lifecycle badge + type icon + summary line
+  - 展開後：description、grain、metrics list、columns（前 8）、relationships
+
+#### 021-C. 驗收測試
+
+| 測試檔案 | Tests | 內容 |
+|---------|-------|------|
+| `tests/test_block_library.py` | 23 | badge/icon 完整性、build/search/sort、BlockCard properties |
+| `tests/e2e/test_round021_block_library.py` | 9 | expander 存在、block 列表、lifecycle 顯示、search、expand card |
+
+| 指標 | 結果 |
+| Unit regression | 434 passed |
+| E2E | 9 passed |
+
+#### Next Round Candidates
+
+1. **R2 Relationship View** — 在 Block Library 中加入 certified/uncertified relationship 視覺化（圖形或表格）
+2. **NL2 Composition Planner** — 業務輸入「把 queue time 和 yield rate 放在同一張圖」→ AI 判斷是否有 certified 關聯，建立 CompositionProposal
+3. **DQ Status Badges** — 依 Data Quality 四等級（004-E）在 Block Library 和 Canvas 顯示資料新鮮度警示
