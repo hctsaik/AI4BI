@@ -37,7 +37,7 @@ from ai4bi.report.block_library import build_block_library, LIFECYCLE_BADGE
 from ai4bi.blocks.contracts import LifecycleStatus
 from ai4bi.ui.upload import render_upload_panel, _USER_BLOCKS_KEY, _USER_BLOCK_META_KEY, _PENDING_NEW_BLOCK_KEY
 from ai4bi.report.user_report import build_report_from_block
-from ai4bi.ai.suggestions import generate_suggestions, ChartSuggestion
+from ai4bi.ai.suggestions import generate_suggestions, detect_anomalies, AnomalyObservation, ChartSuggestion
 from ai4bi.report.retail_template import build_retail_demo_report, build_retail_sales_block
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
@@ -456,9 +456,9 @@ def _render_add_visual_panel(
             return
 
         # --- Step 1: Select block ---
-        block_display_names = {bc.block_id: bc.display_name for bc in catalog}
+        block_display_names = {bc.block_id: bc.display_name or bc.block_id for bc in catalog}
         selected_block_id = st.selectbox(
-            "1. Select block",
+            "1. 選擇資料來源",
             list(block_display_names.keys()),
             format_func=lambda bid: block_display_names[bid],
             key="add_visual_block",
@@ -474,7 +474,7 @@ def _render_add_visual_panel(
             for m in block_catalog.metrics
         }
         selected_metrics = st.multiselect(
-            "2. Select metric(s) — max 2",
+            "2. 選擇指標（最多 2 個）",
             metric_options,
             format_func=lambda mn: metric_labels.get(mn, mn),
             max_selections=2,
@@ -491,7 +491,7 @@ def _render_add_visual_panel(
             dim_labels[key] = de.display_name
 
         selected_dims = st.multiselect(
-            "3. Select dimension(s) — max 2, optional",
+            "3. 選擇分組維度（最多 2 個，可不選）",
             dim_options,
             format_func=lambda dk: dim_labels.get(dk, dk),
             max_selections=2,
@@ -500,7 +500,7 @@ def _render_add_visual_panel(
 
         # --- Step 4: Select visual type ---
         selected_vtype_str = st.selectbox(
-            "4. Select visual type",
+            "4. 選擇圖表類型",
             _VISUAL_TYPE_OPTIONS,
             format_func=lambda vt: _VISUAL_TYPE_LABELS.get(vt, vt),
             key="add_visual_type",
@@ -615,7 +615,7 @@ _SUGGESTION_ICONS: dict = {
 
 
 def _render_ai_suggestions(report: ExecutableReportSpec, cache: QueryCache) -> None:
-    """Power BI Copilot-style proactive chart suggestions (Round 031)."""
+    """Power BI Copilot-style proactive chart suggestions + anomaly detection (Round 031/034)."""
     contracts = _load_all_contracts()
     if not contracts:
         return
@@ -623,6 +623,20 @@ def _render_ai_suggestions(report: ExecutableReportSpec, cache: QueryCache) -> N
         sm = json.loads(_SEMANTIC_MODEL.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         sm = {}
+
+    # Round 034: proactive anomaly observations
+    anomalies = detect_anomalies(contracts, max_observations=3)
+    if anomalies:
+        with st.expander("🔍 AI 主動發現", expanded=True):
+            st.caption("AI 掃描你的資料後，發現以下值得注意的地方：")
+            for obs in anomalies:
+                sev_color = "#dc2626" if obs.severity == "high" else "#d97706"
+                st.markdown(
+                    f"**{obs.icon} {obs.headline}**  \n"
+                    f"<span style='color:{sev_color};font-size:0.85rem'>{obs.detail}</span>",
+                    unsafe_allow_html=True,
+                )
+            st.markdown("---")
 
     suggestions = generate_suggestions(contracts, sm)
     if not suggestions:
@@ -940,7 +954,7 @@ def _render_explanation_panel(component_id: str, visual) -> None:
         # Blocks & Relationships
         if meta.blocks_used:
             st.markdown("**資料來源**")
-            st.caption("Blocks: " + "  ".join(f"`{b}`" for b in meta.blocks_used))
+            st.caption("來源：" + "、".join(meta.blocks_used))
         if meta.relationships_used:
             for r in meta.relationships_used:
                 cert = "✅ 已認證" if "certified" in r else "⚠️ 未認證"

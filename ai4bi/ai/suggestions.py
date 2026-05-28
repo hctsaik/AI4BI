@@ -1,16 +1,15 @@
-"""AI chart suggestions engine — Round 031.
+"""AI chart suggestions engine — Round 031 / Round 034.
 
-Analyses loaded DataBlockContracts and the semantic model to generate
-proactive chart suggestions, similar to Power BI Copilot's "suggested visuals".
-
-No LLM API call is required — suggestions are rule-based from schema metadata,
-so they work instantly in mock mode and with user-uploaded data.
+Round 034 adds detect_anomalies(): runs simple statistical checks against
+InlineDataSource records to surface proactive "aha moment" observations
+without any LLM API call. Used on data upload to give users 3 observations
+before they ask their first question.
 
 Usage
 -----
-    from ai4bi.ai.suggestions import generate_suggestions
+    from ai4bi.ai.suggestions import generate_suggestions, detect_anomalies
     suggestions = generate_suggestions(contracts, semantic_model)
-    # → list[ChartSuggestion], max 6 entries
+    anomalies  = detect_anomalies(contracts)
 """
 
 from __future__ import annotations
@@ -20,6 +19,16 @@ from typing import Optional
 
 from ai4bi.blocks.contracts import BlockType, DataBlockContract
 from ai4bi.query_spec import VisualType
+
+
+@dataclass
+class AnomalyObservation:
+    """A single AI-generated data observation for the proactive insight panel."""
+    icon: str        # emoji icon
+    headline: str    # one-line headline (e.g. "台中店退貨率異常偏高")
+    detail: str      # supporting detail (e.g. "0.11 vs 平均 0.06，高出 83%")
+    metric: str      # metric column name
+    severity: str    # "high" | "medium" | "info"
 
 
 @dataclass
@@ -154,3 +163,134 @@ def generate_suggestions(
             ))
 
     return suggestions
+
+
+def detect_anomalies(
+    contracts: dict[str, DataBlockContract],
+    max_observations: int = 3,
+) -> list[AnomalyObservation]:
+    """Run statistical anomaly detection against InlineDataSource blocks.
+
+    Round 034: gives users proactive "aha moment" observations immediately
+    after uploading data — no LLM call, pure pandas statistics.
+
+    Checks performed:
+    1. Top-dimension value that deviates most from average (z-score > 1.5)
+    2. Metric with highest coefficient of variation (most volatile)
+    3. Ratio metric that has suspiciously high average (possible data error)
+    """
+    try:
+        import pandas as pd
+        import math
+    except ImportError:
+        return []
+
+    observations: list[AnomalyObservation] = []
+
+    for block_id, contract in contracts.items():
+        if contract.block_type not in (
+            BlockType.fact, BlockType.snapshot_fact, BlockType.target_fact
+        ):
+            continue
+        from ai4bi.blocks.contracts import InlineDataSource
+        if not isinstance(contract.data_source, InlineDataSource):
+            continue
+        records = contract.data_source.records
+        if not records or len(records) < 5:
+            continue
+
+        df = pd.DataFrame(records)
+
+        # Find sum-metrics and ratio-metrics from contract
+        sum_metrics = [
+            m.name for m in contract.metrics
+            if m.disaggregation_method.value in ("sum", "count")
+            and m.name in df.columns
+            and pd.api.types.is_numeric_dtype(df[m.name])
+        ]
+        ratio_metrics = [
+            m.name for m in contract.metrics
+            if m.disaggregation_method.value == "average"
+            and m.name in df.columns
+            and pd.api.types.is_numeric_dtype(df[m.name])
+        ]
+        cat_cols = [
+            c.name for c in contract.columns
+            if c.data_type in ("string", "str", "object")
+            and not _is_id_col(c.name)
+            and c.name in df.columns
+            and df[c.name].nunique() <= 20
+        ]
+
+        # ── Check 1: Category outlier (sum metric grouped by first cat dim) ──
+        if sum_metrics and cat_cols:
+            metric = sum_metrics[0]
+            dim = cat_cols[0]
+            try:
+                grouped = df.groupby(dim)[metric].sum()
+                if len(grouped) >= 3:
+                    mean = grouped.mean()
+                    std = grouped.std()
+                    if std > 0:
+                        z_scores = (grouped - mean) / std
+                        worst = z_scores.abs().idxmax()
+                        z = z_scores[worst]
+                        if abs(z) > 1.5:
+                            direction = "偏高" if z > 0 else "偏低"
+                            pct = abs(grouped[worst] / mean - 1) * 100
+                            observations.append(AnomalyObservation(
+                                icon="📊",
+                                headline=f"「{worst}」的 {metric} 顯著{direction}",
+                                detail=f"{grouped[worst]:,.0f}，比平均 {mean:,.0f} {direction} {pct:.0f}%",
+                                metric=metric,
+                                severity="high" if abs(z) > 2 else "medium",
+                            ))
+            except Exception:  # noqa: BLE001
+                pass
+
+        # ── Check 2: High-volatility metric (CV > 0.5) ──
+        if sum_metrics and len(observations) < max_observations:
+            for metric in sum_metrics[:3]:
+                try:
+                    vals = df[metric].dropna()
+                    if len(vals) < 5:
+                        continue
+                    mean = vals.mean()
+                    std = vals.std()
+                    cv = std / mean if mean > 0 else 0
+                    if cv > 0.6:
+                        observations.append(AnomalyObservation(
+                            icon="📈",
+                            headline=f"{metric} 數值差異很大",
+                            detail=f"變異係數 {cv:.1f}（高於 0.6 表示各筆資料差距懸殊）",
+                            metric=metric,
+                            severity="medium",
+                        ))
+                        break
+                except Exception:  # noqa: BLE001
+                    pass
+
+        # ── Check 3: Ratio metric sanity (avg > 0.5 might be a data error) ──
+        if ratio_metrics and len(observations) < max_observations:
+            for metric in ratio_metrics:
+                try:
+                    avg = df[metric].dropna().mean()
+                    if avg > 0.5:
+                        observations.append(AnomalyObservation(
+                            icon="⚠️",
+                            headline=f"{metric} 平均值偏高，請確認單位",
+                            detail=(
+                                f"平均值 {avg:.2f}（若為百分比欄位，請確認資料是否已是小數形式如 0.05，"
+                                f"而非整數 5）"
+                            ),
+                            metric=metric,
+                            severity="high",
+                        ))
+                        break
+                except Exception:  # noqa: BLE001
+                    pass
+
+        if len(observations) >= max_observations:
+            break
+
+    return observations[:max_observations]
