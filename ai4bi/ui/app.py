@@ -29,7 +29,7 @@ from ai4bi.report.publication import GateCheckResult, run_publication_gate
 from ai4bi.report.templates import build_semiconductor_queue_time_report
 from ai4bi.query_spec import AggFunction, BlockRef, FilterOperator, FilterSpec, MetricRef, VisualizationSpec, VisualQuerySpec, VisualType
 from ai4bi.ui.cache import QueryCache
-from ai4bi.ui.render_visual import get_metadata, render_visual
+from ai4bi.ui.render_visual import get_metadata, humanize_metadata, render_visual
 from ai4bi.ui import workspace
 from ai4bi.ui.viewer import get_draft_path_from_params, is_readonly_mode, render_readonly_banner
 from ai4bi.report.metric_catalog import MetricCatalogService, MetricZone
@@ -1400,6 +1400,11 @@ def _render_visual_cell(
     query = replace(visual.query, data_version=f"draft-r{report.revision}")
     query = _apply_cross_filter_to_query(query, _active_cross_filter_for_page(page_id), component_id)
     render_visual(query, visual.visualization, cache, executor, active_filters)
+    # Round 032: show human-readable data source summary below visual
+    _meta = get_metadata(component_id)
+    _summary = humanize_metadata(_meta)
+    if _summary:
+        st.caption(f"🔍 {_summary}")
     _render_explanation_panel(component_id, visual)
 
 

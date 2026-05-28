@@ -145,6 +145,9 @@ class Executor:
         self._loader = loader or BlockLoader()
         self._registry = registry  # optional BlockRegistryProtocol for versioned resolution
         self._extra_contracts: dict[str, DataBlockContract] = extra_contracts or {}
+        # Round 032: cache Arrow tables so InlineDataSource records are not
+        # re-serialised on every query within the same Executor instance
+        self._arrow_cache: dict[str, Any] = {}
         inferred_model = self._registry_root.parent / "semantic_model.json"
         configured_model = Path(semantic_model_path) if semantic_model_path else inferred_model
         self._semantic_model = (
@@ -348,7 +351,15 @@ class Executor:
             for ref in spec.block_refs:
                 contract = self._resolve_block_contract(ref, version_snapshot=version_snapshot)
                 contracts[ref.block_id] = contract
-                self._loader.register_to_duckdb(contract, ref.block_id, conn)
+                # Round 032: reuse cached Arrow table for InlineDataSource blocks
+                from ai4bi.blocks.contracts import InlineDataSource as _Inline
+                if isinstance(contract.data_source, _Inline) and ref.block_id in self._arrow_cache:
+                    conn.register(ref.block_id, self._arrow_cache[ref.block_id])
+                else:
+                    self._loader.register_to_duckdb(contract, ref.block_id, conn)
+                    if isinstance(contract.data_source, _Inline):
+                        # Cache the Arrow table for subsequent queries in this session
+                        self._arrow_cache[ref.block_id] = self._loader.to_arrow(contract)
 
             joins = self._planner.resolve(spec, contracts)
             params: list[Any] = []

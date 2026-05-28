@@ -1,23 +1,20 @@
-"""Self-serve CSV / Excel data import — Round 028.
+"""Self-serve CSV / Excel data import — Round 028 / Round 032.
 
-Users can upload their own tabular data; the module auto-infers a
-DataBlockContract and stores it in st.session_state["user_blocks"] so
-the executor can query it without writing to disk.
-
-Column classification heuristics
----------------------------------
-date   — dtype is datetime64, OR column name matches DATE_RE
-metric — dtype is numeric AND name does not match ID_RE
-dim    — dtype is string / categorical, OR name matches ID_RE but isn't numeric
-pk     — name matches ID_RE and uniqueness ≥ 95 %
+Round 032 adds:
+- Ratio column detection: columns whose names suggest a rate/percentage/margin
+  are classified as average-aggregated metrics, NOT sum-aggregated, to prevent
+  displaying nonsense like "profit margin total = 347%".
+- Data Health Check UI: before importing, users see a colour-coded confirmation
+  of how each column will be treated.
+- Human-readable metadata sentence shown below each visual.
 """
 
 from __future__ import annotations
 
 import io
 import re
-import uuid
-from typing import Optional
+from dataclasses import dataclass
+from typing import Literal, Optional
 
 import pandas as pd
 import streamlit as st
@@ -35,13 +32,48 @@ from ai4bi.blocks.contracts import (
 )
 
 _USER_BLOCKS_KEY = "user_blocks"
-_USER_BLOCK_META_KEY = "user_block_meta"  # {block_id: {metric_names, dim_names}}
+_USER_BLOCK_META_KEY = "user_block_meta"
 
-_DATE_RE = re.compile(
-    r"\b(date|time|day|month|year|week|period|ts|timestamp|dt)\b", re.I
-)
 _ID_RE = re.compile(r"(_id|_key|_code|_num|_no)\s*$|^id$", re.I)
+
+# Token-based keyword sets — split column name by _ and spaces, then check tokens
+# This correctly handles compound names like "profit_margin", "sale_date".
+_DATE_TOKENS = frozenset({
+    "date", "time", "day", "month", "year", "week", "period",
+    "timestamp", "ts", "dt", "created", "updated", "at",
+})
+# Round 032: ratio/percentage column names — these should NEVER be summed
+_RATIO_TOKENS = frozenset({
+    "rate", "ratio", "pct", "percent", "margin", "yield", "utilization",
+    "efficiency", "coverage", "conversion", "churn", "retention",
+    "accuracy", "score", "index", "proportion", "share", "fraction",
+})
+
+# Still keep _DATE_RE for backward-compat usages elsewhere
+_DATE_RE = re.compile(r"\b(date|time|day|month|year|week|period|ts|timestamp|dt)\b", re.I)
+
+
+def _col_tokens(col_name: str) -> list[str]:
+    """Split column name into lowercase tokens by underscores and spaces."""
+    return [t for t in re.split(r"[_\s]+", col_name.lower()) if t]
+
+
+def _is_date_col_name(col_name: str) -> bool:
+    return bool(set(_col_tokens(col_name)) & _DATE_TOKENS)
+
+
+def _is_ratio_col_name(col_name: str) -> bool:
+    return bool(set(_col_tokens(col_name)) & _RATIO_TOKENS)
 _MAX_INLINE_ROWS = 50_000
+
+ColCategory = Literal["sum_metric", "ratio_metric", "date", "dimension", "primary_key"]
+
+
+@dataclass
+class ColumnClassification:
+    name: str
+    category: ColCategory
+    sample: str   # first non-null value as string
 
 
 def _slugify(name: str) -> str:
@@ -49,16 +81,44 @@ def _slugify(name: str) -> str:
 
 
 def _detect_date_cols(df: pd.DataFrame) -> set[str]:
-    """Try to parse string columns that look like dates."""
+    """Detect string columns that represent dates by name tokens + parse attempt."""
     guessed: set[str] = set()
     for col in df.select_dtypes(include=["object", "string"]).columns:
-        if _DATE_RE.search(col):
+        if _is_date_col_name(col):
             try:
-                pd.to_datetime(df[col].dropna().head(20), infer_datetime_format=True)
+                pd.to_datetime(df[col].dropna().head(20))
                 guessed.add(col)
             except Exception:  # noqa: BLE001
                 pass
     return guessed
+
+
+def classify_df(df: pd.DataFrame) -> list[ColumnClassification]:
+    """Return a ColumnClassification for each column — used for the Health Check UI."""
+    guessed_dates = _detect_date_cols(df)
+    result: list[ColumnClassification] = []
+    for col in df.columns:
+        dtype = df[col].dtype
+        sample_val = df[col].dropna().iloc[0] if not df[col].dropna().empty else ""
+        sample = str(sample_val)[:20]
+        is_numeric = pd.api.types.is_numeric_dtype(dtype)
+        is_datetime = pd.api.types.is_datetime64_any_dtype(dtype) or col in guessed_dates
+        is_id_like = bool(_ID_RE.search(col))
+        # Round 032: use token-based ratio detection
+        is_ratio = is_numeric and _is_ratio_col_name(col)
+
+        if is_datetime:
+            category: ColCategory = "date"
+        elif is_id_like:
+            category = "primary_key"
+        elif is_ratio:
+            category = "ratio_metric"
+        elif is_numeric:
+            category = "sum_metric"
+        else:
+            category = "dimension"
+        result.append(ColumnClassification(name=col, category=category, sample=sample))
+    return result
 
 
 def infer_block(
@@ -71,7 +131,7 @@ def infer_block(
     Returns
     -------
     contract      : validated DataBlockContract
-    metric_names  : original column names classified as metrics
+    metric_names  : original column names classified as metrics (sum + ratio)
     dim_names     : original column names classified as dimensions
     """
     guessed_dates = _detect_date_cols(df)
@@ -87,17 +147,27 @@ def infer_block(
         is_numeric = pd.api.types.is_numeric_dtype(dtype)
         is_datetime = pd.api.types.is_datetime64_any_dtype(dtype) or col in guessed_dates
         is_id_like = bool(_ID_RE.search(col))
+        # Round 032: ratio columns use average, not sum — token-based detection
+        is_ratio = is_numeric and _is_ratio_col_name(col)
 
         if is_datetime:
             col_type = "date"
             dim_names.append(col)
         elif is_numeric and not is_id_like:
             col_type = "float" if pd.api.types.is_float_dtype(dtype) else "integer"
+            if is_ratio:
+                agg = DisaggregationMethod.average
+                formula = f"AVG({col})"
+                desc = f"Average of {col} (ratio — not summed)"
+            else:
+                agg = DisaggregationMethod.sum
+                formula = f"SUM({col})"
+                desc = f"Sum of {col}"
             metrics.append(MetricDefinition(
                 name=col,
-                formula=f"SUM({col})",
-                disaggregation_method=DisaggregationMethod.sum,
-                description=f"Sum of {col}",
+                formula=formula,
+                disaggregation_method=agg,
+                description=desc,
             ))
             metric_names.append(col)
         else:
@@ -162,8 +232,51 @@ def _load_file(uploaded_file) -> Optional[pd.DataFrame]:
     return None
 
 
+_COL_CATEGORY_LABEL: dict[ColCategory, str] = {
+    "sum_metric":   "📊 加總指標",
+    "ratio_metric": "⚠️ 比率欄位",
+    "date":         "📅 日期",
+    "dimension":    "🏷️ 分類",
+    "primary_key":  "🔑 識別碼",
+}
+_COL_CATEGORY_NOTE: dict[ColCategory, str] = {
+    "sum_metric":   "加總計算（SUM）",
+    "ratio_metric": "⚠️ 平均計算（AVG），不加總——避免顯示錯誤數字",
+    "date":         "時間維度",
+    "dimension":    "分類維度",
+    "primary_key":  "主鍵，不計算",
+}
+
+
+def _render_health_check(classifications: list[ColumnClassification]) -> None:
+    """Render the Data Health Check card — Round 032."""
+    groups: dict[ColCategory, list[str]] = {
+        "sum_metric": [], "ratio_metric": [], "date": [],
+        "dimension": [], "primary_key": [],
+    }
+    for c in classifications:
+        groups[c.category].append(c.name)
+
+    has_ratio = bool(groups["ratio_metric"])
+    if has_ratio:
+        st.warning(
+            f"⚠️ 偵測到 **{len(groups['ratio_metric'])}** 個比率欄位：{', '.join(groups['ratio_metric'])}。"
+            "這些欄位將以**平均值**計算，不會直接加總（避免「毛利率合計 = 347%」這類錯誤）。"
+            "如果判斷不正確，請在下方修正。"
+        )
+
+    for cat in ("sum_metric", "ratio_metric", "date", "dimension"):
+        names = groups[cat]
+        if not names:
+            continue
+        label = _COL_CATEGORY_LABEL[cat]
+        note = _COL_CATEGORY_NOTE[cat]
+        st.caption(f"**{label}**（{len(names)}）— {note}")
+        st.caption("  ".join(f"`{n}`" for n in names))
+
+
 def render_upload_panel() -> None:
-    """Render the 'Upload Your Data' sidebar expander (Round 028)."""
+    """Render the 'Upload Your Data' sidebar expander — Round 028/032."""
     with st.expander("上傳資料", expanded=False):
         st.caption("支援 CSV、Excel (.xlsx)、Parquet — 最多 50,000 行")
 
@@ -188,31 +301,38 @@ def render_upload_panel() -> None:
         # Auto-generate block_id from filename
         raw_name = re.sub(r"\.[^.]+$", "", uploaded.name)
         default_id = _slugify(raw_name) or "my_data"
-        block_id = st.text_input("Block ID (識別碼)", value=default_id, key="upload_block_id")
-        block_id = _slugify(block_id) or default_id
+        # Round 032: user-friendly label (no "Block ID" jargon)
+        data_name = st.text_input(
+            "這份資料的名稱",
+            value=raw_name or default_id,
+            key="upload_block_id",
+            help="之後可以用這個名稱讓 AI 查詢它",
+        )
+        block_id = _slugify(data_name) or default_id
 
         # Preview
-        with st.container():
-            st.caption(f"預覽（前 5 行，共 {len(df):,} 行 × {len(df.columns)} 欄）")
-            st.dataframe(df.head(5), use_container_width=True, hide_index=True)
+        st.caption(f"資料預覽（前 5 行，共 {len(df):,} 行 × {len(df.columns)} 欄）")
+        st.dataframe(df.head(5), use_container_width=True, hide_index=True)
+
+        # Round 032: Data Health Check
+        classifications = classify_df(df)
+        st.markdown("---")
+        st.caption("**📋 AI 讀懂了這些欄位**")
+        _render_health_check(classifications)
 
         # Infer contract
         contract, metric_names, dim_names = infer_block(df, block_id, uploaded.name)
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.caption(f"**指標（{len(metric_names)}）**")
-            for m in metric_names:
-                st.markdown(f"- {m}")
-        with col2:
-            st.caption(f"**維度（{len(dim_names)}）**")
-            for d in dim_names:
-                st.markdown(f"- {d}")
-
         if not metric_names:
             st.warning("未偵測到數值欄位，請確認資料格式。")
 
-        if st.button("匯入 Block", key="upload_import_btn", type="primary", disabled=not metric_names):
+        st.markdown("---")
+        if st.button(
+            "✅ 確認並匯入",
+            key="upload_import_btn",
+            type="primary",
+            disabled=not metric_names,
+        ):
             if _USER_BLOCKS_KEY not in st.session_state:
                 st.session_state[_USER_BLOCKS_KEY] = {}
             if _USER_BLOCK_META_KEY not in st.session_state:
@@ -221,10 +341,10 @@ def render_upload_panel() -> None:
             st.session_state[_USER_BLOCK_META_KEY][block_id] = {
                 "metric_names": metric_names,
                 "dim_names": dim_names,
-                "display_name": uploaded.name,
+                "display_name": data_name,
                 "row_count": len(df),
             }
-            st.success(f"已匯入 `{block_id}` — {len(metric_names)} 個指標，{len(dim_names)} 個維度")
+            st.success(f"✅ 已匯入「{data_name}」— {len(metric_names)} 個指標，{len(dim_names)} 個分類")
             st.rerun()
 
         _render_existing_blocks()

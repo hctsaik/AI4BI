@@ -291,6 +291,31 @@ def get_metadata(component_id: str) -> Optional[Any]:
     return st.session_state.get(_METADATA_KEY, {}).get(component_id)
 
 
+def humanize_metadata(meta) -> str:
+    """Convert ResultMetadata to a human-readable Chinese sentence. Round 032.
+
+    Example output:
+      「843 筆資料 ｜ 已套用 2 個篩選 ｜ 計算於 14:23」
+    """
+    if meta is None:
+        return ""
+    parts: list[str] = []
+    if getattr(meta, "row_count", None):
+        parts.append(f"{meta.row_count:,} 筆資料")
+    if getattr(meta, "filters_applied", None):
+        parts.append(f"已套用 {len(meta.filters_applied)} 個篩選")
+    if getattr(meta, "blocks_used", None):
+        parts.append(f"來源：{'、'.join(meta.blocks_used)}")
+    executed_at = getattr(meta, "executed_at", "") or ""
+    if executed_at and len(executed_at) >= 19:
+        time_part = executed_at[11:19]  # HH:MM:SS from ISO string
+        if "(cached)" in executed_at:
+            parts.append(f"⚡ 快取")
+        else:
+            parts.append(f"計算於 {time_part}")
+    return "　｜　".join(parts)
+
+
 def render_visual(
     query_spec: VisualQuerySpec,
     style: VisualizationSpec,
