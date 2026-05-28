@@ -24,6 +24,7 @@ from ai4bi.ai.intent_models import (
     SemanticSelection,
 )
 from ai4bi.ai.llm_adapter import LLMAdapter
+from ai4bi.ai.schema_index import SchemaIndex  # Round 035: dynamic schema lookup
 from ai4bi.query_spec import AggFunction, DimensionRef, MetricRef, VisualType
 from ai4bi.report.models import ExecutableReportSpec, ReportChange, ReportProposal, ReportVisualSpec
 
@@ -531,7 +532,8 @@ class NL2ProposalService:
         if remove_metric_name is not None:
             return self._remove_metric(remove_metric_name, report, selected_component_id)
 
-        cat_dim = _extract_categorical_dimension(prompt, normalized)
+        # Round 035: pass contracts for dynamic schema fallback
+        cat_dim = _extract_categorical_dimension(prompt, normalized, contracts)
         if cat_dim is not None:
             return self._categorical_dimension_change(cat_dim, report, selected_component_id, semantic_model)
 
@@ -539,6 +541,10 @@ class NL2ProposalService:
         if value_filter is not None:
             col_name, values = value_filter
             return self._value_filter_change(col_name, values, report, selected_component_id, semantic_model)
+
+        # Round 036: period-over-period comparison
+        if _looks_like_period_comparison(prompt, normalized):
+            return self._period_comparison(prompt, normalized, report, selected_component_id, contracts)
 
         return self._unsupported(
             "No supported governed BI intent was detected.",
@@ -619,6 +625,131 @@ class NL2ProposalService:
             intent=intent,
             message=message,
             proposal=proposal,
+            trust_notes=notes,
+            risk_level="low",
+        )
+
+    # ------------------------------------------------------------------
+    # Round 036: period_comparison — create two KPI cards for current vs prev period
+    # ------------------------------------------------------------------
+
+    def _period_comparison(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        selected_component_id: str | None,
+        contracts: dict[str, Any] | None,
+    ) -> NL2ProposalResult:
+        """Add two side-by-side KPI cards: current period vs previous period."""
+        from ai4bi.report.builder import build_add_visual_proposal
+        from ai4bi.query_spec import BlockRef, FilterOperator, FilterSpec, VisualQuerySpec, VisualizationSpec
+        from ai4bi.report.models import ReportVisualSpec
+        import datetime
+
+        period, period_label, prev_label = _extract_comparison_period(normalized, prompt)
+
+        # Find the primary fact block and first SUM metric from the current visual or report
+        found = _find_visual(report, selected_component_id)
+        if found is None:
+            # Use first visual in report
+            for page in report.pages.values():
+                for vid, v in page.visuals.items():
+                    if v.query.metrics:
+                        found = (list(report.pages.keys())[0], vid, v)
+                        break
+                if found:
+                    break
+        if found is None:
+            return self._unsupported("找不到可以用於比較的圖表，請先選擇一個圖表。", target_scope="canvas")
+
+        page_id, _vid, visual = found
+        if not visual.query.metrics:
+            return self._unsupported("所選圖表沒有指標，無法建立比較。", target_scope=f"visual:{_vid}")
+
+        metric = visual.query.metrics[0]
+        fact_block = metric.block_id
+        today = datetime.date.today()
+
+        if period == "week":
+            start_curr = today - datetime.timedelta(days=today.weekday())
+            start_prev = start_curr - datetime.timedelta(weeks=1)
+            end_prev = start_curr - datetime.timedelta(days=1)
+        elif period == "month":
+            start_curr = today.replace(day=1)
+            prev_month = (start_curr - datetime.timedelta(days=1)).replace(day=1)
+            start_prev = prev_month
+            end_prev = start_curr - datetime.timedelta(days=1)
+        else:  # default: last 7 days vs prev 7 days
+            start_curr = today - datetime.timedelta(days=6)
+            start_prev = start_curr - datetime.timedelta(days=7)
+            end_prev = start_curr - datetime.timedelta(days=1)
+
+        # Find the date column in the fact block
+        date_col = None
+        if contracts and fact_block in contracts:
+            for col in contracts[fact_block].columns:
+                if col.data_type in ("date", "timestamp") or any(
+                    t in col.name.lower() for t in ("date", "time", "dt", "ts", "day")
+                ):
+                    date_col = col.name
+                    break
+
+        existing = set(report.pages.get("main", type("_", (), {"visuals": {}})()).visuals.keys())
+        proposals = []
+        for label, start, end in [
+            (period_label, start_curr, today),
+            (prev_label, start_prev, end_prev),
+        ]:
+            vid = f"kpi_cmp_{metric.metric_name}_{label.replace(' ', '_')}"
+            c = 1
+            while vid in existing:
+                vid = f"kpi_cmp_{metric.metric_name}_{label.replace(' ', '_')}_{c}"; c += 1
+            existing.add(vid)
+
+            filters = []
+            if date_col:
+                filters = [
+                    FilterSpec(fact_block, date_col, FilterOperator.gte, str(start), False),
+                    FilterSpec(fact_block, date_col, FilterOperator.lte, str(end), False),
+                ]
+
+            q = VisualQuerySpec(
+                spec_id=vid,
+                block_refs=[BlockRef(fact_block)],
+                metrics=[MetricRef(fact_block, metric.metric_name, f"{metric.alias or metric.metric_name}")],
+                filters=filters,
+                inherit_global_filter=False,
+            )
+            v = VisualizationSpec(VisualType.kpi_card, title=f"{label}", extra={})
+            rv = ReportVisualSpec(vid, q, v, col_span=6)
+            proposals.append(build_add_visual_proposal(page_id, vid, q, v))
+
+        from dataclasses import replace as _replace
+        # Apply both proposals
+        notes = [
+            f"建立兩個 KPI 看板比較 {period_label} vs {prev_label}。",
+            f"指標：{metric.alias or metric.metric_name}（來源：{fact_block}）",
+            "日期過濾器已嵌入各 KPI 看板，不影響其他圖表。",
+        ]
+
+        # Merge two proposals into one by combining their changes
+        all_changes = proposals[0].changes + proposals[1].changes
+        merged = ReportProposal(
+            description=f"Period comparison: {period_label} vs {prev_label}",
+            changes=all_changes,
+        )
+
+        intent = AIIntent(
+            intent_kind="analysis_request",
+            target_scope=f"page:{page_id}",
+            trust_notes=notes,
+            risk_level="low",
+        )
+        return NL2ProposalResult(
+            intent=intent,
+            message=f"已建立 {period_label} vs {prev_label} 的比較 KPI。",
+            proposal=merged,
             trust_notes=notes,
             risk_level="low",
         )
@@ -1313,11 +1444,19 @@ class NL2ProposalService:
             )
 
         # Resolve dimension keyword → "block_id.column_name"
+        # Round 035: static map first, then dynamic SchemaIndex fallback
         dim_spec = _DIM_KEYWORD_MAP.get(dimension_kw)
         dimension_names: list[str] = []
         if dim_spec:
             dim_block, dim_col, _dim_alias, _truncate = dim_spec
             dimension_names = [f"{dim_block}.{dim_col}"]
+        elif dimension_kw and contracts:
+            _idx = SchemaIndex.build(contracts)
+            _entry = _idx.find_dim(dimension_kw) or _idx.best_dim_match(
+                dimension_kw, dimension_kw.lower()
+            )
+            if _entry:
+                dimension_names = [f"{_entry.block_id}.{_entry.column_name}"]
 
         # Generate unique visual_id
         existing = set(report.pages.get("main", type("_", (), {"visuals": {}})()).visuals.keys())
@@ -1797,16 +1936,23 @@ _CATEGORICAL_DIM_MAP: dict[str, dict] = {
 _CAT_DIM_TRIGGERS = ("group by", "分組", "按", "group", "breakdown by", "by ", "改用", "按照")
 
 
-def _extract_categorical_dimension(prompt: str, normalized: str) -> dict | None:
-    """
-    Extract a categorical dimension target from the prompt.
+def _extract_categorical_dimension(
+    prompt: str,
+    normalized: str,
+    contracts: dict | None = None,
+) -> dict | None:
+    """Extract a categorical dimension target from the prompt.
+
+    Round 035: Falls back to SchemaIndex (dynamic lookup from loaded contracts)
+    when the static semiconductor map has no match.
+
     Returns {"block_id": ..., "column_name": ..., "alias": ...} or None.
     Only triggers when a group/dimension change verb is present.
     """
     has_trigger = any(t.lower() in normalized or t in prompt for t in _CAT_DIM_TRIGGERS)
     if not has_trigger:
         return None
-    # Longest match wins
+    # Longest match wins — static map first
     best: dict | None = None
     best_len = 0
     for keyword, dim in _CATEGORICAL_DIM_MAP.items():
@@ -1815,6 +1961,17 @@ def _extract_categorical_dimension(prompt: str, normalized: str) -> dict | None:
             if len(keyword) > best_len:
                 best = dim
                 best_len = len(keyword)
+
+    # Round 035: dynamic fallback via SchemaIndex
+    if best is None and contracts:
+        idx = SchemaIndex.build(contracts)
+        entry = idx.best_dim_match(prompt, normalized)
+        if entry is not None:
+            best = {
+                "block_id": entry.block_id,
+                "column_name": entry.column_name,
+                "alias": entry.alias,
+            }
     return best
 
 
@@ -1905,3 +2062,31 @@ def _extract_date_period(prompt: str, normalized: str) -> str | None:
                 best_match = period
                 best_len = len(keyword)
     return best_match
+
+
+# ---------------------------------------------------------------------------
+# Round 036: Period comparison detection
+# ---------------------------------------------------------------------------
+
+_PERIOD_COMPARISON_KEYWORDS = (
+    "vs", "versus", "compare", "comparison", "compared",
+    "比較", "對比", "比", "vs.", "相比",
+)
+_PERIOD_COMPARISON_PERIOD_KEYWORDS = (
+    "week", "weekly", "週", "這週", "本週", "上週",
+    "month", "monthly", "月", "這月", "本月", "上月",
+)
+
+
+def _looks_like_period_comparison(prompt: str, normalized: str) -> bool:
+    has_vs = any(k in normalized or k in prompt for k in _PERIOD_COMPARISON_KEYWORDS)
+    has_period = any(k in normalized or k in prompt for k in _PERIOD_COMPARISON_PERIOD_KEYWORDS)
+    return has_vs and has_period
+
+
+def _extract_comparison_period(normalized: str, prompt: str) -> tuple:
+    if any(k in normalized or k in prompt for k in ("month", "monthly", "月", "本月", "這月", "上月")):
+        return ("month", "本月", "上月")
+    if any(k in normalized or k in prompt for k in ("week", "weekly", "週", "本週", "這週", "上週")):
+        return ("week", "本週", "上週")
+    return ("week", "近 7 天", "前 7 天")
