@@ -33,6 +33,7 @@ from ai4bi.blocks.contracts import (
 
 _USER_BLOCKS_KEY = "user_blocks"
 _USER_BLOCK_META_KEY = "user_block_meta"
+_PENDING_NEW_BLOCK_KEY = "pending_new_block"   # Round 033: triggers auto-build in app.py
 
 _ID_RE = re.compile(r"(_id|_key|_code|_num|_no)\s*$|^id$", re.I)
 
@@ -344,7 +345,8 @@ def render_upload_panel() -> None:
                 "display_name": data_name,
                 "row_count": len(df),
             }
-            st.success(f"✅ 已匯入「{data_name}」— {len(metric_names)} 個指標，{len(dim_names)} 個分類")
+            # Round 033: signal app.py to auto-build report immediately
+            st.session_state[_PENDING_NEW_BLOCK_KEY] = block_id
             st.rerun()
 
         _render_existing_blocks()

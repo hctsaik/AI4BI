@@ -1,3 +1,8 @@
+"""App workflow integration tests.
+
+Round 033 update: default report is now the retail demo.
+Semiconductor-specific tests switch to semi demo via the "載入半導體示範報表" button.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -13,7 +18,7 @@ def _click(app: AppTest, label: str) -> None:
 
 
 def _new_app() -> AppTest:
-    return AppTest.from_file(str(APP_PATH)).run(timeout=20)
+    return AppTest.from_file(str(APP_PATH)).run(timeout=30)
 
 
 def _visual_selectbox(app: AppTest):
@@ -21,30 +26,66 @@ def _visual_selectbox(app: AppTest):
     return next(sb for sb in app.selectbox if sb.key == "selected_component_id")
 
 
+def _load_semi_demo(app: AppTest) -> AppTest:
+    """Switch the app to the semiconductor demo report (needed for semi-specific tests)."""
+    _click(app, "載入半導體示範報表")
+    return app
+
+
+# ---------------------------------------------------------------------------
+# Retail demo workflow tests
+# ---------------------------------------------------------------------------
+
 def test_style_prompt_previews_applies_and_undoes_without_changing_metrics():
+    """Style change on retail demo's line chart — color change should not affect KPI numbers."""
     app = _new_app()
     original_metrics = [(metric.label, metric.value) for metric in app.metric]
-    _visual_selectbox(app).set_value("line_queue_by_day").run(timeout=20)
+
+    _visual_selectbox(app).set_value("line_revenue_trend").run(timeout=20)
     app.text_input[0].set_value("make trend line red").run(timeout=20)
 
     _click(app, "送出請求")
     report = app.session_state["report_spec"]
-    assert report.pages["main"].visuals["line_queue_by_day"].visualization.extra["line_color"] is None
+    # Proposal staged but not yet applied — color should still be None
+    assert report.pages["main"].visuals["line_revenue_trend"].visualization.extra["line_color"] is None
     assert [(metric.label, metric.value) for metric in app.metric] == original_metrics
 
     _click(app, "Apply Proposal")
     report = app.session_state["report_spec"]
-    assert report.pages["main"].visuals["line_queue_by_day"].visualization.extra["line_color"] == "#D62728"
+    assert report.pages["main"].visuals["line_revenue_trend"].visualization.extra["line_color"] == "#D62728"
     assert [(metric.label, metric.value) for metric in app.metric] == original_metrics
 
     _click(app, "復原")
     report = app.session_state["report_spec"]
-    assert report.pages["main"].visuals["line_queue_by_day"].visualization.extra["line_color"] is None
+    assert report.pages["main"].visuals["line_revenue_trend"].visualization.extra["line_color"] is None
     assert not app.exception
 
 
-def test_analysis_prompt_waits_for_apply_and_then_undo_restores_controls_and_numbers():
+def test_unsupported_assistant_request_clears_stale_pending_proposal():
+    """Unsupported request clears any previously staged proposal."""
     app = _new_app()
+    _visual_selectbox(app).set_value("line_revenue_trend").run(timeout=20)
+    app.text_input[0].set_value("make trend line red").run(timeout=20)
+
+    _click(app, "送出請求")
+    assert app.session_state["pending_patch"] is not None
+
+    app.text_input[0].set_value("write SQL to join raw orders to inventory raw detail rows").run(timeout=20)
+    _click(app, "送出請求")
+
+    assert app.session_state["pending_patch"] is None
+    assert not app.exception
+
+
+# ---------------------------------------------------------------------------
+# Semiconductor demo workflow tests (need semi data)
+# ---------------------------------------------------------------------------
+
+def test_analysis_prompt_waits_for_apply_and_then_undo_restores_controls_and_numbers():
+    """Filter application and undo — semiconductor demo required for specific KPI values."""
+    app = _new_app()
+    _load_semi_demo(app)
+
     _visual_selectbox(app).set_value("line_queue_by_day").run(timeout=20)
     app.text_input[0].set_value("Only show Logic-B").run(timeout=20)
 
@@ -71,7 +112,9 @@ def test_analysis_prompt_waits_for_apply_and_then_undo_restores_controls_and_num
 
 
 def test_manual_slicer_change_is_part_of_report_history():
+    """Manual slicer change is undoable — semiconductor demo required for specific controls."""
     app = _new_app()
+    _load_semi_demo(app)
 
     app.multiselect[1].set_value(["Logic-B"]).run(timeout=20)
     assert [(metric.label, metric.value) for metric in app.metric] == [
@@ -85,19 +128,4 @@ def test_manual_slicer_change_is_part_of_report_history():
         ("Processed Moves", "6.0 moves"),
         ("Average Queue Time", "2.7 hr"),
     ]
-    assert not app.exception
-
-
-def test_unsupported_assistant_request_clears_stale_pending_proposal():
-    app = _new_app()
-    _visual_selectbox(app).set_value("line_queue_by_day").run(timeout=20)
-    app.text_input[0].set_value("make trend line red").run(timeout=20)
-
-    _click(app, "送出請求")
-    assert app.session_state["pending_patch"] is not None
-
-    app.text_input[0].set_value("write SQL to join raw queue moves to wafer yield detail rows").run(timeout=20)
-    _click(app, "送出請求")
-
-    assert app.session_state["pending_patch"] is None
     assert not app.exception

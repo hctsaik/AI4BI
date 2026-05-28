@@ -35,9 +35,10 @@ from ai4bi.ui.viewer import get_draft_path_from_params, is_readonly_mode, render
 from ai4bi.report.metric_catalog import MetricCatalogService, MetricZone
 from ai4bi.report.block_library import build_block_library, LIFECYCLE_BADGE
 from ai4bi.blocks.contracts import LifecycleStatus
-from ai4bi.ui.upload import render_upload_panel, _USER_BLOCKS_KEY, _USER_BLOCK_META_KEY
+from ai4bi.ui.upload import render_upload_panel, _USER_BLOCKS_KEY, _USER_BLOCK_META_KEY, _PENDING_NEW_BLOCK_KEY
 from ai4bi.report.user_report import build_report_from_block
 from ai4bi.ai.suggestions import generate_suggestions, ChartSuggestion
+from ai4bi.report.retail_template import build_retail_demo_report, build_retail_sales_block
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
 _BLOCKS_DIR = _DEMO_ROOT / "blocks"
@@ -687,14 +688,22 @@ def _render_draft_controls(
     with st.sidebar:
         st.title("AI for BI")
 
-        # Back-to-demo button when viewing a user-uploaded report
+        # Demo switcher — Round 033
         _is_user_report = report.audit.report_id.startswith("upload_")
-        if _is_user_report:
-            if st.button("← 回到示範報表", key="back_to_demo"):
-                workspace.replace_with_loaded(build_semiconductor_queue_time_report())
+        _is_retail_demo = report.audit.report_id == "retail_demo_v1"
+        _is_semi_demo = report.audit.report_id == "semiconductor_queue_time_v1"
+        if _is_user_report or _is_semi_demo:
+            if st.button("← 回到零售示範報表", key="back_to_retail_demo"):
+                workspace.replace_with_loaded(build_retail_demo_report())
                 cache.invalidate_all()
                 st.rerun()
             st.markdown("---")
+        if _is_retail_demo:
+            with st.expander("進階示範（半導體）", expanded=False):
+                if st.button("載入半導體示範報表", key="load_semi_demo"):
+                    workspace.replace_with_loaded(build_semiconductor_queue_time_report())
+                    cache.invalidate_all()
+                    st.rerun()
 
         # ── Zone 0: AI 建議 (Round 031 — Copilot-style suggestions) ─────
         _render_ai_suggestions(report, cache)
@@ -1462,13 +1471,32 @@ def _render_canvas(
 
 
 def main() -> None:
-    st.set_page_config(page_title="AI for BI - Fab Explorer", page_icon="BI", layout="wide")
+    st.set_page_config(page_title="AI for BI", page_icon="📊", layout="wide")
 
     # Determine read-only mode from URL query parameters (?mode=readonly&draft=<path>)
     readonly = is_readonly_mode()
     draft_path_param = get_draft_path_from_params()
 
-    workspace.init_report(build_semiconductor_queue_time_report())
+    # Round 033: default to retail demo (better first impression for non-technical users)
+    workspace.init_report(build_retail_demo_report())
+
+    # Pre-register the retail demo block so the executor can query it
+    if _USER_BLOCKS_KEY not in st.session_state:
+        st.session_state[_USER_BLOCKS_KEY] = {}
+    if "retail_sales" not in st.session_state[_USER_BLOCKS_KEY]:
+        st.session_state[_USER_BLOCKS_KEY]["retail_sales"] = build_retail_sales_block()
+
+    # Round 033: auto-build report when user just imported a new block
+    _pending_block = st.session_state.pop(_PENDING_NEW_BLOCK_KEY, None)
+    if _pending_block and _pending_block in st.session_state.get(_USER_BLOCKS_KEY, {}):
+        _ub = st.session_state[_USER_BLOCKS_KEY][_pending_block]
+        _um = st.session_state.get("user_block_meta", {}).get(_pending_block, {})
+        _new_report = build_report_from_block(
+            _ub,
+            _um.get("metric_names", []),
+            _um.get("dim_names", []),
+        )
+        workspace.replace_with_loaded(_new_report)
 
     # If a draft path is provided via URL, load it once per session
     if draft_path_param and "readonly_draft_loaded" not in st.session_state:
@@ -1496,6 +1524,7 @@ def main() -> None:
     _sync_widget_values(report, force=force_sync)
     cache = QueryCache(use_l1=False)
     store = DraftReportStore(_DRAFT_STORE)
+    # Include all user-uploaded blocks (retail demo + any CSV uploads)
     _user_blocks_exec: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
     executor = Executor(
         registry_root=_BLOCKS_DIR,
@@ -1512,10 +1541,15 @@ def main() -> None:
     if readonly:
         render_readonly_banner()
     else:
-        st.caption(
-            "Editable validated demo draft: process movement facts use a certified direct "
-            "relationship path to tool dimensions."
-        )
+        _rid = report.audit.report_id
+        if _rid == "retail_demo_v1":
+            st.caption("📊 零售示範資料（2026 年 3–5 月合成數據）｜左側上傳你的資料，或直接用自然語言探索。")
+        elif _rid == "semiconductor_queue_time_v1":
+            st.caption("🔬 半導體製程示範 — process movement facts, certified tool_dim join")
+        elif _rid.startswith("upload_"):
+            st.caption("📁 你的資料 — AI 自動建立的起始報表，可用自然語言繼續探索。")
+        else:
+            st.caption(f"報表 ID: `{_rid}`")
 
     # Sandbox banner: shown whenever the report contains non-certified blocks (002-E)
     if not readonly:
@@ -1527,10 +1561,9 @@ def main() -> None:
         st.info(workspace.message())
 
     _trusted_markdown = (
-        "- Demo status: data blocks are validated fixtures, not a published certified report.\n"
-        "- Relationship path: `process_move_fact -> tool_dim`, certified direct `many_to_one` left join.\n"
-        "- Metric rule: `queue_time_hr` uses approved `AVG`; `move_count` uses approved `SUM`.\n"
-        "- Deliberately unavailable: fact-to-fact yield comparison, weighted-yield KPI and formal sharing."
+        "- 示範資料：合成數據，非真實業務資料。\n"
+        "- 退貨率（return_rate）以平均值計算，不加總，避免錯誤數字。\n"
+        "- 所有計算均可點擊「ℹ️ 資料來源與說明」查看原始數字與計算方式。"
     )
 
     if readonly:
