@@ -2883,3 +2883,50 @@ module cache 導致的 `'ProposalResult' object has no attribute 'analysis_plan'
 1. **R2 Data Block View** — 獨立頁面或 tab 顯示 BlockRegistry 中所有 block 的 lifecycle/schema/metrics/relationships
 2. **Breaking Change Detection** — `validate_upgrade()` 函數偵測 DataBlockContract 版本升級的 breaking vs non-breaking change
 3. **Date Filter Intent** — NL2 第四個 intent：「只看最近 3 個月」→ 自動計算 from/to date 並加入 FilterSpec
+
+---
+
+### Round 020 — validate_upgrade() + Date Filter NL2 Intent
+
+| 欄位 | 記錄 |
+| --- | --- |
+| Status | `completed` |
+| Date | `2026-05-28` |
+| Goal | 實作 004-A Breaking Change 偵測規則集；新增 NL2 date_filter_change intent（設計共識 005-B） |
+| Agent perspectives | Round 020 Design Agent + Round 021 Data Block View Design Agent（parallel） |
+| Input | design-council-log.md 004-A breaking change rules、005-B parser spec |
+
+#### 020-A. validate_upgrade()（`ai4bi/blocks/upgrade_validator.py`）
+
+設計共識 004-A 完整實作：
+
+| 分類 | 例子 | 結果 |
+|------|------|------|
+| FORBIDDEN | block_id 改變、primary_keys 修改 | `is_valid=False`、errors 填入 |
+| BREAKING | 刪除 metric/column、grain 變更、型別窄化、disaggregation_method/formula 變更 | `required_bump=major` |
+| NON-BREAKING | 新增 metric/column → minor；description 修改 → patch | `is_valid=True` |
+| NO CHANGE | 完全相同 | `required_bump=none` |
+
+`UpgradeResult` 欄位：`is_valid, required_bump, breaking[], non_breaking[], forbidden[], errors[]`
+
+#### 020-B. Date Filter NL2 Intent（`date_filter_change`）
+
+使用 `global_filters/date_range` 路徑（現有 `_set_path` 完整支援），值存相對字串物件 `{anchor:"relative", period:"last_3m|last_quarter|ytd|..."}` — 不呼叫 `datetime.now()`，保持 deterministic。
+
+支援關鍵字：最近3個月/last 3 months、上季/last quarter、今年/ytd、最近6個月、上個月 + clear 清除
+
+- `affects_data=True`、`risk_level="low"`
+- `intent_kind="analysis_request"`
+- 清除（after=None）在無 date_range 時為 no-op
+
+#### 020-C. 驗收測試
+
+| 測試檔案 | Tests | 內容 |
+|---------|-------|------|
+| `tests/test_upgrade_validator.py` | 21 | forbidden/breaking/non-breaking/metadata |
+| `tests/test_nl2_date_filter.py` | 33 | period detection (17 parametrize) + proposal structure + roundtrip + isolation |
+| `tests/e2e/test_round020_date_filter.py` | 6 | no-crash + feedback visibility |
+
+| 指標 | 結果 |
+| Unit regression | 411 passed |
+| E2E | 6 passed |

@@ -135,6 +135,55 @@ _SQL_REFUSAL_PATTERNS = (
     r"\b(detail|row|raw|move)\b.*\byield\b.*\bjoin\b",
 )
 
+# ---------------------------------------------------------------------------
+# Round 020: Date Filter keyword → relative period mapping
+# Uses {anchor:"relative", period:...} — no datetime.now() call, deterministic.
+# The execution layer resolves relative periods at query time.
+# ---------------------------------------------------------------------------
+
+_DATE_FILTER_PERIOD_MAP: dict[str, str] = {
+    # last 3 months
+    "最近3個月": "last_3m",
+    "最近 3 個月": "last_3m",
+    "最近三個月": "last_3m",
+    "last 3 months": "last_3m",
+    "last3months": "last_3m",
+    "past 3 months": "last_3m",
+    # last quarter
+    "last quarter": "last_quarter",
+    "上季": "last_quarter",
+    "上一季": "last_quarter",
+    "前一季": "last_quarter",
+    # year to date
+    "今年": "ytd",
+    "ytd": "ytd",
+    "year to date": "ytd",
+    "this year": "ytd",
+    "本年度": "ytd",
+    # last 6 months
+    "最近6個月": "last_6m",
+    "最近 6 個月": "last_6m",
+    "最近半年": "last_6m",
+    "last 6 months": "last_6m",
+    # last month
+    "上個月": "last_month",
+    "last month": "last_month",
+    # clear date filter
+    "清除日期": "clear",
+    "clear date": "clear",
+    "remove date filter": "clear",
+    "取消日期篩選": "clear",
+}
+
+_DATE_FILTER_TRIGGER_TERMS = (
+    "最近", "上季", "上一季", "前一季", "今年", "本年度",
+    "last quarter", "last month", "last 3", "last 6",
+    "ytd", "year to date", "this year", "past 3", "past 6",
+    "清除日期", "clear date", "remove date",
+)
+
+_DATE_FILTER_GLOBAL_KEY = "date_range"
+
 
 class NL2ProposalService:
     """Classifies natural-language BI requests into typed, governed outcomes.
@@ -190,6 +239,9 @@ class NL2ProposalService:
         add_metric_name = _extract_add_metric_name(prompt, normalized)
         if add_metric_name is not None:
             return self._add_metric(add_metric_name, report, selected_component_id, semantic_model)
+
+        if _looks_like_date_filter(prompt, normalized):
+            return self._date_filter_change(prompt, normalized, report)
 
         if _looks_like_queue_analysis(normalized):
             return self._queue_time_plan(prompt, report, selected_component_id, semantic_model, contracts)
@@ -329,6 +381,81 @@ class NL2ProposalService:
             analysis_plan=plan,
             trust_notes=notes,
             risk_level="medium",
+        )
+
+    # ------------------------------------------------------------------
+    # Round 020: date_filter_change intent (global_filters/date_range)
+    # ------------------------------------------------------------------
+
+    def _date_filter_change(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+    ) -> NL2ProposalResult:
+        period = _extract_date_period(prompt, normalized)
+        if period is None:
+            return self._unsupported(
+                "Specify a date period: last 3 months (最近3個月), last quarter (上季), "
+                "this year (今年), or clear date filter (清除日期).",
+                target_scope="report",
+            )
+
+        before = report.global_filters.get(_DATE_FILTER_GLOBAL_KEY)
+
+        if period == "clear":
+            after = None
+            description = "Clear date range filter"
+            label = "Date range filter"
+        else:
+            after = {"anchor": "relative", "period": period}
+            description = f"Set date range to {period}"
+            label = f"Date range → {period}"
+
+        if before == after:
+            notes = [f"Date filter is already set to {period}."]
+            intent = AIIntent(
+                intent_kind="analysis_request",
+                target_scope="report",
+                trust_notes=notes,
+                risk_level="low",
+            )
+            return NL2ProposalResult(
+                intent=intent,
+                message=f"Date filter is already set to {period}.",
+                trust_notes=notes,
+                risk_level="low",
+            )
+
+        notes = [
+            f"Setting report-level date_range global filter to {period!r}.",
+            "This affects all visuals that inherit global filters.",
+            "No SQL is generated — the execution layer resolves the relative period at query time.",
+        ]
+        proposal = ReportProposal(
+            description=description,
+            changes=[
+                ReportChange(
+                    path=f"global_filters/{_DATE_FILTER_GLOBAL_KEY}",
+                    label=label,
+                    before=before,
+                    after=after,
+                    affects_data=True,
+                )
+            ],
+        )
+        intent = AIIntent(
+            intent_kind="analysis_request",
+            target_scope="report",
+            trust_notes=notes,
+            risk_level="low",
+        )
+        return NL2ProposalResult(
+            intent=intent,
+            message=f"Date filter proposal created: {description}.",
+            proposal=proposal,
+            trust_notes=notes,
+            risk_level="low",
         )
 
     # ------------------------------------------------------------------
@@ -873,3 +1000,31 @@ def _blocked_terms(normalized: str) -> list[str]:
         if term in normalized:
             terms.append(term)
     return terms
+
+
+# ---------------------------------------------------------------------------
+# Round 020: Date filter detection helpers
+# ---------------------------------------------------------------------------
+
+def _looks_like_date_filter(prompt: str, normalized: str) -> bool:
+    """Detect relative date period requests."""
+    # Direct keyword match (fast path)
+    for keyword in _DATE_FILTER_PERIOD_MAP:
+        if keyword.lower() in normalized or keyword in prompt:
+            return True
+    # Trigger term match (broader)
+    return any(term.lower() in normalized or term in prompt for term in _DATE_FILTER_TRIGGER_TERMS)
+
+
+def _extract_date_period(prompt: str, normalized: str) -> str | None:
+    """Extract the canonical period key from a date filter request."""
+    # Check exact keyword match first (longest match wins)
+    best_match: str | None = None
+    best_len = 0
+    for keyword, period in _DATE_FILTER_PERIOD_MAP.items():
+        kw_lower = keyword.lower()
+        if kw_lower in normalized or keyword in prompt:
+            if len(keyword) > best_len:
+                best_match = period
+                best_len = len(keyword)
+    return best_match
