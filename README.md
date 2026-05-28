@@ -30,8 +30,9 @@ python -m pytest tests/ -q             # run full test suite
 | **Round 019** | ✅ Done | NL2 intent: `chart_type_change` (bar↔line), `dimension_change` (月份/週/日), `add_metric` (owner_block certified check, max 3); new `visualization/visual_type` + `query/metrics` paths; `_store_visual_assistant_context` hot-reload fix | +38 (28 unit + 10 E2E) |
 | **Round 020** | ✅ Done | `validate_upgrade()` breaking change detection (004-A: forbidden/breaking/non-breaking/none); NL2 `date_filter_change` intent (最近3個月/last quarter/ytd, `global_filters/date_range`, deterministic) | +60 (54 unit + 6 E2E) |
 | **Round 021** | ✅ Done | Data Block View sidebar panel (`BlockCard`, `LIFECYCLE_BADGE` × 5, `BLOCK_TYPE_ICON` × 10, `build_block_library()` with search + certified-first sort); R2 bridge feature (001-F) | +32 (23 unit + 9 E2E) |
+| **Round 022** | ✅ Done | NL2 expanded coverage: `rename_visual`, `remove_metric` (≥1 metric guard), `categorical_dimension_change` (certified whitelist), `value_filter_change` (step_id PHOTO/ETCH/CVD), broader `add_metric` keywords; `query/filters` path; intent routing priority fix | +52 (39 unit + 13 E2E) |
 
-**Total tests: 434 unit + 36 E2E passing** (updated each round)
+**Total tests: 473 unit + 49 E2E passing** (updated each round)
 
 ## Architecture
 

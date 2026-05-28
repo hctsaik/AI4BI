@@ -66,9 +66,36 @@ _DIMENSION_DATE_KEYWORDS: dict[str, str] = {
 _METRIC_ADD_PATTERNS = (
     r"也加上\s*(\w+)",
     r"加上\s*(\w+)\s*指標",
+    r"也顯示\s*(\w+)",
+    r"add\s+metric\s+(\w+)",
     r"add\s+(\w+)\s*metric",
-    r"include\s+(\w+)",
+    r"add\s+the\s+(\w+)\s*metric",
+    r"add\s+(\w+)\s+to\s+(?:this|the)\s+(?:chart|visual|graph)",
+    r"include\s+(\w+)\s*metric",
     r"also\s+show\s+(\w+)",
+    r"show\s+(?:also\s+)?(\w+)\s*metric",
+    # Simple "add X" where X looks like a metric name (snake_case or known term)
+    r"^add\s+(\w+(?:_\w+)+)$",           # "add move_count" (snake_case)
+    r"^add\s+(move_count|queue_time|process_time|failed_wafer|weighted_yield)\b",
+)
+
+_REMOVE_METRIC_PATTERNS = (
+    r"remove\s+(\w+)",
+    r"delete\s+(\w+)\s*metric",
+    r"移除\s*(\w+)",
+    r"刪除\s*(\w+)\s*指標",
+    r"drop\s+(\w+)\s*metric",
+    r"取消\s*(\w+)\s*指標",
+    r"hide\s+(\w+)\s*metric",
+)
+
+_RENAME_VISUAL_PATTERNS = (
+    r"rename\s+(?:this\s+)?(?:chart|visual|graph)\s+to\s+[\"']?(.+?)[\"']?$",
+    r"把[這这](?:張|个)?圖(?:改名|命名)(?:叫|為|成)\s*[\"']?(.+?)[\"']?$",
+    r"change\s+(?:the\s+)?title\s+to\s+[\"']?(.+?)[\"']?$",
+    r"set\s+title\s+(?:to\s+)?[\"']?(.+?)[\"']?$",
+    r"名稱改成\s*[\"']?(.+?)[\"']?$",
+    r"改名叫\s*[\"']?(.+?)[\"']?$",
 )
 
 _MAX_METRICS_PER_VISUAL = 3
@@ -243,8 +270,28 @@ class NL2ProposalService:
         if _looks_like_date_filter(prompt, normalized):
             return self._date_filter_change(prompt, normalized, report)
 
+        # Rename must be checked first — "rename this chart to Queue Trend" contains
+        # "queue" + "trend" which would otherwise trigger queue_analysis.
+        if _looks_like_rename_visual(prompt, normalized):
+            return self._rename_visual(prompt, normalized, report, selected_component_id)
+
+        # Queue analysis must be checked BEFORE categorical/value-filter to avoid
+        # "analyze queue time drivers by tool" being intercepted by _CAT_DIM_TRIGGERS.
         if _looks_like_queue_analysis(normalized):
             return self._queue_time_plan(prompt, report, selected_component_id, semantic_model, contracts)
+
+        remove_metric_name = _extract_remove_metric_name(prompt, normalized)
+        if remove_metric_name is not None:
+            return self._remove_metric(remove_metric_name, report, selected_component_id)
+
+        cat_dim = _extract_categorical_dimension(prompt, normalized)
+        if cat_dim is not None:
+            return self._categorical_dimension_change(cat_dim, report, selected_component_id, semantic_model)
+
+        value_filter = _extract_value_filter(prompt, normalized)
+        if value_filter is not None:
+            col_name, values = value_filter
+            return self._value_filter_change(col_name, values, report, selected_component_id, semantic_model)
 
         return self._unsupported(
             "No supported governed BI intent was detected.",
@@ -382,6 +429,168 @@ class NL2ProposalService:
             trust_notes=notes,
             risk_level="medium",
         )
+
+    # ------------------------------------------------------------------
+    # Round 022: rename_visual intent
+    # ------------------------------------------------------------------
+
+    def _rename_visual(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        selected_component_id: str | None,
+    ) -> NL2ProposalResult:
+        found = _find_visual(report, selected_component_id)
+        if found is None:
+            return self._unsupported(
+                "Select a visual before renaming it.",
+                target_scope=_target_scope(selected_component_id),
+            )
+        page_id, visual_id, visual = found
+        new_title = _extract_rename_title(prompt, normalized)
+        if new_title is None or not new_title.strip():
+            return self._unsupported(
+                "Specify the new chart name, e.g. 'rename this chart to Queue Trend'.",
+                target_scope=f"visual:{visual_id}",
+            )
+        # XSS-safe: strip HTML tags and limit length
+        import html
+        new_title = re.sub(r"<[^>]+>", "", new_title).strip()[:80]
+        if not new_title:
+            return self._unsupported("Chart name must not be empty.", target_scope=f"visual:{visual_id}")
+        before_title = visual.visualization.title
+        if before_title == new_title:
+            return self._unsupported(f"Chart title is already '{new_title}'.", target_scope=f"visual:{visual_id}")
+        path = f"pages/{page_id}/visuals/{visual_id}/visualization/title"
+        notes = [f"Renaming '{visual_id}' from '{before_title}' to '{new_title}'.", "Display-only change; query is unchanged."]
+        proposal = ReportProposal(
+            description=f"Rename chart to '{new_title}'",
+            changes=[ReportChange(path=path, label="Chart title", before=before_title, after=new_title, affects_data=False)],
+            target_component_id=visual_id,
+        )
+        intent = AIIntent(intent_kind="style_change", target_scope=f"visual:{visual_id}", suggested_visuals=[visual_id], trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=f"Rename proposal created: '{new_title}'.", proposal=proposal, trust_notes=notes, risk_level="low")
+
+    # ------------------------------------------------------------------
+    # Round 022: remove_metric intent
+    # ------------------------------------------------------------------
+
+    def _remove_metric(
+        self,
+        metric_name: str,
+        report: ExecutableReportSpec,
+        selected_component_id: str | None,
+    ) -> NL2ProposalResult:
+        found = _find_visual(report, selected_component_id)
+        if found is None:
+            return self._unsupported("Select a visual before removing a metric.", target_scope=_target_scope(selected_component_id))
+        page_id, visual_id, visual = found
+        current_names = [m.metric_name for m in visual.query.metrics]
+        if metric_name not in current_names:
+            return self._unsupported(f"Metric '{metric_name}' is not in this visual.", target_scope=f"visual:{visual_id}")
+        if len(visual.query.metrics) <= 1:
+            refusal = GovernanceRefusal(
+                reason=f"Cannot remove '{metric_name}': a visual must retain at least one metric.",
+                blocked_terms=[metric_name],
+                trust_notes=["Removing the last metric would create an empty query.", "Add a replacement metric before removing this one."],
+                risk_level="medium",
+            )
+            intent = AIIntent(intent_kind="unsupported", target_scope=f"visual:{visual_id}", trust_notes=refusal.trust_notes, risk_level="medium")
+            return NL2ProposalResult(intent=intent, message=refusal.reason, refusal=refusal, trust_notes=refusal.trust_notes, risk_level="medium")
+        before = [{"block_id": m.block_id, "metric_name": m.metric_name, "alias": m.alias, "agg_override": m.agg_override.value if m.agg_override else None} for m in visual.query.metrics]
+        after = [m for m in before if m["metric_name"] != metric_name]
+        path = f"pages/{page_id}/visuals/{visual_id}/query/metrics"
+        notes = [f"Removing metric '{metric_name}' from visual '{visual_id}'.", "This change re-queries the visual after approval."]
+        proposal = ReportProposal(
+            description=f"Remove metric '{metric_name}'",
+            changes=[ReportChange(path=path, label=f"Remove metric: {metric_name}", before=before, after=after, affects_data=True)],
+            target_component_id=visual_id,
+        )
+        intent = AIIntent(intent_kind="analysis_request", target_scope=f"visual:{visual_id}", suggested_visuals=[visual_id], trust_notes=notes, risk_level="medium")
+        return NL2ProposalResult(intent=intent, message=f"Remove metric proposal created for '{metric_name}'.", proposal=proposal, trust_notes=notes, risk_level="medium")
+
+    # ------------------------------------------------------------------
+    # Round 022: categorical_dimension_change intent
+    # ------------------------------------------------------------------
+
+    def _categorical_dimension_change(
+        self,
+        cat_dim: dict,
+        report: ExecutableReportSpec,
+        selected_component_id: str | None,
+        semantic_model: dict[str, Any] | None,
+    ) -> NL2ProposalResult:
+        found = _find_visual(report, selected_component_id)
+        if found is None:
+            return self._unsupported("Select a visual before changing the grouping dimension.", target_scope=_target_scope(selected_component_id))
+        page_id, visual_id, visual = found
+        block_id = cat_dim["block_id"]
+        column_name = cat_dim["column_name"]
+        alias = cat_dim.get("alias", column_name)
+        # Governance: block_id must be in visual's certified dimension targets
+        if not visual.query.metrics:
+            return self._unsupported("No metrics in this visual; cannot determine dimension block.", target_scope=f"visual:{visual_id}")
+        fact_block = visual.query.metrics[0].block_id
+        certified = _certified_dim_targets_for_fact(fact_block, semantic_model or {})
+        if block_id not in certified and block_id != fact_block:
+            refusal = GovernanceRefusal(
+                reason=f"Block '{block_id}' is not a certified dimension of '{fact_block}'. Only certified relationships are allowed.",
+                blocked_terms=[block_id],
+                trust_notes=["Ask your data team to certify this relationship before using it.", "Available certified dimensions: " + ", ".join(sorted(certified))],
+                risk_level="high",
+            )
+            intent = AIIntent(intent_kind="unsupported", target_scope=f"visual:{visual_id}", trust_notes=refusal.trust_notes, risk_level="high")
+            return NL2ProposalResult(intent=intent, message=refusal.reason, refusal=refusal, trust_notes=refusal.trust_notes, risk_level="high")
+        before_dims = [{"block_id": d.block_id, "column_name": d.column_name, "alias": d.alias, "truncate_date_to": d.truncate_date_to} for d in visual.query.dimensions]
+        after_dims = [{"block_id": block_id, "column_name": column_name, "alias": alias, "truncate_date_to": None}]
+        path = f"pages/{page_id}/visuals/{visual_id}/query/dimensions"
+        notes = [f"Grouping by '{column_name}' from block '{block_id}' (certified).", "This change re-queries the visual after approval."]
+        proposal = ReportProposal(
+            description=f"Group by {alias} ({block_id}.{column_name})",
+            changes=[ReportChange(path=path, label=f"Dimension → {alias}", before=before_dims, after=after_dims, affects_data=True)],
+            target_component_id=visual_id,
+        )
+        intent = AIIntent(intent_kind="analysis_request", target_scope=f"visual:{visual_id}", suggested_visuals=[visual_id], trust_notes=notes, risk_level="medium")
+        return NL2ProposalResult(intent=intent, message=f"Dimension change proposal: group by {alias}.", proposal=proposal, trust_notes=notes, risk_level="medium")
+
+    # ------------------------------------------------------------------
+    # Round 022: value_filter_change intent
+    # ------------------------------------------------------------------
+
+    def _value_filter_change(
+        self,
+        column_name: str,
+        values: list[str],
+        report: ExecutableReportSpec,
+        selected_component_id: str | None,
+        semantic_model: dict[str, Any] | None,
+    ) -> NL2ProposalResult:
+        found = _find_visual(report, selected_component_id)
+        if found is None:
+            return self._unsupported("Select a visual before adding a value filter.", target_scope=_target_scope(selected_component_id))
+        page_id, visual_id, visual = found
+        # Determine block_id: search current block_refs for the column
+        block_id = _find_block_for_column(visual, column_name, semantic_model or {})
+        if block_id is None:
+            return self._unsupported(f"Column '{column_name}' was not found in this visual's blocks.", target_scope=f"visual:{visual_id}")
+        before_filters = [
+            {"block_id": f.block_id, "column_name": f.column_name, "operator": f.operator.value,
+             "value": f.value, "inherit_global_filter": f.inherit_global_filter}
+            for f in visual.query.filters
+        ]
+        # Remove any existing filter for the same column, then append new one
+        after_filters = [f for f in before_filters if not (f["block_id"] == block_id and f["column_name"] == column_name)]
+        after_filters.append({"block_id": block_id, "column_name": column_name, "operator": "in", "value": values, "inherit_global_filter": False})
+        path = f"pages/{page_id}/visuals/{visual_id}/query/filters"
+        notes = [f"Filtering '{column_name}' to {values} on block '{block_id}'.", "This change re-queries the visual after approval."]
+        proposal = ReportProposal(
+            description=f"Filter {column_name} to {values}",
+            changes=[ReportChange(path=path, label=f"Filter: {column_name} IN {values}", before=before_filters, after=after_filters, affects_data=True)],
+            target_component_id=visual_id,
+        )
+        intent = AIIntent(intent_kind="analysis_request", target_scope=f"visual:{visual_id}", suggested_visuals=[visual_id], trust_notes=notes, risk_level="medium")
+        return NL2ProposalResult(intent=intent, message=f"Value filter proposal: {column_name} IN {values}.", proposal=proposal, trust_notes=notes, risk_level="medium")
 
     # ------------------------------------------------------------------
     # Round 020: date_filter_change intent (global_filters/date_range)
@@ -994,6 +1203,39 @@ def _extract_add_metric_name(prompt: str, normalized: str) -> str | None:
     return None
 
 
+def _extract_remove_metric_name(prompt: str, normalized: str) -> str | None:
+    """Extract a metric name from a remove-metric request."""
+    for pattern in _REMOVE_METRIC_PATTERNS:
+        match = re.search(pattern, prompt, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def _looks_like_remove_metric(prompt: str, normalized: str) -> bool:
+    return _extract_remove_metric_name(prompt, normalized) is not None
+
+
+def _extract_rename_title(prompt: str, normalized: str) -> str | None:
+    """Extract the new title from a rename-visual request."""
+    for pattern in _RENAME_VISUAL_PATTERNS:
+        match = re.search(pattern, prompt, re.IGNORECASE | re.UNICODE)
+        if match:
+            title = match.group(1).strip().strip("'\"")
+            if title:
+                return title
+    return None
+
+
+def _looks_like_rename_visual(prompt: str, normalized: str) -> bool:
+    rename_triggers = (
+        "rename", "change title", "set title", "把這張圖改名", "把这张图改名",
+        "名稱改成", "改名叫", "命名為", "命名成",
+    )
+    has_trigger = any(t.lower() in normalized or t in prompt for t in rename_triggers)
+    return has_trigger and _extract_rename_title(prompt, normalized) is not None
+
+
 def _blocked_terms(normalized: str) -> list[str]:
     terms = []
     for term in ("sql", "join", "yield", "detail", "raw"):
@@ -1005,6 +1247,126 @@ def _blocked_terms(normalized: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # Round 020: Date filter detection helpers
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Round 022: Categorical dimension detection helpers
+# ---------------------------------------------------------------------------
+
+# Known categorical dimension columns in semiconductor demo (and generic aliases)
+_CATEGORICAL_DIM_MAP: dict[str, dict] = {
+    # product family
+    "product family": {"block_id": "lot_dim", "column_name": "product_family", "alias": "Product Family"},
+    "product_family": {"block_id": "lot_dim", "column_name": "product_family", "alias": "Product Family"},
+    "產品": {"block_id": "lot_dim", "column_name": "product_family", "alias": "Product Family"},
+    "產品族": {"block_id": "lot_dim", "column_name": "product_family", "alias": "Product Family"},
+    # vendor
+    "vendor": {"block_id": "tool_dim", "column_name": "vendor", "alias": "Vendor"},
+    "供應商": {"block_id": "tool_dim", "column_name": "vendor", "alias": "Vendor"},
+    "廠商": {"block_id": "tool_dim", "column_name": "vendor", "alias": "Vendor"},
+    # tool_id
+    "tool": {"block_id": "tool_dim", "column_name": "tool_id", "alias": "Tool"},
+    "tool id": {"block_id": "tool_dim", "column_name": "tool_id", "alias": "Tool"},
+    "tool_id": {"block_id": "tool_dim", "column_name": "tool_id", "alias": "Tool"},
+    "設備": {"block_id": "tool_dim", "column_name": "tool_id", "alias": "Tool"},
+    "機台": {"block_id": "tool_dim", "column_name": "tool_id", "alias": "Tool"},
+    # process step
+    "process step": {"block_id": "process_step_dim", "column_name": "step_name", "alias": "Process Step"},
+    "step": {"block_id": "process_step_dim", "column_name": "step_name", "alias": "Process Step"},
+    "製程": {"block_id": "process_step_dim", "column_name": "step_name", "alias": "Process Step"},
+    "製程步驟": {"block_id": "process_step_dim", "column_name": "step_name", "alias": "Process Step"},
+    # lot
+    "lot": {"block_id": "lot_dim", "column_name": "lot_id", "alias": "Lot"},
+    "批次": {"block_id": "lot_dim", "column_name": "lot_id", "alias": "Lot"},
+}
+
+_CAT_DIM_TRIGGERS = ("group by", "分組", "按", "group", "breakdown by", "by ", "改用", "按照")
+
+
+def _extract_categorical_dimension(prompt: str, normalized: str) -> dict | None:
+    """
+    Extract a categorical dimension target from the prompt.
+    Returns {"block_id": ..., "column_name": ..., "alias": ...} or None.
+    Only triggers when a group/dimension change verb is present.
+    """
+    has_trigger = any(t.lower() in normalized or t in prompt for t in _CAT_DIM_TRIGGERS)
+    if not has_trigger:
+        return None
+    # Longest match wins
+    best: dict | None = None
+    best_len = 0
+    for keyword, dim in _CATEGORICAL_DIM_MAP.items():
+        kw_lower = keyword.lower()
+        if kw_lower in normalized or keyword in prompt:
+            if len(keyword) > best_len:
+                best = dim
+                best_len = len(keyword)
+    return best
+
+
+def _certified_dim_targets_for_fact(fact_block_id: str, semantic_model: dict) -> set[str]:
+    """Return block_ids of certified dimension targets reachable from fact_block_id."""
+    result: set[str] = set()
+    for rel in semantic_model.get("relationships", []):
+        if rel.get("from_block") == fact_block_id and rel.get("status") == "certified":
+            result.add(rel["to_block"])
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Round 022: Value filter detection helpers
+# ---------------------------------------------------------------------------
+
+# Known filterable categorical values in the semiconductor demo
+_VALUE_FILTER_MAP: dict[str, tuple[str, str]] = {
+    # process steps — step_id in process_move_fact
+    # (Logic-A/B are handled via report controls, not direct query filter)
+    "photo": ("process_move_fact", "step_id"),
+    "etch": ("process_move_fact", "step_id"),
+    "cvd": ("process_move_fact", "step_id"),
+    "cmp": ("process_move_fact", "step_id"),
+    "implant": ("process_move_fact", "step_id"),
+}
+
+_VALUE_FILTER_TRIGGER_TERMS = (
+    "only show", "filter to", "only", "just show", "show only",
+    "只看", "只顯示", "只有", "篩選到", "過濾到", "filter",
+)
+
+
+def _extract_value_filter(prompt: str, normalized: str) -> tuple[str, list[str]] | None:
+    """
+    Extract (column_name, [values]) from a value filter request.
+    Returns None if no recognizable filter pattern detected.
+    """
+    has_trigger = any(t.lower() in normalized or t in prompt for t in _VALUE_FILTER_TRIGGER_TERMS)
+    if not has_trigger:
+        return None
+    matched_values: dict[tuple[str, str], list[str]] = {}  # (block_id, column) → values
+    for keyword, (block_id, column) in _VALUE_FILTER_MAP.items():
+        if keyword in normalized:
+            key = (block_id, column)
+            matched_values.setdefault(key, []).append(keyword.upper())
+    if not matched_values:
+        return None
+    # Return the first column group found (most specific match)
+    for (block_id, column), values in matched_values.items():
+        return column, values
+    return None
+
+
+def _find_block_for_column(visual: ReportVisualSpec, column_name: str, semantic_model: dict) -> str | None:
+    """Find which block in the visual's block_refs contains the given column."""
+    # Check fact block first (process_move_fact has step_id, product_family)
+    for ref in visual.query.block_refs:
+        block_id = ref.block_id
+        # Check semantic model certified relationships
+        if column_name in ("step_id", "product_family", "tool_id", "wafer_id", "lot_id"):
+            return block_id  # These are FK columns on the fact block
+    # Fallback: return primary block
+    if visual.query.block_refs:
+        return visual.query.block_refs[0].block_id
+    return None
+
 
 def _looks_like_date_filter(prompt: str, normalized: str) -> bool:
     """Detect relative date period requests."""

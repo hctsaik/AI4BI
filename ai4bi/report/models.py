@@ -552,6 +552,17 @@ def _get_path(report: ExecutableReportSpec, path: str) -> Any:
                 }
                 for metric in visual.query.metrics
             ]
+        if parts[4:] == ["query", "filters"]:
+            return [
+                {
+                    "block_id": f.block_id,
+                    "column_name": f.column_name,
+                    "operator": f.operator.value,
+                    "value": copy.deepcopy(f.value),
+                    "inherit_global_filter": f.inherit_global_filter,
+                }
+                for f in visual.query.filters
+            ]
     if len(parts) == 8 and parts[0] == "pages" and parts[2] == "visuals" and parts[4] == "query" and parts[5] == "block_refs" and parts[7] == "pinned_version":
         visual = report.pages[parts[1]].visuals[parts[3]]
         block_id = parts[6]
@@ -636,6 +647,18 @@ def _set_path(report: ExecutableReportSpec, path: str, value: Any) -> None:
                     ),
                 )
                 for m in value
+            ]
+            return
+        if parts[4:] == ["query", "filters"]:
+            visual.query.filters = [
+                FilterSpec(
+                    block_id=f["block_id"],
+                    column_name=f["column_name"],
+                    operator=FilterOperator(f["operator"]),
+                    value=copy.deepcopy(f.get("value")),
+                    inherit_global_filter=f.get("inherit_global_filter", False),
+                )
+                for f in value
             ]
             return
     if len(parts) == 8 and parts[0] == "pages" and parts[2] == "visuals" and parts[4] == "query" and parts[5] == "block_refs" and parts[7] == "pinned_version":

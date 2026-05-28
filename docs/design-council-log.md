@@ -2982,3 +2982,71 @@ module cache 導致的 `'ProposalResult' object has no attribute 'analysis_plan'
 1. **R2 Relationship View** — 在 Block Library 中加入 certified/uncertified relationship 視覺化（圖形或表格）
 2. **NL2 Composition Planner** — 業務輸入「把 queue time 和 yield rate 放在同一張圖」→ AI 判斷是否有 certified 關聯，建立 CompositionProposal
 3. **DQ Status Badges** — 依 Data Quality 四等級（004-E）在 Block Library 和 Canvas 顯示資料新鮮度警示
+
+---
+
+### Round 022 — NL2 Expanded Intent Coverage
+
+| 欄位 | 記錄 |
+| --- | --- |
+| Status | `completed` |
+| Date | `2026-05-28` |
+| Goal | 修復「只有特定功能可以調整」的問題 — 新增 5 個缺失的 NL2 intents，擴大用戶可以用自然語言操作的範圍 |
+| Agent perspectives | Safety Design Agent（categorical dim / value filter / remove metric / rename 安全邊界） |
+| Trigger | 用戶反映只有顏色、圖表類型、日期粒度可調整，其他操作都回傳 unsupported |
+
+#### 022-A. 根本原因分析
+
+NL2ProposalService 是**純確定性規則系統**（無 LLM），每個 intent 需要明確的關鍵字 patterns + 安全邊界。以下功能之前完全缺失：
+
+| 缺失功能 | 狀態 → 修復後 |
+|---------|------------|
+| `add metric move_count`（無前綴） | UNSUPPORTED → PROPOSAL |
+| `rename this chart to X` | UNSUPPORTED → PROPOSAL |
+| `remove queue_time_hr` | UNSUPPORTED → PROPOSAL（≥1 guard） |
+| `group by product family` | UNSUPPORTED → PROPOSAL（certified whitelist） |
+| `only show PHOTO` | UNSUPPORTED → PROPOSAL（query/filters） |
+
+#### 022-B. 新增 Intents 與安全邊界
+
+**`rename_visual`** (affects_data=False)：
+- path 已存在（visualization/title）
+- XSS strip：`re.sub(r"<[^>]+>", "", title)[:80]`
+- rename 檢查在 queue_analysis 之前（防止「rename to Queue Trend」誤觸發分析）
+
+**`remove_metric`** (affects_data=True)：
+- 最後一個 metric → GovernanceRefusal（risk=medium）
+- path：`query/metrics`（現有），before/after list
+
+**`categorical_dimension_change`** (affects_data=True)：
+- block_id 必須在 semantic_model certified relationships 中 → 否則 GovernanceRefusal（risk=high）
+- 支援：product_family / vendor / tool_id / step_name / lot_id + 中英文關鍵字
+
+**`value_filter_change`** (affects_data=True)：
+- 新增 `query/filters` path 支援（`_get_path`/`_set_path`）
+- 支援：PHOTO / ETCH / CVD / CMP / IMPLANT → step_id IN filter
+- Logic-A/B 排除（由 controls 機制處理）
+
+**`add_metric` 關鍵字擴充**：
+- 新增 8 個 regex pattern，支援 "add move_count"（snake_case），"add metric X"
+
+#### 022-C. Intent 路由優先順序修正
+
+```
+rename_visual (FIRST — 防止 "rename to Queue Trend" 被 queue_analysis 截取)
+→ chart_type_change
+→ style_change
+→ date_filter_change
+→ queue_analysis (BEFORE categorical — 防止 "analyze...by tool" 被截取)
+→ remove_metric
+→ categorical_dimension_change
+→ value_filter_change
+→ add_metric
+→ unsupported
+```
+
+#### 022-D. 驗收測試
+
+| 指標 | 結果 |
+| Unit regression | 473 passed |
+| E2E (13 new) | 13 passed |
