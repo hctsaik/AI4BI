@@ -37,6 +37,7 @@ from ai4bi.report.block_library import build_block_library, LIFECYCLE_BADGE
 from ai4bi.blocks.contracts import LifecycleStatus
 from ai4bi.ui.upload import render_upload_panel, _USER_BLOCKS_KEY, _USER_BLOCK_META_KEY
 from ai4bi.report.user_report import build_report_from_block
+from ai4bi.ai.suggestions import generate_suggestions, ChartSuggestion
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
 _BLOCKS_DIR = _DEMO_ROOT / "blocks"
@@ -606,6 +607,78 @@ def _request_widget_sync() -> None:
     st.session_state["_sync_widgets_from_report"] = True
 
 
+_SUGGESTION_ICONS: dict = {
+    "kpi_card": "🔢", "line_chart": "📈", "bar_chart": "📊",
+    "pie_chart": "🥧", "scatter": "⚡", "table": "📋",
+}
+
+
+def _render_ai_suggestions(report: ExecutableReportSpec, cache: QueryCache) -> None:
+    """Power BI Copilot-style proactive chart suggestions (Round 031)."""
+    contracts = _load_all_contracts()
+    if not contracts:
+        return
+    try:
+        sm = json.loads(_SEMANTIC_MODEL.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        sm = {}
+
+    suggestions = generate_suggestions(contracts, sm)
+    if not suggestions:
+        return
+
+    # Filter out visuals that are already on the canvas
+    existing_titles = {
+        v.visualization.title
+        for page in report.pages.values()
+        for v in page.visuals.values()
+    }
+    suggestions = [s for s in suggestions if s.title not in existing_titles]
+    if not suggestions:
+        return
+
+    with st.expander("💡 AI 建議圖表", expanded=False):
+        st.caption("根據你的資料自動產生，點擊「建立」即可加入畫布。")
+        if report.read_only:
+            st.caption("唯讀模式")
+            return
+
+        existing_ids = set(report.pages.get("main", type("_", (), {"visuals": {}})()).visuals.keys())
+        for sg in suggestions[:5]:
+            icon = _SUGGESTION_ICONS.get(sg.visual_type.value, "📊")
+            cols = st.columns([5, 1])
+            with cols[0]:
+                st.markdown(f"{icon} **{sg.title}**")
+                st.caption(sg.reason)
+            with cols[1]:
+                btn_key = f"sg_create_{sg.block_id}_{sg.metric_name}_{sg.visual_type.value}"
+                if st.button("建立", key=btn_key):
+                    dim_names = [sg.dimension_name] if sg.dimension_name else []
+                    vid = f"sg_{sg.visual_type.value}_{sg.metric_name}"
+                    c = 1
+                    while vid in existing_ids:
+                        vid = f"sg_{sg.visual_type.value}_{sg.metric_name}_{c}"; c += 1
+                    try:
+                        from ai4bi.report.builder import build_add_visual_proposal, build_visual_from_selection
+                        q, v = build_visual_from_selection(
+                            visual_id=vid,
+                            block_id=sg.block_id,
+                            metric_names=[sg.metric_name],
+                            dimension_names=dim_names,
+                            visual_type=sg.visual_type,
+                            contracts=contracts,
+                            semantic_model=sm,
+                        )
+                        workspace.stage_proposal(build_add_visual_proposal("main", vid, q, v))
+                        workspace.accept_pending()
+                        existing_ids.add(vid)
+                        cache.invalidate_all()
+                        workspace.set_message(f"已加入「{sg.title}」。")
+                    except Exception as exc:  # noqa: BLE001
+                        workspace.set_message(f"無法建立圖表：{exc}")
+                    st.rerun()
+
+
 def _render_draft_controls(
     report: ExecutableReportSpec,
     cache: QueryCache,
@@ -623,7 +696,10 @@ def _render_draft_controls(
                 st.rerun()
             st.markdown("---")
 
-        # ── Zone 0: 想觀察的數字 (spec 8.1 primary entry) ────────────────
+        # ── Zone 0: AI 建議 (Round 031 — Copilot-style suggestions) ─────
+        _render_ai_suggestions(report, cache)
+
+        # ── Zone 0b: 想觀察的數字 (spec 8.1 primary entry) ───────────────
         _render_metric_first_entry(report, cache)
 
         st.markdown("---")
@@ -877,6 +953,18 @@ def _render_explanation_panel(component_id: str, visual) -> None:
         if meta.quality_warnings:
             for w in meta.quality_warnings:
                 st.warning(w, icon="⚠️")
+
+        # CSV export — Round 031
+        _last_valid = st.session_state.get("visual_last_valid", {}).get(component_id)
+        if _last_valid is not None and not _last_valid.empty:
+            csv_bytes = _last_valid.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                "⬇ 下載 CSV",
+                data=csv_bytes,
+                file_name=f"{component_id}.csv",
+                mime="text/csv",
+                key=f"csv_dl_{component_id}",
+            )
 
         # SQL preview (for transparency / debug)
         if meta.sql_preview:

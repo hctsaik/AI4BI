@@ -50,7 +50,8 @@ _NO_DIMENSION_TYPES: frozenset[VisualType] = frozenset({VisualType.kpi_card})
 
 #: Visual types that REQUIRE at least one dimension.
 _REQUIRE_DIMENSION_TYPES: frozenset[VisualType] = frozenset(
-    {VisualType.line_chart, VisualType.bar_chart, VisualType.table}
+    {VisualType.line_chart, VisualType.bar_chart, VisualType.table,
+     VisualType.pie_chart, VisualType.scatter}  # Round 029/031
 )
 
 _MAX_METRICS = 2
@@ -262,6 +263,11 @@ def _default_visualization(visual_type: VisualType, title: str) -> Visualization
         kwargs["height_px"] = 340
         kwargs["extra"] = {"line_color": None}
     elif visual_type == VisualType.bar_chart:
+        kwargs["height_px"] = 340
+    elif visual_type == VisualType.pie_chart:
+        kwargs["height_px"] = 340
+        kwargs["extra"] = {"hole": 0.4, "show_percent": True}
+    elif visual_type == VisualType.scatter:
         kwargs["height_px"] = 340
     elif visual_type == VisualType.table:
         kwargs["height_px"] = 250
