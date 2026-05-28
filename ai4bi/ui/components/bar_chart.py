@@ -9,7 +9,7 @@ Features
   becomes the color grouping column.
 - Grouped bar when style.extra["bar_mode"] == "group" (default: "stack").
 - X-axis: first DimensionRef; Y-axis: first MetricRef (simplified single-metric).
-- Cross-filter: clicking a bar updates st.session_state["cross_filter"] so other
+- Cross-filter: clicking a bar updates st.session_state["cross_filters"] so other
   visuals can react on the next Streamlit rerun.
 
 Edge cases handled
@@ -41,7 +41,9 @@ from ai4bi.query_spec import DimensionRef, MetricRef, VisualQuerySpec, Visualiza
 
 logger = logging.getLogger(__name__)
 
-_CROSS_FILTER_KEY = "cross_filter"
+_CROSS_FILTER_KEY = "cross_filters"
+_LEGACY_CROSS_FILTER_KEY = "cross_filter"
+_CURRENT_PAGE_KEY = "_current_render_page_id"
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +66,7 @@ def _resolve_column_name(ref: DimensionRef | MetricRef, df: pd.DataFrame) -> Opt
     return None
 
 
-def _handle_selection(event: Any, spec_id: str, x_col: str) -> None:
+def _handle_selection(event: Any, query_spec: VisualQuerySpec, x_col: str) -> None:
     """
     Translate a Plotly selection event into a cross-filter state update.
 
@@ -89,15 +91,27 @@ def _handle_selection(event: Any, spec_id: str, x_col: str) -> None:
     if x_value is None:
         return
 
-    st.session_state[_CROSS_FILTER_KEY] = {
-        "source_spec_id": spec_id,
-        "column": x_col,
+    emit = query_spec.cross_filter_emit
+    if emit is None:
+        return
+
+    page_id = st.session_state.get(_CURRENT_PAGE_KEY, "main")
+    payload = {
+        "page_id": page_id,
+        "source_spec_id": query_spec.spec_id,
+        "block_id": emit.block_id,
+        "column_name": emit.column_name,
+        "column": emit.alias or emit.column_name or x_col,
         "value": x_value,
         "timestamp": time.time(),
     }
+    cross_filters = dict(st.session_state.get(_CROSS_FILTER_KEY) or {})
+    cross_filters[page_id] = payload
+    st.session_state[_CROSS_FILTER_KEY] = cross_filters
+    st.session_state[_LEGACY_CROSS_FILTER_KEY] = payload
     logger.debug(
         "[bar_chart] cross-filter set: column=%s value=%s source=%s",
-        x_col, x_value, spec_id,
+        emit.column_name, x_value, query_spec.spec_id,
     )
 
 
@@ -191,8 +205,8 @@ def render_bar_chart(
 
     Cross-filter
     ------------
-    Clicking a bar writes to st.session_state["cross_filter"].
-    Clear it by setting st.session_state["cross_filter"] = None.
+    Clicking a bar writes to st.session_state["cross_filters"].
+    Clear it by removing the active page entry from that mapping.
     """
     title = style.title or query_spec.spec_id
     orientation: str = style.extra.get("orientation", "vertical")
@@ -291,9 +305,10 @@ def render_bar_chart(
     # ------------------------------------------------------------------ #
     # Cross-filter handling
     # ------------------------------------------------------------------ #
-    _handle_selection(event, query_spec.spec_id, x_col)
+    _handle_selection(event, query_spec, x_col)
 
-    active_cf = st.session_state.get(_CROSS_FILTER_KEY)
+    page_id = st.session_state.get(_CURRENT_PAGE_KEY, "main")
+    active_cf = (st.session_state.get(_CROSS_FILTER_KEY) or {}).get(page_id)
     if active_cf and active_cf.get("source_spec_id") == query_spec.spec_id:
         col1, col2 = st.columns([6, 1])
         with col1:
@@ -302,7 +317,10 @@ def render_bar_chart(
             )
         with col2:
             if st.button("Clear", key=f"cf_clear_{query_spec.spec_id}"):
-                st.session_state[_CROSS_FILTER_KEY] = None
+                cross_filters = dict(st.session_state.get(_CROSS_FILTER_KEY) or {})
+                cross_filters.pop(page_id, None)
+                st.session_state[_CROSS_FILTER_KEY] = cross_filters
+                st.session_state[_LEGACY_CROSS_FILTER_KEY] = None
                 st.rerun()
 
     logger.debug(

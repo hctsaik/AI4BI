@@ -89,6 +89,7 @@ def build_semiconductor_queue_time_report() -> ExecutableReportSpec:
                 filters=_global_filters(),
                 sort=[SortSpec("Date", SortDirection.asc)],
                 inherit_global_filter=True,
+                cross_filter_emit=DimensionRef("process_move_fact", "event_date", "Date"),
             ),
             VisualizationSpec(
                 VisualType.line_chart,
@@ -111,6 +112,7 @@ def build_semiconductor_queue_time_report() -> ExecutableReportSpec:
                 filters=_global_filters(),
                 sort=[SortSpec("Average Queue Time", SortDirection.desc)],
                 inherit_global_filter=True,
+                cross_filter_emit=DimensionRef("tool_dim", "tool_id", "Tool ID"),
             ),
             VisualizationSpec(
                 VisualType.bar_chart,

@@ -100,10 +100,15 @@ The MVP report workspace now supports:
 - Manual slicers and Tool ID / Vendor comparison updates as report history entries.
 - A selected-visual assistant that creates a pending proposal before applying
   approved changes such as `把趨勢線改成紅色` or `只看 Logic-B`.
+- Cross-filter broadcast from the trend and tool bar visuals into compatible
+  same-page visuals.
 - `Apply Proposal`, `Cancel Proposal`, `Undo` and `Redo`.
+- Add/reorder/delete-page proposal workflows for report canvas maintenance.
 - `Save Local Draft` and `Load Draft`, persisting executable query and style
   state as local JSON under `draft_reports/` when a user chooses to save.
+- Publish/share snapshot storage plus a sidebar browser for loading published
+  read-only snapshots.
 
-Formal report publication and cross-user sharing are intentionally not
-available yet. They require block lifecycle certification, authorization
-enforcement, audit metadata and fail-closed version pin handling.
+Formal team lifecycle governance remains intentionally limited. Production
+authorization enforcement, role policy, audit-purpose metadata and enterprise
+sharing workflows are still deferred.

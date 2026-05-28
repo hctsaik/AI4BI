@@ -25,9 +25,9 @@ python -m pytest tests/ -q             # run full test suite
 | **Round 014** | ✅ Done | `visual_order` dynamic canvas, `build_add_visual_proposal`, filter inheritance, `AuditMetadata`, `pin_block_version_proposal`, `grain_check()`, parameterized SQL in `CompositionExecutor` | +37 |
 | **Round 015** | ✅ Done | `PublishedReportStore` (share URL), `unpin_block_version_proposal`, Pin versions sidebar, `move_visual_up/down`, reorder proposal, `ANALYST_NAME` identity | +27 |
 | **Round 016** | ✅ Done | `global_filters`/`merged_filters()`, `build_global_filter_proposal`, title editing proposal, `created_at` first-save fix, `display_name`/`add_page()`, multi-page `st.tabs()` canvas | +34 |
-| **Round 017** | 🔄 In Progress | Cross-filter broadcast, page delete proposal, published snapshot browser | — |
+| **Round 017** | ✅ Done | `cross_filter_emit`, page-scoped `cross_filters`, page delete proposal, published snapshot browser/load, published readonly URL fix | +15 |
 
-**Total tests: 295 passing** (updated each round)
+**Total tests: 310 passing** (updated each round)
 
 ## Architecture
 
@@ -82,8 +82,8 @@ The current working demo answers: _Which tools have longer ETCH queue time?_
 | Feature | Status |
 |---------|--------|
 | Cross-fact composition (queue time vs yield) | Implemented Round 013 (`CompositionPlanner`) |
-| Published/shared reports | Planned (lifecycle gate ready, sharing not yet wired) |
-| BlockRegistry with `_meta.json` | In Progress Round 014 (013-D retry) |
+| Published/shared reports | Basic publish/share URL and snapshot browser implemented; team lifecycle policy still future |
+| BlockRegistry with `_meta.json` | Implemented Round 014/015 (`FilesystemBlockRegistry`) |
 | Arbitrary visual builder from catalog | Implemented Round 013 (`build_visual_from_selection`) |
 | Full LLM semantic authority | Out of scope (Proposal Author only) |
 | Fact-to-fact detail join | Permanently refused |

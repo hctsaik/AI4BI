@@ -165,6 +165,16 @@ def query_to_dict(query: VisualQuerySpec) -> dict[str, Any]:
         "limit": query.limit,
         "data_version": query.data_version,
         "inherit_global_filter": query.inherit_global_filter,
+        "cross_filter_emit": (
+            {
+                "block_id": query.cross_filter_emit.block_id,
+                "column_name": query.cross_filter_emit.column_name,
+                "alias": query.cross_filter_emit.alias,
+                "truncate_date_to": query.cross_filter_emit.truncate_date_to,
+            }
+            if query.cross_filter_emit
+            else None
+        ),
     }
 
 
@@ -209,6 +219,16 @@ def query_from_dict(payload: dict[str, Any]) -> VisualQuerySpec:
         limit=payload.get("limit"),
         data_version=payload.get("data_version", "v1"),
         inherit_global_filter=payload.get("inherit_global_filter", False),
+        cross_filter_emit=(
+            DimensionRef(
+                block_id=payload["cross_filter_emit"]["block_id"],
+                column_name=payload["cross_filter_emit"]["column_name"],
+                alias=payload["cross_filter_emit"].get("alias"),
+                truncate_date_to=payload["cross_filter_emit"].get("truncate_date_to"),
+            )
+            if payload.get("cross_filter_emit")
+            else None
+        ),
     )
 
 
@@ -408,6 +428,14 @@ class ExecutableReportSpec:
             raise ReportValidationError(f"Page '{page_id}' already exists")
         self.pages[page_id] = page_spec
 
+    def delete_page(self, page_id: str) -> None:
+        """Deletes a page while preserving the invariant that reports have pages."""
+        if page_id not in self.pages:
+            raise ReportValidationError(f"Page '{page_id}' not found in report.")
+        if len(self.pages) <= 1:
+            raise ReportValidationError("Cannot delete the last page in a report.")
+        del self.pages[page_id]
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "spec_version": "2.0-draft",
@@ -484,6 +512,9 @@ def _get_path(report: ExecutableReportSpec, path: str) -> Any:
     if len(parts) == 3 and parts[0] == "pages" and parts[2] == "add_visual":
         # For add_visual the "current" state is None (visual does not exist yet).
         return None
+    if len(parts) == 3 and parts[0] == "pages" and parts[2] == "delete":
+        page = report.pages.get(parts[1])
+        return page.to_dict() if page is not None else None
     if len(parts) == 3 and parts[0] == "pages" and parts[2] == "reorder_visual":
         return list(report.pages[parts[1]].visual_order)
     if len(parts) == 3 and parts[0] == "pages" and parts[2] == "display_name":
@@ -532,6 +563,13 @@ def _set_path(report: ExecutableReportSpec, path: str, value: Any) -> None:
         visual_id = value["visual_id"]
         visual_spec = ReportVisualSpec.from_dict(value["visual"])
         page.add_visual(visual_id, visual_spec)
+        return
+    if len(parts) == 3 and parts[0] == "pages" and parts[2] == "delete":
+        page_id = parts[1]
+        if value is None:
+            report.delete_page(page_id)
+        else:
+            report.add_page(page_id, ReportPageSpec.from_dict(value))
         return
     if len(parts) == 3 and parts[0] == "pages" and parts[2] == "display_name":
         report.pages[parts[1]].display_name = str(value) if value is not None else ""
@@ -699,3 +737,16 @@ class PublishedReportStore:
         if not report_dir.exists():
             return []
         return sorted(report_dir.glob("*.json"), reverse=True)
+
+    def load(self, path: str | Path) -> ExecutableReportSpec:
+        """Load a published snapshot, restricted to this store's root."""
+        candidate = Path(path)
+        root = self.root.resolve()
+        resolved = candidate.resolve()
+        if root not in (resolved, *resolved.parents):
+            raise ReportValidationError("Published snapshot path is outside the configured store.")
+        if not resolved.exists() or resolved.suffix != ".json":
+            raise ReportValidationError("Published snapshot path must point to an existing JSON file.")
+        return ExecutableReportSpec.from_dict(
+            json.loads(resolved.read_text(encoding="utf-8"))
+        )

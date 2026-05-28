@@ -183,6 +183,27 @@ def build_page_rename_proposal(
     )
 
 
+def build_page_delete_proposal(
+    report: ExecutableReportSpec,
+    page_id: str,
+) -> ReportProposal:
+    """Deletes a page. The before value is the complete page dict for stale checks."""
+    page = report.pages.get(page_id)
+    if page is None:
+        raise ReportValidationError(f"Page '{page_id}' not found in report.")
+    change = ReportChange(
+        path=f"pages/{page_id}/delete",
+        label=f"Delete page '{page_id}'",
+        before=page.to_dict(),
+        after=None,
+        affects_data=True,
+    )
+    return ReportProposal(
+        description=f"Delete page '{page_id}'",
+        changes=[change],
+    )
+
+
 def prompt_to_proposal(
     prompt: str,
     report: ExecutableReportSpec,

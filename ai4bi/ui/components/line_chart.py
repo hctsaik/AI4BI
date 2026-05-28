@@ -13,12 +13,16 @@ Features
 Cross-filter protocol
 ---------------------
 When the user clicks a data point:
-  st.session_state["cross_filter"] is updated as:
+  st.session_state["cross_filters"] is updated as:
   {
+      "<page_id>": {
       "source_spec_id": str,          # which chart fired the event
-      "column": str,                  # x-axis dimension column name
+      "block_id": str,
+      "column_name": str,
+      "column": str,                  # display label for badges
       "value": Any,                   # selected x-axis value
       "timestamp": float,             # time.time() for de-duplication
+      }
   }
 
 Visuals that inherit global filters should observe this dict in their
@@ -40,7 +44,9 @@ from ai4bi.query_spec import DimensionRef, MetricRef, VisualQuerySpec, Visualiza
 
 logger = logging.getLogger(__name__)
 
-_CROSS_FILTER_KEY = "cross_filter"
+_CROSS_FILTER_KEY = "cross_filters"
+_LEGACY_CROSS_FILTER_KEY = "cross_filter"
+_CURRENT_PAGE_KEY = "_current_render_page_id"
 _PLOTLY_COLORS = [
     "#636EFA", "#EF553B", "#00CC96", "#AB63FA",
     "#FFA15A", "#19D3F3", "#FF6692", "#B6E880",
@@ -121,7 +127,7 @@ def _build_figure(
 
 def _handle_selection(
     event: Any,
-    spec_id: str,
+    query_spec: VisualQuerySpec,
     x_col: str,
 ) -> None:
     """
@@ -141,15 +147,27 @@ def _handle_selection(
     if x_value is None:
         return
 
-    st.session_state[_CROSS_FILTER_KEY] = {
-        "source_spec_id": spec_id,
-        "column": x_col,
+    emit = query_spec.cross_filter_emit
+    if emit is None:
+        return
+
+    page_id = st.session_state.get(_CURRENT_PAGE_KEY, "main")
+    payload = {
+        "page_id": page_id,
+        "source_spec_id": query_spec.spec_id,
+        "block_id": emit.block_id,
+        "column_name": emit.column_name,
+        "column": emit.alias or emit.column_name or x_col,
         "value": x_value,
         "timestamp": time.time(),
     }
+    cross_filters = dict(st.session_state.get(_CROSS_FILTER_KEY) or {})
+    cross_filters[page_id] = payload
+    st.session_state[_CROSS_FILTER_KEY] = cross_filters
+    st.session_state[_LEGACY_CROSS_FILTER_KEY] = payload
     logger.debug(
         "[line_chart] cross-filter set: column=%s value=%s source=%s",
-        x_col, x_value, spec_id,
+        emit.column_name, x_value, query_spec.spec_id,
     )
 
 
@@ -224,10 +242,11 @@ def render_line_chart(
     # ------------------------------------------------------------------ #
     # Cross-filter handling
     # ------------------------------------------------------------------ #
-    _handle_selection(event, query_spec.spec_id, x_col)
+    _handle_selection(event, query_spec, x_col)
 
     # Surface active cross-filter badge
-    active_cf = st.session_state.get(_CROSS_FILTER_KEY)
+    page_id = st.session_state.get(_CURRENT_PAGE_KEY, "main")
+    active_cf = (st.session_state.get(_CROSS_FILTER_KEY) or {}).get(page_id)
     if active_cf and active_cf.get("source_spec_id") == query_spec.spec_id:
         col1, col2 = st.columns([6, 1])
         with col1:
@@ -236,7 +255,10 @@ def render_line_chart(
             )
         with col2:
             if st.button("Clear", key=f"cf_clear_{query_spec.spec_id}"):
-                st.session_state[_CROSS_FILTER_KEY] = None
+                cross_filters = dict(st.session_state.get(_CROSS_FILTER_KEY) or {})
+                cross_filters.pop(page_id, None)
+                st.session_state[_CROSS_FILTER_KEY] = cross_filters
+                st.session_state[_LEGACY_CROSS_FILTER_KEY] = None
                 st.rerun()
 
     logger.debug(

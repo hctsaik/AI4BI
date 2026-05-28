@@ -220,6 +220,10 @@ class VisualQuerySpec:
     inherit_global_filter : bool
         If True, filters marked inherit_global_filter=True will have their
         values replaced by the dashboard's active global filters at runtime.
+    cross_filter_emit : DimensionRef | None
+        Optional dimension emitted by an interactive visual selection.  The UI
+        layer can translate selected values for this dimension into page-scoped
+        filters for compatible visuals.
     """
 
     spec_id: str
@@ -231,6 +235,7 @@ class VisualQuerySpec:
     limit: Optional[int] = None
     data_version: str = "v1"
     inherit_global_filter: bool = False
+    cross_filter_emit: Optional[DimensionRef] = None
 
     def __post_init__(self) -> None:
         if not self.spec_id or not self.spec_id.strip():
@@ -289,6 +294,16 @@ class VisualQuerySpec:
                      for s in self.sort],
             "limit": self.limit,
             "inherit_global_filter": self.inherit_global_filter,
+            "cross_filter_emit": (
+                {
+                    "block_id": self.cross_filter_emit.block_id,
+                    "column_name": self.cross_filter_emit.column_name,
+                    "alias": self.cross_filter_emit.alias,
+                    "truncate_date_to": self.cross_filter_emit.truncate_date_to,
+                }
+                if self.cross_filter_emit
+                else None
+            ),
         }
         digest = hashlib.sha256(
             json.dumps(payload, sort_keys=True, default=str).encode()

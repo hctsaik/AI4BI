@@ -14,6 +14,7 @@ from ai4bi.report.models import (
     ExecutableReportSpec,
     PublishBlockedError,
     PublishedReportStore,
+    ReportValidationError,
 )
 from ai4bi.report.publication import PublicationGateResult, GateCheckResult, run_publication_gate
 from ai4bi.report.templates import build_semiconductor_queue_time_report
@@ -214,3 +215,31 @@ def test_published_store_autocreates_directory(tmp_path):
 
     assert publish_root.exists(), "PublishedReportStore must auto-create the root directory."
     assert written_path.exists()
+
+
+def test_load_published_snapshot_round_trips(tmp_path):
+    store = PublishedReportStore(tmp_path / "published")
+    report = _demo_report()
+    gate = _make_passing_gate()
+    written_path, _ = store.publish(report, gate)
+
+    restored = store.load(written_path)
+
+    assert restored.report_id == report.report_id
+    assert restored.title == report.title
+
+
+def test_load_published_snapshot_rejects_path_outside_root(tmp_path):
+    store = PublishedReportStore(tmp_path / "published")
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps(_demo_report().to_dict()), encoding="utf-8")
+
+    with pytest.raises(ReportValidationError, match="outside"):
+        store.load(outside)
+
+
+def test_load_published_snapshot_rejects_missing_json(tmp_path):
+    store = PublishedReportStore(tmp_path / "published")
+
+    with pytest.raises(ReportValidationError, match="existing JSON"):
+        store.load(tmp_path / "published" / "missing.json")

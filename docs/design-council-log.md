@@ -2746,4 +2746,26 @@ Round 016 continues from Round 015 baseline (261 tests). Three agents ran in par
 
 ### 016-F. Next Round Prompt
 
+---
+
+## Round 017 - Cross-Filter Broadcast, Page Delete, Published Snapshot Browser (2026-05-28)
+
+Round 017 completed the three planned workstreams:
+
+- `VisualQuerySpec.cross_filter_emit` plus page-scoped `st.session_state["cross_filters"]`.
+- `ExecutableReportSpec.delete_page()` and proposal path `pages/{page_id}/delete`.
+- `PublishedReportStore.load()` plus a sidebar Published versions browser and a published-readonly URL loader fix.
+
+Validation:
+
+- Focused gate: `python -m pytest tests/test_cross_filter_broadcast.py tests/test_page_delete.py tests/test_published_store.py -q` -> 23 passed.
+- Full gate: `python -m pytest tests/ -q` -> 310 passed.
+
+Round 018 candidates:
+
+1. Add a derived `ReportSummary` view.
+2. Add a governed restore-to-draft proposal for published snapshots.
+3. Extend cross-filter emit support to table row selection.
+4. Add AppTest coverage once published-store root injection is cleaner.
+
 > Round 017 聚焦三件事：(1) **Cross-filter broadcast** — `VisualQuerySpec.cross_filter_emit: DimensionRef | None` 設計已存在；Round 017 把 emit 值寫入 `st.session_state["cross_filters"]` 並在 `merged_filters()` 中套用，讓一個 visual 的點擊可以 filter 同 page 其他 visuals；(2) **Page delete proposal** — `delete_page(page_id)` on `ExecutableReportSpec`，proposal path `"pages/{page_id}/delete"`，undo 可恢復整個 page；(3) **Published snapshot browser** — sidebar 加一個 "Published versions" expander，呼叫 `list_published()` 顯示時間戳清單，點擊 "Load" 可以 stage 一個 restore proposal（只讀預覽）。`ReportSummary` dataclass 可作為次要目標。

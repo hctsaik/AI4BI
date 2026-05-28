@@ -24,10 +24,10 @@ from ai4bi.report.models import (
     ReportProposal,
 )
 from ai4bi.blocks.registry import FilesystemBlockRegistry, BlockNotFoundError, NoCertifiedVersionError
-from ai4bi.report.proposals import build_title_proposal, controls_to_proposal, pin_block_version_proposal, prompt_to_proposal, unpin_block_version_proposal
+from ai4bi.report.proposals import build_page_delete_proposal, build_title_proposal, controls_to_proposal, pin_block_version_proposal, prompt_to_proposal, unpin_block_version_proposal
 from ai4bi.report.publication import GateCheckResult, run_publication_gate
 from ai4bi.report.templates import build_semiconductor_queue_time_report
-from ai4bi.query_spec import VisualType
+from ai4bi.query_spec import FilterOperator, FilterSpec, VisualQuerySpec, VisualType
 from ai4bi.ui.cache import QueryCache
 from ai4bi.ui.render_visual import render_visual
 from ai4bi.ui import workspace
@@ -39,6 +39,60 @@ _SEMANTIC_MODEL = _DEMO_ROOT / "semantic_model.json"
 _DRAFT_STORE = _DEMO_ROOT / "draft_reports"
 _REGISTRY_DIR = _DEMO_ROOT / "registry"
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
+
+
+def _active_cross_filter_for_page(page_id: str) -> dict | None:
+    """Return the active cross-filter payload for one page, if any."""
+    cross_filters = st.session_state.get("cross_filters") or {}
+    if isinstance(cross_filters, dict):
+        payload = cross_filters.get(page_id)
+        if payload:
+            return payload
+    legacy = st.session_state.get("cross_filter")
+    if isinstance(legacy, dict) and legacy.get("page_id", page_id) == page_id:
+        return legacy
+    return None
+
+
+def _apply_cross_filter_to_query(
+    query: VisualQuerySpec,
+    cross_filter: dict | None,
+    target_component_id: str,
+) -> VisualQuerySpec:
+    """Inject a page-scoped cross-filter into compatible target visuals."""
+    if not cross_filter:
+        return query
+    if cross_filter.get("source_spec_id") == target_component_id:
+        return query
+
+    block_id = cross_filter.get("block_id")
+    column_name = cross_filter.get("column_name")
+    value = cross_filter.get("value")
+    if not block_id or not column_name or value is None:
+        return query
+    if block_id not in query.all_block_ids:
+        return query
+
+    values = value if isinstance(value, list) else [value]
+    filters = [
+        filter_spec
+        for filter_spec in query.filters
+        if not (
+            filter_spec.block_id == block_id
+            and filter_spec.column_name == column_name
+        )
+    ]
+    filters.append(
+        FilterSpec(
+            block_id=block_id,
+            column_name=column_name,
+            operator=FilterOperator.in_,
+            value=values,
+            inherit_global_filter=False,
+        )
+    )
+    version_token = f"{query.data_version}:xf:{block_id}.{column_name}:{values}"
+    return replace(query, filters=filters, data_version=version_token)
 
 
 def _load_all_contracts() -> dict[str, DataBlockContract]:
@@ -139,6 +193,42 @@ def _render_publication_readiness(report: ExecutableReportSpec) -> None:
                 key="publish_share_btn",
                 help="Fix failing checks before publishing",
             )
+
+
+def _load_published_snapshot(path: Path) -> ExecutableReportSpec:
+    """Load a published snapshot as a read-only report preview."""
+    report = PublishedReportStore(_PROJECT_ROOT / "published").load(path)
+    return replace(report, read_only=True)
+
+
+def _render_published_snapshot_browser(
+    report: ExecutableReportSpec,
+    cache: QueryCache,
+) -> None:
+    """Render a small browser for published snapshots of the current report."""
+    with st.expander("Published versions", expanded=False):
+        store = PublishedReportStore(_PROJECT_ROOT / "published")
+        snapshots = store.list_published(report.report_id)
+        if not snapshots:
+            st.info("No published snapshots found for this report.")
+            return
+
+        selected = st.selectbox(
+            "Snapshot",
+            snapshots,
+            format_func=lambda path: path.stem,
+            key="published_snapshot_select",
+        )
+        if st.button("Load Snapshot", key="published_snapshot_load", width="stretch"):
+            try:
+                workspace.replace_with_loaded(_load_published_snapshot(selected))
+                cache.invalidate_all()
+                st.session_state["cross_filters"] = {}
+                st.session_state["cross_filter"] = None
+                workspace.set_message(f"Loaded published snapshot: {selected.name}")
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                workspace.set_message(f"Published snapshot load rejected: {exc}")
+            st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +481,20 @@ def _render_draft_controls(
                 workspace.stage_proposal(title_proposal)
                 st.rerun()
 
+        if not report.read_only and len(report.pages) > 1:
+            delete_page_id = st.selectbox(
+                "Delete page",
+                list(report.pages.keys()),
+                format_func=lambda page_id: report.pages[page_id].display_name or page_id,
+                key="widget_delete_page",
+            )
+            if st.button("Stage Page Delete", width="stretch"):
+                workspace.stage_proposal(
+                    build_page_delete_proposal(workspace.current_report(), delete_page_id)
+                )
+                workspace.set_message(f"Page '{delete_page_id}' deletion staged.")
+                st.rerun()
+
         button_cols = st.columns(2)
         with button_cols[0]:
             if st.button("Undo", disabled=not workspace.can_undo(), width="stretch"):
@@ -431,6 +535,9 @@ def _render_draft_controls(
 
         st.markdown("---")
         _render_publication_readiness(report)
+
+        st.markdown("---")
+        _render_published_snapshot_browser(report, cache)
 
     return report.merged_filters()
 
@@ -594,7 +701,13 @@ def _render_page(
                     workspace.stage_proposal(proposal)
                     workspace.set_message(f"Staged: move '{component_id}' down.")
                     st.rerun()
+        st.session_state["_current_render_page_id"] = page_id
         query = replace(visual.query, data_version=f"draft-r{report.revision}")
+        query = _apply_cross_filter_to_query(
+            query,
+            _active_cross_filter_for_page(page_id),
+            component_id,
+        )
         render_visual(query, visual.visualization, cache, executor, active_filters)
 
     # Render visuals in visual_order, pairing adjacent kpi_cards into two columns.
@@ -649,7 +762,11 @@ def main() -> None:
     if draft_path_param and "readonly_draft_loaded" not in st.session_state:
         _store = DraftReportStore(_DRAFT_STORE)
         try:
-            loaded = _store.load(Path(draft_path_param))
+            candidate = Path(draft_path_param)
+            try:
+                loaded = _store.load(candidate)
+            except ValueError:
+                loaded = PublishedReportStore(_PROJECT_ROOT / "published").load(candidate)
             workspace.replace_with_loaded(loaded)
             st.session_state["readonly_draft_loaded"] = True
         except (OSError, ValueError, json.JSONDecodeError):
