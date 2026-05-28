@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,6 +61,97 @@ _APPROVED_AGGREGATIONS = {
     DisaggregationMethod.min: AggFunction.min,
     DisaggregationMethod.max: AggFunction.max,
 }
+
+
+# ---------------------------------------------------------------------------
+# Derived metric formula sandbox — Round 045
+#
+# A metric with disaggregation_method == none is a *derived* metric: its
+# `formula` is an aggregate expression such as
+#     SUM(revenue) / NULLIF(SUM(order_count), 0)
+# We must never interpolate arbitrary SQL, so the formula is tokenised and
+# every identifier is checked against an allow-list of functions/keywords or
+# a known column of the primary block. Column references are re-qualified with
+# the block prefix. Anything else (unknown identifier, statement terminator,
+# comment) is rejected — this closes the SQL-injection vector flagged in the
+# gap analysis while unlocking margin / conversion-rate / AOV metrics.
+# ---------------------------------------------------------------------------
+
+_FORMULA_ALLOWED_WORDS = frozenset({
+    # aggregate / scalar functions
+    "sum", "avg", "count", "min", "max", "count_distinct",
+    "nullif", "coalesce", "abs", "round", "cast", "floor", "ceil",
+    "percentile_cont", "percentile_disc", "stddev", "stddev_samp",
+    "stddev_pop", "variance", "var_samp", "var_pop", "median", "greatest", "least",
+    # control flow / clauses
+    "case", "when", "then", "else", "end",
+    "within", "group", "order", "by", "as", "distinct",
+    "and", "or", "not", "is", "null", "between", "in",
+    # cast target types
+    "decimal", "double", "integer", "bigint", "float", "numeric", "real", "varchar",
+})
+
+_FORMULA_TOKEN_RE = re.compile(
+    r"'[^']*'"                        # single-quoted string literal
+    r"|\d+\.?\d*"                     # numeric literal
+    r"|[A-Za-z_][A-Za-z0-9_]*"        # identifier / keyword
+    r"|<=|>=|<>|!=|[-+*/%(),.<>=]"    # operators / punctuation
+)
+
+_FORMULA_FORBIDDEN = (";", "--", "/*", "*/")
+
+
+def _build_derived_formula_expr(
+    formula: str,
+    primary_block_id: str,
+    column_names: set[str],
+) -> str:
+    """Validate a derived-metric formula and return a safely-qualified expression.
+
+    Raises QueryPlanningError if the formula references an unknown identifier or
+    contains a disallowed sequence.
+    """
+    formula = (formula or "").strip()
+    if not formula:
+        raise QueryPlanningError("Derived metric has an empty formula.")
+    for bad in _FORMULA_FORBIDDEN:
+        if bad in formula:
+            raise QueryPlanningError(
+                f"Derived metric formula contains a disallowed sequence: {bad!r}"
+            )
+    column_lower = {name.lower(): name for name in column_names}
+    out: list[str] = []
+    pos = 0
+    for match in _FORMULA_TOKEN_RE.finditer(formula):
+        gap = formula[pos:match.start()]
+        if gap.strip():
+            raise QueryPlanningError(
+                f"Unexpected characters in derived formula: {gap.strip()!r}"
+            )
+        pos = match.end()
+        tok = match.group(0)
+        first = tok[0]
+        if first == "'" or first.isdigit():
+            out.append(tok)                       # literal — safe as-is
+        elif first.isalpha() or first == "_":
+            low = tok.lower()
+            if low in column_lower:
+                out.append(_qualified(primary_block_id, column_lower[low]))
+            elif low in _FORMULA_ALLOWED_WORDS:
+                out.append(tok)
+            else:
+                raise QueryPlanningError(
+                    f"Unknown identifier '{tok}' in derived metric formula "
+                    f"(not a column of '{primary_block_id}' nor an allowed function)."
+                )
+        else:
+            out.append(tok)                       # operator / punctuation
+    trailing = formula[pos:]
+    if trailing.strip():
+        raise QueryPlanningError(
+            f"Unexpected trailing characters in derived formula: {trailing.strip()!r}"
+        )
+    return " ".join(out)
 
 
 def _quote(name: str) -> str:
@@ -229,12 +321,21 @@ class Executor:
             raise QueryPlanningError(
                 f"Metric '{metric.metric_name}' is not declared by '{metric.block_id}'."
             )
-        _require_column(contracts, metric.block_id, metric.metric_name)
         approved = _APPROVED_AGGREGATIONS.get(definition.disaggregation_method)
         if approved is None:
+            # Round 045: derived metric — disaggregation_method == none means the
+            # metric is a composite aggregate expression (e.g. AOV, margin, YoY).
+            # Build it from the validated formula instead of a single column.
+            if definition.disaggregation_method == DisaggregationMethod.none:
+                alias = _quote(metric.alias or metric.metric_name)
+                expr = _build_derived_formula_expr(
+                    definition.formula, primary_block_id, _column_names(contract)
+                )
+                return f"{expr} AS {alias}"
             raise QueryPlanningError(
                 f"Metric '{metric.metric_name}' requires a derived-expression planner."
             )
+        _require_column(contracts, metric.block_id, metric.metric_name)
         if metric.agg_override is not None and metric.agg_override is not approved:
             raise QueryPlanningError(
                 f"Aggregation '{metric.agg_override.value}' is not approved for "

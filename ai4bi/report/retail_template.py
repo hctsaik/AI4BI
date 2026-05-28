@@ -160,6 +160,15 @@ def build_retail_sales_block() -> DataBlockContract:
                 unit="%",
                 description="退貨率（平均，不加總）",
             ),
+            # Round 045: derived (composite) metric — average order value.
+            # disaggregation_method=none → executor expands the validated formula.
+            MetricDefinition(
+                name="avg_order_value",
+                formula="SUM(revenue) / NULLIF(SUM(order_count), 0)",
+                disaggregation_method=DisaggregationMethod.none,
+                unit="NT$",
+                description="平均客單價（總營收 ÷ 訂單數，複合指標）",
+            ),
         ],
         data_source=InlineDataSource(records=records),
         policy=PolicySpec(data_classification=DataClassification.internal),
@@ -203,6 +212,12 @@ def build_retail_demo_report() -> ExecutableReportSpec:
         "kpi_return_rate",
         _q("kpi_return_rate", [MetricRef(_BLOCK_ID, "return_rate", "平均退貨率", AggFunction.avg)]),
         VisualizationSpec(VisualType.kpi_card, title="平均退貨率", extra={"unit": "%"}),
+    )
+    # Round 045: derived metric KPI — average order value (AOV)
+    kpi_aov = ReportVisualSpec(
+        "kpi_avg_order_value",
+        _q("kpi_avg_order_value", [MetricRef(_BLOCK_ID, "avg_order_value", "平均客單價")]),
+        VisualizationSpec(VisualType.kpi_card, title="平均客單價", extra={"unit": "NT$"}),
     )
 
     # ── Revenue trend (line) ─────────────────────────────────────────────────
@@ -285,6 +300,7 @@ def build_retail_demo_report() -> ExecutableReportSpec:
     visuals = {
         "kpi_revenue":           kpi_revenue,
         "kpi_orders":            kpi_orders,
+        "kpi_avg_order_value":   kpi_aov,
         "kpi_return_rate":       kpi_return,
         "line_revenue_trend":    line_trend,
         "bar_revenue_by_store":  bar_store,
