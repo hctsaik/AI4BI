@@ -72,7 +72,16 @@ class NL2ProposalResult:
     refusal: GovernanceRefusal | None = None
     trust_notes: list[str] = field(default_factory=list)
     risk_level: RiskLevel = "low"
+    # Mixed-prompt split: when LLM detects both style and analysis intents,
+    # each proposal is staged separately so the user can apply them individually.
+    # split_proposals[0] = style (display-only), split_proposals[1] = analysis
+    split_proposals: tuple[ReportProposal, ...] = ()
+    disambiguation: str | None = None  # clarifying question shown when intent is ambiguous
 
     @property
     def is_refusal(self) -> bool:
         return self.refusal is not None
+
+    @property
+    def is_mixed(self) -> bool:
+        return len(self.split_proposals) > 1

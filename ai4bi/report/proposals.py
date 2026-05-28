@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ai4bi.ai import AnalysisPlan, NL2ProposalService
 from ai4bi.report.models import (
     ExecutableReportSpec,
     ReportChange,
@@ -16,6 +17,16 @@ from ai4bi.report.models import (
 class ProposalResult:
     proposal: ReportProposal | None
     message: str
+    analysis_plan: AnalysisPlan | None = None
+    trust_notes: tuple[str, ...] = ()
+    refusal: str | None = None
+    split_proposals: tuple[ReportProposal, ...] = ()
+    intent_kind: str = "unknown"    # "style"|"analysis"|"plan"|"refused"|"mixed"|"unknown"
+    disambiguation: str | None = None  # question to show when LLM confidence is low
+
+    @property
+    def is_mixed(self) -> bool:
+        return len(self.split_proposals) > 1
 
 
 def _control_change(
@@ -104,7 +115,6 @@ def pin_block_version_proposal(
     Creates a proposal that pins the BlockRef for block_id in the given visual
     to certified_version.
     """
-    # Validate the page / visual / block_id exist upfront so we raise early.
     page = report.pages.get(page_id)
     if page is None:
         raise ReportValidationError(f"Page '{page_id}' not found in report.")
@@ -208,14 +218,52 @@ def prompt_to_proposal(
     prompt: str,
     report: ExecutableReportSpec,
     selected_component_id: str,
+    semantic_model: "dict | None" = None,
+    contracts: "dict | None" = None,
 ) -> ProposalResult:
+    """Convert a natural-language prompt to a reviewable proposal or plan.
+
+    The AI service owns governed style/analysis/refusal behavior. This wrapper
+    preserves the older demo control intents while returning richer plan/trust
+    metadata to the Streamlit surface.
+    """
     normalized = prompt.strip().upper()
     if not normalized:
         return ProposalResult(None, "Enter a report change to create a proposal.")
-    if any(term in normalized for term in ("YIELD", "良率", "JOIN", "SQL")):
+
+    ai_result = NL2ProposalService().propose(prompt, report, selected_component_id, semantic_model=semantic_model, contracts=contracts)
+    if ai_result.refusal is not None:
         return ProposalResult(
             None,
-            "This request needs a governed metric or relationship workflow and cannot execute in this draft.",
+            ai_result.message,
+            trust_notes=tuple(ai_result.trust_notes),
+            refusal=ai_result.refusal.reason,
+            intent_kind="refused",
+        )
+    # Mixed prompt: return split_proposals so UI can stage them individually
+    if ai_result.is_mixed:
+        return ProposalResult(
+            None,
+            ai_result.message,
+            trust_notes=tuple(ai_result.trust_notes),
+            split_proposals=ai_result.split_proposals,
+            intent_kind="mixed",
+        )
+    if ai_result.analysis_plan is not None:
+        return ProposalResult(
+            ai_result.proposal,
+            ai_result.message,
+            analysis_plan=ai_result.analysis_plan,
+            trust_notes=tuple(ai_result.trust_notes),
+            intent_kind="plan",
+        )
+    if ai_result.proposal is not None:
+        kind = ai_result.intent.intent_kind if ai_result.intent else "unknown"
+        return ProposalResult(
+            ai_result.proposal,
+            ai_result.message,
+            trust_notes=tuple(ai_result.trust_notes),
+            intent_kind="style" if kind == "style_change" else "analysis",
         )
 
     changes: list[ReportChange] = []
@@ -229,7 +277,7 @@ def prompt_to_proposal(
         change = _control_change(report, "product_family", products, "Product family")
         if change:
             changes.append(change)
-    if "供應商" in prompt or "VENDOR" in normalized:
+    if "VENDOR" in normalized:
         breakdown_proposal = controls_to_proposal(
             report,
             steps=report.controls["process_step"].value,
@@ -238,21 +286,7 @@ def prompt_to_proposal(
         )
         if breakdown_proposal:
             changes.extend(breakdown_proposal.changes)
-    if "紅" in prompt or "RED" in normalized:
-        if selected_component_id != "line_queue_by_day":
-            return ProposalResult(None, "Select Queue-Time Trend before changing its line style.")
-        current_color = report.pages["main"].visuals["line_queue_by_day"].visualization.extra.get("line_color")
-        if current_color != "#D62728":
-            changes.append(
-                ReportChange(
-                    "pages/main/visuals/line_queue_by_day/visualization/extra/line_color",
-                    "Trend line color",
-                    current_color,
-                    "#D62728",
-                    False,
-                )
-            )
-    if "RESET" in normalized or "重設" in prompt:
+    if "RESET" in normalized:
         reset = controls_to_proposal(
             report,
             steps=["ETCH"],
@@ -272,7 +306,13 @@ def prompt_to_proposal(
                 )
             )
     if not changes:
-        return ProposalResult(None, "No supported report change was detected.")
+        return ProposalResult(
+            None,
+            ai_result.message or "No supported report change was detected.",
+            trust_notes=tuple(ai_result.trust_notes),
+            intent_kind="unknown",
+            disambiguation=getattr(ai_result, "disambiguation", None),
+        )
     return ProposalResult(
         ReportProposal("Prompt proposal", changes, selected_component_id),
         "Proposal created. Review the diff before applying it.",

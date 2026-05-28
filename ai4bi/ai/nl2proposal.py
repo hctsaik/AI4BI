@@ -1,4 +1,15 @@
-"""Deterministic NL-to-proposal service for governed BI workflows."""
+"""NL-to-proposal service for governed BI workflows.
+
+Routing modes
+-------------
+LLM_MODE=mock (default)
+    Deterministic keyword routing — no API calls, works in CI/offline.
+
+LLM_MODE=anthropic + ANTHROPIC_API_KEY set
+    Claude classifies the intent; the existing handler methods enforce
+    governance (no SQL, certified-only metrics, etc.).  Falls back to
+    keyword routing if the API call fails.
+"""
 
 from __future__ import annotations
 
@@ -12,8 +23,38 @@ from ai4bi.ai.intent_models import (
     NL2ProposalResult,
     SemanticSelection,
 )
+from ai4bi.ai.llm_adapter import LLMAdapter
 from ai4bi.query_spec import AggFunction, DimensionRef, MetricRef, VisualType
 from ai4bi.report.models import ExecutableReportSpec, ReportChange, ReportProposal, ReportVisualSpec
+
+# ---------------------------------------------------------------------------
+# Round 027: Visual Composer — dimension keyword → (block_id, column, alias, truncate)
+# ---------------------------------------------------------------------------
+_DIM_KEYWORD_MAP: dict[str, tuple[str, str, str, str | None]] = {
+    "月份": ("process_move_fact", "event_date", "Month", "month"),
+    "月": ("process_move_fact", "event_date", "Month", "month"),
+    "month": ("process_move_fact", "event_date", "Month", "month"),
+    "weekly": ("process_move_fact", "event_date", "Week", "week"),
+    "week": ("process_move_fact", "event_date", "Week", "week"),
+    "週": ("process_move_fact", "event_date", "Week", "week"),
+    "day": ("process_move_fact", "event_date", "Date", "day"),
+    "daily": ("process_move_fact", "event_date", "Date", "day"),
+    "日": ("process_move_fact", "event_date", "Date", "day"),
+    "date": ("process_move_fact", "event_date", "Date", None),
+    "vendor": ("tool_dim", "vendor", "Vendor", None),
+    "供應商": ("tool_dim", "vendor", "Vendor", None),
+    "廠商": ("tool_dim", "vendor", "Vendor", None),
+    "tool": ("tool_dim", "tool_id", "Tool ID", None),
+    "tool_id": ("tool_dim", "tool_id", "Tool ID", None),
+    "工具": ("tool_dim", "tool_id", "Tool ID", None),
+    "機台": ("tool_dim", "tool_id", "Tool ID", None),
+    "step": ("process_step_dim", "step_name", "Step", None),
+    "step_id": ("process_move_fact", "step_id", "Step ID", None),
+    "製程": ("process_step_dim", "step_name", "Step", None),
+    "product": ("lot_dim", "product_family", "Product Family", None),
+    "product_family": ("lot_dim", "product_family", "Product Family", None),
+    "產品": ("lot_dim", "product_family", "Product Family", None),
+}
 
 # ---------------------------------------------------------------------------
 # Round 019: Chart-type change mappings
@@ -215,10 +256,12 @@ _DATE_FILTER_GLOBAL_KEY = "date_range"
 class NL2ProposalService:
     """Classifies natural-language BI requests into typed, governed outcomes.
 
-    This first implementation is deterministic. It grounds requests to the
-    selected report visual, creates style-only proposals for chart color
-    changes, plans queue-time analysis without SQL, and refuses requests that
-    ask for raw SQL or unsafe free-form joins.
+    When LLM_MODE=anthropic and ANTHROPIC_API_KEY is set, Claude is used to
+    classify the intent; the existing handler methods still enforce all
+    governance rules (no SQL, certified-only paths, etc.).
+
+    In all other cases the service falls back to the deterministic keyword
+    router, ensuring offline / CI operation with zero external dependencies.
     """
 
     def propose(
@@ -236,6 +279,7 @@ class NL2ProposalService:
                 target_scope=_target_scope(selected_component_id),
             )
 
+        # Governance hard-block runs before any routing (LLM or keyword).
         refusal = self._governance_refusal(normalized, semantic_model)
         if refusal is not None:
             intent = AIIntent(
@@ -252,6 +296,199 @@ class NL2ProposalService:
                 risk_level=refusal.risk_level,
             )
 
+        # --- LLM-assisted intent classification (when enabled) ---
+        try:
+            classification = LLMAdapter().classify(
+                prompt, report, selected_component_id, semantic_model=semantic_model
+            )
+            if classification.mode == "llm":
+                result = self._dispatch_llm_intent(
+                    classification, prompt, normalized, report,
+                    selected_component_id, semantic_model, contracts,
+                )
+                if result is not None:
+                    return result
+                # None = LLM returned an intent we couldn't route; fall through
+        except Exception:  # noqa: BLE001
+            pass  # Any adapter failure → keyword fallback
+
+        return self._keyword_propose(
+            prompt, normalized, report, selected_component_id, semantic_model, contracts
+        )
+
+    # ------------------------------------------------------------------
+    # LLM intent dispatcher
+    # ------------------------------------------------------------------
+
+    def _build_single_proposal(
+        self,
+        intent: str,
+        params: dict,
+        prompt: str,
+        report: ExecutableReportSpec,
+        selected_component_id: str | None,
+        semantic_model: dict[str, Any] | None,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Build a single proposal for one intent+params pair (used by mixed dispatch)."""
+        clf = type("_C", (), {"intent": intent, "parameters": params, "mode": "llm",
+                              "secondary_intent": None, "secondary_parameters": {}})()
+        return self._dispatch_llm_intent(
+            clf, prompt, _normalize(prompt), report, selected_component_id, semantic_model, contracts
+        )
+
+    def _dispatch_llm_intent(
+        self,
+        classification: Any,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        selected_component_id: str | None,
+        semantic_model: dict[str, Any] | None,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Route an LLM IntentClassification to the appropriate handler.
+
+        Returns None to signal the caller should fall through to keyword routing.
+        """
+        intent = classification.intent
+        params = classification.parameters or {}
+
+        # ------------------------------------------------------------------ #
+        # Mixed-prompt: split into two proposals when LLM returns secondary_intent
+        # ------------------------------------------------------------------ #
+        secondary_intent = getattr(classification, "secondary_intent", None)
+        if secondary_intent and secondary_intent != intent:
+            secondary_params = getattr(classification, "secondary_parameters", {}) or {}
+            primary_result = self._build_single_proposal(
+                intent, params, prompt, report, selected_component_id, semantic_model, contracts
+            )
+            secondary_result = self._build_single_proposal(
+                secondary_intent, secondary_params, prompt, report,
+                selected_component_id, semantic_model, contracts
+            )
+            proposals = tuple(
+                r.proposal for r in (primary_result, secondary_result)
+                if r is not None and r.proposal is not None
+            )
+            if len(proposals) == 2:
+                style_intents = {"style_change", "chart_type_change", "rename_visual"}
+                if intent not in style_intents:
+                    proposals = (proposals[1], proposals[0])  # style first
+                notes = [
+                    "Mixed prompt detected: style and analysis changes separated.",
+                    "Apply them individually or together.",
+                ]
+                mixed_intent = AIIntent(
+                    intent_kind="analysis_request",
+                    target_scope=_target_scope(selected_component_id),
+                    trust_notes=notes,
+                    risk_level="medium",
+                )
+                return NL2ProposalResult(
+                    intent=mixed_intent,
+                    message="Mixed prompt: style and analysis proposals split. Apply each separately or together.",
+                    split_proposals=proposals,
+                    trust_notes=notes,
+                    risk_level="medium",
+                )
+            elif len(proposals) == 1:
+                result = primary_result if (primary_result and primary_result.proposal) else secondary_result
+                return result
+
+        # ------------------------------------------------------------------ #
+        # Single intent dispatch
+        # ------------------------------------------------------------------ #
+        if intent == "style_change":
+            color_name = params.get("color", "")
+            augmented = f"{prompt} {color_name}" if color_name else prompt
+            return self._style_change(augmented, _normalize(augmented), report, selected_component_id)
+
+        if intent == "chart_type_change":
+            target = params.get("target_type", "")
+            augmented = f"change to {target}" if target else prompt
+            return self._chart_type_change(augmented, _normalize(augmented), report, selected_component_id)
+
+        if intent == "dimension_change":
+            granularity = params.get("granularity", "")
+            augmented = f"group by {granularity}" if granularity else prompt
+            return self._dimension_change(augmented, _normalize(augmented), report, selected_component_id)
+
+        if intent == "add_metric":
+            metric_name = params.get("metric_name")
+            if metric_name:
+                return self._add_metric(metric_name, report, selected_component_id, semantic_model)
+
+        if intent == "remove_metric":
+            metric_name = params.get("metric_name")
+            if metric_name:
+                return self._remove_metric(metric_name, report, selected_component_id)
+
+        if intent == "rename_visual":
+            new_title = params.get("new_title")
+            if new_title:
+                augmented = f"rename this chart to \"{new_title}\""
+                return self._rename_visual(augmented, _normalize(augmented), report, selected_component_id)
+
+        if intent == "categorical_dimension_change":
+            dim_keyword = params.get("dimension_keyword", "")
+            cat_dim = _CATEGORICAL_DIM_MAP.get(dim_keyword.lower()) or _extract_categorical_dimension(
+                f"group by {dim_keyword}", f"group by {dim_keyword.lower()}"
+            )
+            if cat_dim:
+                return self._categorical_dimension_change(cat_dim, report, selected_component_id, semantic_model)
+
+        if intent == "value_filter_change":
+            filter_values = params.get("filter_values")
+            if filter_values:
+                values_upper = [v.upper() for v in filter_values]
+                col_name = "step_id"
+                for v in values_upper:
+                    if v.lower() in _VALUE_FILTER_MAP:
+                        _, col_name = _VALUE_FILTER_MAP[v.lower()]
+                        break
+                return self._value_filter_change(col_name, values_upper, report, selected_component_id, semantic_model)
+
+        if intent == "date_filter_change":
+            period_raw = params.get("period", "")
+            augmented = period_raw if period_raw else prompt
+            return self._date_filter_change(augmented, _normalize(augmented), report)
+
+        if intent == "queue_analysis":
+            return self._queue_time_plan(prompt, report, selected_component_id, semantic_model, contracts)
+
+        if intent == "add_visual":
+            return self._add_visual_nl(params, report, semantic_model, contracts)
+
+        if intent == "highlight_outliers":
+            return self._highlight_outliers(params, report, selected_component_id)
+
+        if intent == "add_trend_line":
+            return self._add_trend_line(params, report, selected_component_id)
+
+        if intent == "unsupported":
+            reason = params.get("reason", "No supported governed BI intent was detected.")
+            disam = getattr(classification, "disambiguation", None)
+            return self._unsupported(
+                reason, target_scope=_target_scope(selected_component_id),
+                disambiguation=disam,
+            )
+
+        return None  # Unknown intent → fall through to keyword routing
+
+    # ------------------------------------------------------------------
+    # Keyword-based routing (unchanged from Round 022)
+    # ------------------------------------------------------------------
+
+    def _keyword_propose(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        selected_component_id: str | None,
+        semantic_model: dict[str, Any] | None,
+        contracts: dict[str, Any] | None,
+    ) -> NL2ProposalResult:
         # Chart-type change is checked before style: both include "bar"/"line" keywords,
         # but chart-type requires a change verb + chart noun (more specific pattern).
         if _looks_like_chart_type_change(prompt, normalized):
@@ -993,6 +1230,271 @@ class NL2ProposalService:
             risk_level="medium",
         )
 
+    # ------------------------------------------------------------------
+    # Round 027: add_visual — create a new visual on the canvas
+    # ------------------------------------------------------------------
+
+    def _add_visual_nl(
+        self,
+        params: dict,
+        report: ExecutableReportSpec,
+        semantic_model: dict[str, Any] | None,
+        contracts: dict[str, Any] | None,
+    ) -> NL2ProposalResult:
+        from ai4bi.report.builder import build_add_visual_proposal, build_visual_from_selection
+        from ai4bi.query_spec import DimensionRef, FilterSpec, FilterOperator
+        from dataclasses import replace as _replace
+
+        visual_type_str = (params.get("visual_type") or "bar_chart").lower()
+        metric_name = (params.get("metric") or "").strip()
+        dimension_kw = (params.get("dimension") or "").strip().lower()
+        title = (params.get("title") or "").strip() or None
+        step_filter = (params.get("step_filter") or "").strip().upper() or None
+
+        # Map visual_type string to VisualType enum
+        _vtype_map = {
+            "line_chart": VisualType.line_chart, "line": VisualType.line_chart,
+            "bar_chart": VisualType.bar_chart, "bar": VisualType.bar_chart,
+            "table": VisualType.table,
+            "kpi_card": VisualType.kpi_card, "kpi": VisualType.kpi_card,
+        }
+        vtype = _vtype_map.get(visual_type_str, VisualType.bar_chart)
+
+        # Resolve metric → block_id
+        sm_metrics = {m.get("metric_id") or m.get("name", ""): m
+                      for m in (semantic_model or {}).get("metrics", [])}
+        if metric_name not in sm_metrics and contracts:
+            # Fallback: scan all block contracts
+            for bid, contract in (contracts or {}).items():
+                for m in getattr(contract, "metrics", []):
+                    if m.name == metric_name:
+                        sm_metrics[metric_name] = {"metric_id": metric_name, "owner_block": bid}
+                        break
+        if metric_name not in sm_metrics:
+            return self._unsupported(
+                f"指標 '{metric_name}' 不在語意模型中，無法新增圖表。",
+                target_scope="canvas",
+            )
+        sm_entry = sm_metrics[metric_name]
+        owner_block = sm_entry.get("owner_block") or sm_entry.get("base_dataset", "")
+
+        # Resolve semantic-model metric_id → block metric name
+        # e.g. "avg_queue_time_hr" (sm) → "queue_time_hr" (block formula column)
+        if contracts and owner_block in contracts:
+            block_contract = contracts[owner_block]
+            block_metric_names = [m.name for m in getattr(block_contract, "metrics", [])]
+            if metric_name not in block_metric_names:
+                # Try extracting column from formula: AVG(queue_time_hr) → queue_time_hr
+                import re as _re
+                formula = sm_entry.get("formula", "")
+                col_match = _re.search(r'\((\w+)\)', formula)
+                if col_match and col_match.group(1) in block_metric_names:
+                    metric_name = col_match.group(1)
+                else:
+                    # Fuzzy: find block metric whose name is contained in the sm metric_id
+                    for bm in block_metric_names:
+                        if bm in metric_name or metric_name.endswith(bm):
+                            metric_name = bm
+                            break
+        if not owner_block:
+            return self._unsupported(
+                f"找不到指標 '{metric_name}' 的所屬積木。",
+                target_scope="canvas",
+            )
+
+        # Resolve dimension keyword → "block_id.column_name"
+        dim_spec = _DIM_KEYWORD_MAP.get(dimension_kw)
+        dimension_names: list[str] = []
+        if dim_spec:
+            dim_block, dim_col, _dim_alias, _truncate = dim_spec
+            dimension_names = [f"{dim_block}.{dim_col}"]
+
+        # Generate unique visual_id
+        existing = set(report.pages.get("main", type("_", (), {"visuals": {}})()).visuals.keys())
+        base_id = f"nl_{vtype.value}_{metric_name}"
+        visual_id = base_id
+        counter = 1
+        while visual_id in existing:
+            visual_id = f"{base_id}_{counter}"
+            counter += 1
+
+        if not contracts:
+            return self._unsupported("合約資料尚未載入，無法新增圖表。", target_scope="canvas")
+
+        try:
+            query_spec, viz_spec = build_visual_from_selection(
+                visual_id=visual_id,
+                block_id=owner_block,
+                metric_names=[metric_name],
+                dimension_names=dimension_names,
+                visual_type=vtype,
+                contracts=contracts,
+                semantic_model=semantic_model,
+            )
+        except (ValueError, KeyError) as exc:
+            return self._unsupported(
+                f"無法建立圖表：{exc}",
+                target_scope="canvas",
+            )
+
+        # Apply optional step filter
+        if step_filter:
+            from ai4bi.query_spec import FilterSpec, FilterOperator
+            from dataclasses import replace as _r
+            new_filter = FilterSpec(
+                block_id=owner_block,
+                column_name="step_id",
+                operator=FilterOperator.in_,
+                value=[step_filter],
+                inherit_global_filter=False,
+            )
+            query_spec = _r(query_spec, filters=list(query_spec.filters) + [new_filter])
+
+        # Override title if provided
+        if title:
+            from dataclasses import replace as _r
+            viz_spec = _r(viz_spec, title=title)
+
+        proposal = build_add_visual_proposal(
+            page_id="main",
+            visual_id=visual_id,
+            query_spec=query_spec,
+            viz_spec=viz_spec,
+        )
+        notes = [
+            f"新增圖表 '{visual_id}' ({vtype.value})，指標：{metric_name}，積木：{owner_block}。",
+            f"維度：{dimension_names or '無'}。",
+            "確認後圖表會加入報表畫布。",
+        ]
+        intent = AIIntent(
+            intent_kind="analysis_request",
+            target_scope="canvas",
+            trust_notes=notes,
+            risk_level="medium",
+        )
+        return NL2ProposalResult(
+            intent=intent,
+            message=f"新增圖表提案已建立：{title or visual_id}。確認後加入畫布。",
+            proposal=proposal,
+            trust_notes=notes,
+            risk_level="medium",
+        )
+
+    # ------------------------------------------------------------------
+    # Round 027: highlight_outliers — conditional formatting on tables
+    # ------------------------------------------------------------------
+
+    def _highlight_outliers(
+        self,
+        params: dict,
+        report: ExecutableReportSpec,
+        selected_component_id: str | None,
+    ) -> NL2ProposalResult:
+        visual_id = params.get("visual_id") or selected_component_id
+        if not visual_id:
+            # Auto-detect: find first table visual
+            for page in report.pages.values():
+                for vid, visual in page.visuals.items():
+                    if visual.visualization.visual_type == VisualType.table:
+                        visual_id = vid
+                        break
+                if visual_id:
+                    break
+        if not visual_id:
+            return self._unsupported("找不到表格圖表，請先選擇一個表格。", target_scope="canvas")
+
+        found = _find_visual(report, visual_id)
+        if found is None:
+            return self._unsupported(f"找不到圖表 '{visual_id}'。", target_scope=f"visual:{visual_id}")
+        page_id, visual_id, visual = found
+
+        if visual.visualization.visual_type != VisualType.table:
+            return self._unsupported("離群值標色只支援表格類型的圖表。", target_scope=f"visual:{visual_id}")
+
+        column = params.get("column") or None
+        method = params.get("method") or "iqr"
+        color = params.get("color") or "#FF4444"
+
+        before_extra = dict(visual.visualization.extra)
+        after_extra = dict(visual.visualization.extra)
+        after_extra["conditional_formats"] = [
+            {"column": column, "method": method, "color": color}
+        ]
+        path = f"pages/{page_id}/visuals/{visual_id}/visualization/extra/conditional_formats"
+        notes = [
+            f"對表格 '{visual_id}' 的 {'所有數值欄位' if column is None else column} 套用離群值標色。",
+            f"方法：{method}，顏色：{color}。",
+            "這是視覺化效果，不影響原始資料。",
+        ]
+        proposal = ReportProposal(
+            description=f"離群值標色（{method}）",
+            changes=[ReportChange(
+                path=path,
+                label="條件格式：離群值",
+                before=before_extra.get("conditional_formats"),
+                after=after_extra["conditional_formats"],
+                affects_data=False,
+            )],
+            target_component_id=visual_id,
+        )
+        intent = AIIntent(intent_kind="style_change", target_scope=f"visual:{visual_id}", trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message="離群值標色提案已建立。", proposal=proposal, trust_notes=notes, risk_level="low")
+
+    # ------------------------------------------------------------------
+    # Round 027: add_trend_line — Plotly trend-line overlay
+    # ------------------------------------------------------------------
+
+    def _add_trend_line(
+        self,
+        params: dict,
+        report: ExecutableReportSpec,
+        selected_component_id: str | None,
+    ) -> NL2ProposalResult:
+        visual_id = params.get("visual_id") or selected_component_id
+        if not visual_id:
+            for page in report.pages.values():
+                for vid, visual in page.visuals.items():
+                    if visual.visualization.visual_type in (VisualType.line_chart, VisualType.bar_chart):
+                        visual_id = vid
+                        break
+                if visual_id:
+                    break
+        if not visual_id:
+            return self._unsupported("找不到折線圖，請先選擇一個圖表。", target_scope="canvas")
+
+        found = _find_visual(report, visual_id)
+        if found is None:
+            return self._unsupported(f"找不到圖表 '{visual_id}'。", target_scope=f"visual:{visual_id}")
+        page_id, visual_id, visual = found
+
+        if visual.visualization.visual_type not in (VisualType.line_chart, VisualType.bar_chart):
+            return self._unsupported("趨勢線只支援折線圖和長條圖。", target_scope=f"visual:{visual_id}")
+
+        method = params.get("method") or "linear"
+        window = int(params.get("window") or 3)
+        before_extra = dict(visual.visualization.extra)
+        after_extra = dict(before_extra)
+        after_extra["trend_line"] = {"method": method, "window": window, "color": "#888888", "dash": "dot"}
+
+        path = f"pages/{page_id}/visuals/{visual_id}/visualization/extra/trend_line"
+        notes = [
+            f"在圖表 '{visual_id}' 上加入趨勢線（方法：{method}）。",
+            "趨勢線是視覺化覆蓋，不影響查詢資料。",
+        ]
+        proposal = ReportProposal(
+            description=f"加入趨勢線（{method}）",
+            changes=[ReportChange(
+                path=path,
+                label="趨勢線",
+                before=before_extra.get("trend_line"),
+                after=after_extra["trend_line"],
+                affects_data=False,
+            )],
+            target_component_id=visual_id,
+        )
+        intent = AIIntent(intent_kind="style_change", target_scope=f"visual:{visual_id}", trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=f"趨勢線提案已建立（{method}）。", proposal=proposal, trust_notes=notes, risk_level="low")
+
     def _governance_refusal(
         self,
         normalized: str,
@@ -1020,6 +1522,7 @@ class NL2ProposalService:
         *,
         target_scope: str,
         selection: SemanticSelection | None = None,
+        disambiguation: str | None = None,
     ) -> NL2ProposalResult:
         notes = ["No report changes were staged."]
         intent = AIIntent(
@@ -1034,6 +1537,7 @@ class NL2ProposalService:
             message=message,
             trust_notes=notes,
             risk_level="medium",
+            disambiguation=disambiguation,
         )
 
 

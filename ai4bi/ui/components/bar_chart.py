@@ -137,10 +137,15 @@ def _build_figure(
     bar_mode    : "stack" | "group" | "overlay" — passed to barmode.
     style       : VisualizationSpec for layout hints.
     """
+    bar_color = style.extra.get("bar_color")
+    color_sequence = px.colors.qualitative.Plotly
+    if color_col is None and isinstance(bar_color, str) and bar_color:
+        color_sequence = [bar_color]
+
     common_kwargs: dict[str, Any] = dict(
         data_frame=df,
         color=color_col,
-        color_discrete_sequence=px.colors.qualitative.Plotly,
+        color_discrete_sequence=color_sequence,
         barmode=bar_mode,
         title=style.title or "",
         height=style.height_px,

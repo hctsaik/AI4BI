@@ -232,6 +232,42 @@ def render_line_chart(
     # ------------------------------------------------------------------ #
     fig = _build_figure(df, x_col, query_spec.metrics, style)
 
+    # ------------------------------------------------------------------ #
+    # Trend line overlay (Round 027)
+    # ------------------------------------------------------------------ #
+    trend_cfg = style.extra.get("trend_line")
+    if trend_cfg and not df.empty and query_spec.metrics:
+        try:
+            import numpy as np
+            import plotly.graph_objects as go
+            y_col = next(
+                (c for c in [query_spec.metrics[0].alias, query_spec.metrics[0].metric_name]
+                 if c in df.columns),
+                None,
+            )
+            if y_col is not None:
+                method = trend_cfg.get("method", "linear")
+                color = trend_cfg.get("color", "#888888")
+                dash = trend_cfg.get("dash", "dot")
+                y_vals = df[y_col].fillna(0).values
+                x_idx = np.arange(len(y_vals))
+                if method == "moving_avg":
+                    window = int(trend_cfg.get("window", 3))
+                    trend = pd.Series(y_vals).rolling(window, min_periods=1).mean().values
+                else:  # linear
+                    coeffs = np.polyfit(x_idx, y_vals, 1)
+                    trend = np.polyval(coeffs, x_idx)
+                fig.add_trace(go.Scatter(
+                    x=df[x_col],
+                    y=trend,
+                    mode="lines",
+                    name="趨勢線",
+                    line=dict(color=color, dash=dash, width=2),
+                    showlegend=True,
+                ))
+        except Exception:  # noqa: BLE001
+            pass
+
     event = st.plotly_chart(
         fig,
         width="stretch",

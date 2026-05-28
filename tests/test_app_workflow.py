@@ -16,13 +16,22 @@ def _new_app() -> AppTest:
     return AppTest.from_file(str(APP_PATH)).run(timeout=20)
 
 
+def _visual_selectbox(app: AppTest):
+    """Return the '① 選擇圖表' selectbox (the visual selector, not a slicer)."""
+    for sb in app.selectbox:
+        if sb.value in app.session_state.get("report_spec", type("_", (), {"pages": {}})()).pages.get("main", type("_", (), {"visuals": {}})()).visuals if False else True:
+            pass
+    # selectbox[0] = Breakdown (slicer), selectbox[1] = visual selector
+    return app.selectbox[1]
+
+
 def test_style_prompt_previews_applies_and_undoes_without_changing_metrics():
     app = _new_app()
     original_metrics = [(metric.label, metric.value) for metric in app.metric]
-    app.selectbox[0].set_value("line_queue_by_day").run(timeout=20)
+    _visual_selectbox(app).set_value("line_queue_by_day").run(timeout=20)
     app.text_input[0].set_value("make trend line red").run(timeout=20)
 
-    _click(app, "Create Proposal")
+    _click(app, "送出請求")
     report = app.session_state["report_spec"]
     assert report.pages["main"].visuals["line_queue_by_day"].visualization.extra["line_color"] is None
     assert [(metric.label, metric.value) for metric in app.metric] == original_metrics
@@ -32,7 +41,7 @@ def test_style_prompt_previews_applies_and_undoes_without_changing_metrics():
     assert report.pages["main"].visuals["line_queue_by_day"].visualization.extra["line_color"] == "#D62728"
     assert [(metric.label, metric.value) for metric in app.metric] == original_metrics
 
-    _click(app, "Undo")
+    _click(app, "復原")
     report = app.session_state["report_spec"]
     assert report.pages["main"].visuals["line_queue_by_day"].visualization.extra["line_color"] is None
     assert not app.exception
@@ -40,10 +49,10 @@ def test_style_prompt_previews_applies_and_undoes_without_changing_metrics():
 
 def test_analysis_prompt_waits_for_apply_and_then_undo_restores_controls_and_numbers():
     app = _new_app()
-    app.selectbox[0].set_value("line_queue_by_day").run(timeout=20)
+    _visual_selectbox(app).set_value("line_queue_by_day").run(timeout=20)
     app.text_input[0].set_value("Only show Logic-B").run(timeout=20)
 
-    _click(app, "Create Proposal")
+    _click(app, "送出請求")
     assert [(metric.label, metric.value) for metric in app.metric] == [
         ("Processed Moves", "6.0 moves"),
         ("Average Queue Time", "2.7 hr"),
@@ -56,7 +65,7 @@ def test_analysis_prompt_waits_for_apply_and_then_undo_restores_controls_and_num
         ("Average Queue Time", "4.0 hr"),
     ]
 
-    _click(app, "Undo")
+    _click(app, "復原")
     assert app.multiselect[1].value == ["Logic-A", "Logic-B"]
     assert [(metric.label, metric.value) for metric in app.metric] == [
         ("Processed Moves", "6.0 moves"),
@@ -74,10 +83,25 @@ def test_manual_slicer_change_is_part_of_report_history():
         ("Average Queue Time", "4.0 hr"),
     ]
 
-    _click(app, "Undo")
+    _click(app, "復原")
     assert app.multiselect[1].value == ["Logic-A", "Logic-B"]
     assert [(metric.label, metric.value) for metric in app.metric] == [
         ("Processed Moves", "6.0 moves"),
         ("Average Queue Time", "2.7 hr"),
     ]
+    assert not app.exception
+
+
+def test_unsupported_assistant_request_clears_stale_pending_proposal():
+    app = _new_app()
+    _visual_selectbox(app).set_value("line_queue_by_day").run(timeout=20)
+    app.text_input[0].set_value("make trend line red").run(timeout=20)
+
+    _click(app, "送出請求")
+    assert app.session_state["pending_patch"] is not None
+
+    app.text_input[0].set_value("write SQL to join raw queue moves to wafer yield detail rows").run(timeout=20)
+    _click(app, "送出請求")
+
+    assert app.session_state["pending_patch"] is None
     assert not app.exception

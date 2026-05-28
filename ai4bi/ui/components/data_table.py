@@ -198,18 +198,65 @@ def render_data_table(
     column_config = _build_column_config(query_spec, display_df)
 
     # ------------------------------------------------------------------ #
+    # Conditional formatting — highlight_outliers (Round 027)
+    # ------------------------------------------------------------------ #
+    conditional_formats = style.extra.get("conditional_formats", [])
+    styled_df = None
+    if conditional_formats and not display_df.empty:
+        try:
+            import numpy as np
+            styler = display_df.style
+            for fmt in conditional_formats:
+                col = fmt.get("column")
+                method = fmt.get("method", "iqr")
+                color = fmt.get("color", "#FF4444")
+                # Determine numeric columns to check
+                if col and col in display_df.columns:
+                    num_cols = [col]
+                else:
+                    num_cols = [c for c in display_df.columns if pd.api.types.is_numeric_dtype(display_df[c])]
+                for nc in num_cols:
+                    s = display_df[nc].dropna()
+                    if len(s) < 4:
+                        continue
+                    if method == "zscore":
+                        mean, std = s.mean(), s.std()
+                        mask = (display_df[nc] - mean).abs() > 2.5 * std
+                    else:  # iqr
+                        q1, q3 = s.quantile(0.25), s.quantile(0.75)
+                        iqr = q3 - q1
+                        mask = (display_df[nc] < q1 - 1.5 * iqr) | (display_df[nc] > q3 + 1.5 * iqr)
+                    styler = styler.apply(
+                        lambda col_data, m=mask, c=color: [
+                            f"background-color:{c};color:white" if v else "" for v in m
+                        ],
+                        subset=[nc],
+                    )
+            styled_df = styler
+        except Exception:  # noqa: BLE001
+            styled_df = None
+
+    # ------------------------------------------------------------------ #
     # Render
     # ------------------------------------------------------------------ #
     if title:
         st.caption(f"**{title}**")
 
-    st.dataframe(
-        display_df,
-        width="stretch",
-        height=height,
-        column_config=column_config,
-        hide_index=True,
-    )
+    if styled_df is not None:
+        st.dataframe(
+            styled_df,
+            width="stretch",
+            height=height,
+            hide_index=True,
+        )
+    else:
+        st.dataframe(
+            display_df,
+            width="stretch",
+            height=height,
+            column_config=column_config,
+            hide_index=True,
+        )
 
     if truncated:
         st.caption(f"Showing {_MAX_ROWS:,} of {total_rows:,} rows")

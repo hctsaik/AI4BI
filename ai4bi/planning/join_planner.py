@@ -21,6 +21,8 @@ class ResolvedJoin:
     from_block: str
     to_block: str
     key_pairs: tuple[tuple[str, str], ...]
+    cardinality: str = "many_to_one"
+    certification_status: str = "certified"
 
 
 class SafeJoinPlanner:
@@ -133,4 +135,6 @@ class SafeJoinPlanner:
             from_block=primary.block_id,
             to_block=secondary.block_id,
             key_pairs=pairs,
+            cardinality=relationship.get("cardinality", "many_to_one"),
+            certification_status=relationship.get("certification_status", "certified"),
         )

@@ -60,10 +60,14 @@ _LAST_VALID_KEY = "visual_last_valid"
 # Executor protocol (structural typing — no ABC import needed)
 # ---------------------------------------------------------------------------
 
+_METADATA_KEY = "metadata_by_component"
+
+
 class ExecutorProtocol:  # pragma: no cover
     """
     Structural interface expected of ``executor`` objects.
     Any object with a ``run(spec, active_filters) -> pd.DataFrame`` method qualifies.
+    Also supports optional ``run_with_metadata(spec, ..., component_id) -> (df, meta)``.
     """
     def run(
         self,
@@ -81,6 +85,13 @@ def _last_valid_store() -> dict[str, pd.DataFrame]:
     if _LAST_VALID_KEY not in st.session_state:
         st.session_state[_LAST_VALID_KEY] = {}
     return st.session_state[_LAST_VALID_KEY]
+
+
+def _metadata_store() -> dict[str, Any]:
+    """Lazy-init the per-component metadata store (spec 7.5 metadata_by_component)."""
+    if _METADATA_KEY not in st.session_state:
+        st.session_state[_METADATA_KEY] = {}
+    return st.session_state[_METADATA_KEY]
 
 
 def execute_with_fallback(
@@ -115,6 +126,8 @@ def execute_with_fallback(
         The DataFrame to render and any exception that occurred.
     """
     store = _last_valid_store()
+    meta_store = _metadata_store()
+    component_id = query_spec.spec_id
 
     # Effective global filter values are not encoded in the static spec key.
     # Prefer correctness over reuse for dynamic visuals in this MVP.
@@ -124,28 +137,60 @@ def execute_with_fallback(
     # Try cache first
     cached = cache.get(query_spec)
     if cached is not None:
-        store[query_spec.spec_id] = cached  # keep last-valid in sync
+        store[component_id] = cached  # keep last-valid in sync
+        # Populate basic metadata from cache if not yet stored this session
+        if component_id not in meta_store:
+            try:
+                from ai4bi.analysis.executor import ResultMetadata
+                from datetime import datetime, timezone
+                meta_store[component_id] = ResultMetadata(
+                    component_id=component_id,
+                    row_count=len(cached),
+                    executed_at=datetime.now(timezone.utc).isoformat() + " (cached)",
+                    blocks_used=[ref.block_id for ref in query_spec.block_refs],
+                    dimensions_used=[
+                        (d.alias or d.column_name)
+                        + (f" (DATE_TRUNC {d.truncate_date_to})" if d.truncate_date_to else "")
+                        for d in query_spec.dimensions
+                    ],
+                    filters_applied=[
+                        f"{f.block_id}.{f.column_name} {f.operator.value} {f.value!r}"
+                        for f in query_spec.filters if f.value is not None
+                    ],
+                    metrics_used=[
+                        {"name": m.alias or m.metric_name, "metric_id": m.metric_name,
+                         "formula": m.metric_name, "agg": "—", "block_id": m.block_id}
+                        for m in query_spec.metrics
+                    ],
+                )
+            except Exception:  # noqa: BLE001
+                pass
         return cached, None
 
-    # Execute
+    # Execute — use run_with_metadata when available (stores lineage for Explanation Panel)
     try:
-        df = executor.run(query_spec, active_filters)
+        run_meta = getattr(executor, "run_with_metadata", None)
+        if run_meta is not None:
+            df, metadata = run_meta(query_spec, active_filters, component_id=component_id)
+            meta_store[component_id] = metadata
+        else:
+            df = executor.run(query_spec, active_filters)
         cache.put(query_spec, df)
         cache.register_key_for_spec(query_spec)
-        store[query_spec.spec_id] = df.copy()
+        store[component_id] = df.copy()
         logger.debug(
             "[render_visual] execute_with_fallback spec=%s rows=%d",
-            query_spec.spec_id, len(df),
+            component_id, len(df),
         )
         return df, None
 
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "[render_visual] query failed spec=%s: %s",
-            query_spec.spec_id, exc,
+            component_id, exc,
             exc_info=True,
         )
-        fallback = store.get(query_spec.spec_id, pd.DataFrame())
+        fallback = store.get(component_id, pd.DataFrame())
         return fallback, exc
 
 
@@ -236,6 +281,11 @@ def _dispatch(
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
+
+def get_metadata(component_id: str) -> Optional[Any]:
+    """Return the most recent ResultMetadata for a component, or None."""
+    return st.session_state.get(_METADATA_KEY, {}).get(component_id)
+
 
 def render_visual(
     query_spec: VisualQuerySpec,

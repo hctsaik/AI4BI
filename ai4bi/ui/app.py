@@ -29,7 +29,7 @@ from ai4bi.report.publication import GateCheckResult, run_publication_gate
 from ai4bi.report.templates import build_semiconductor_queue_time_report
 from ai4bi.query_spec import FilterOperator, FilterSpec, VisualQuerySpec, VisualType
 from ai4bi.ui.cache import QueryCache
-from ai4bi.ui.render_visual import render_visual
+from ai4bi.ui.render_visual import get_metadata, render_visual
 from ai4bi.ui import workspace
 from ai4bi.ui.viewer import get_draft_path_from_params, is_readonly_mode, render_readonly_banner
 from ai4bi.report.metric_catalog import MetricCatalogService, MetricZone
@@ -44,6 +44,30 @@ _REGISTRY_DIR = _DEMO_ROOT / "registry"
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 _ASSISTANT_PLAN_KEY = "visual_assistant_analysis_plan"
 _ASSISTANT_TRUST_KEY = "visual_assistant_trust_notes"
+_CHAT_HISTORY_KEY = "chat_history"
+
+
+def _record_chat(prompt: str, visual_id: str, result) -> None:
+    """Append a prompt + outcome to chat_history session state (spec 7.5)."""
+    import time as _time
+    if _CHAT_HISTORY_KEY not in st.session_state:
+        st.session_state[_CHAT_HISTORY_KEY] = []
+    icon_map = {
+        "style": "🎨", "analysis": "📊", "plan": "🔍",
+        "refused": "🚫", "mixed": "⚡", "unknown": "💬",
+    }
+    kind = getattr(result, "intent_kind", "unknown")
+    st.session_state[_CHAT_HISTORY_KEY].append({
+        "ts": _time.strftime("%H:%M:%S"),
+        "prompt": prompt,
+        "visual_id": visual_id,
+        "kind": kind,
+        "icon": icon_map.get(kind, "💬"),
+        "message": result.message[:80],
+        "ok": result.proposal is not None or getattr(result, "is_mixed", False) or result.analysis_plan is not None,
+    })
+    # Keep last 20 entries
+    st.session_state[_CHAT_HISTORY_KEY] = st.session_state[_CHAT_HISTORY_KEY][-20:]
 
 
 def _is_sandbox_visual(visual, contracts: dict[str, "DataBlockContract"]) -> bool:
@@ -160,7 +184,7 @@ def _gate_check_icon(check: GateCheckResult) -> str:
 
 def _render_pin_versions_panel(report: ExecutableReportSpec) -> None:
     """Render the 'Pin versions' expander in the sidebar."""
-    with st.expander("Pin versions", expanded=False):
+    with st.expander("版本鎖定", expanded=False):
         if report.read_only:
             st.warning("Read-only mode — pinning is disabled.")
             return
@@ -203,7 +227,7 @@ def _render_pin_versions_panel(report: ExecutableReportSpec) -> None:
 
 def _render_publication_readiness(report: ExecutableReportSpec) -> None:
     """Render the Publication Readiness expander in the sidebar."""
-    with st.expander("Publication Readiness", expanded=False):
+    with st.expander("發布前檢查", expanded=False):
         contracts = _load_all_contracts()
         semantic_model = json.loads(_SEMANTIC_MODEL.read_text(encoding="utf-8"))
         gate = run_publication_gate(report, contracts, semantic_model)
@@ -244,7 +268,7 @@ def _load_published_snapshot(path: Path) -> ExecutableReportSpec:
 
 def _render_block_library_panel() -> None:
     """Render the Data Block View sidebar panel (Round 021, design-council 001-F)."""
-    with st.expander("Data Block Library", expanded=False):
+    with st.expander("資料積木庫", expanded=False):
         contracts = _load_all_contracts()
         if not contracts:
             st.info("No data blocks loaded.")
@@ -312,7 +336,7 @@ def _render_published_snapshot_browser(
     cache: QueryCache,
 ) -> None:
     """Render a small browser for published snapshots of the current report."""
-    with st.expander("Published versions", expanded=False):
+    with st.expander("已分享版本", expanded=False):
         store = PublishedReportStore(_PROJECT_ROOT / "published")
         snapshots = store.list_published(report.report_id)
         if not snapshots:
@@ -343,79 +367,38 @@ def _render_published_snapshot_browser(
 
 def _render_metric_catalog_panel(report: ExecutableReportSpec, cache: QueryCache) -> None:
     """Render the three-zone Metric Catalog in the sidebar (design-council 003-E)."""
-    with st.expander("Metric Catalog", expanded=False):
-        if report.read_only:
-            st.warning("Read-only mode — adding metrics is disabled.")
-            return
+    # 可用指標清單（直接展示，不再 nested expander）
+    if report.read_only:
+        st.caption("唯讀模式 — 無法新增指標。")
+        return
 
-        contracts = _load_all_contracts()
-        try:
-            semantic_model = json.loads(_SEMANTIC_MODEL.read_text(encoding="utf-8"))
-        except Exception as exc:  # noqa: BLE001
-            st.error(f"Could not load semantic model: {exc}")
-            return
+    contracts_cat = _load_all_contracts()
+    try:
+        semantic_model_cat = json.loads(_SEMANTIC_MODEL.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"無法載入語意模型：{exc}")
+        return
 
-        catalog_result = MetricCatalogService().classify(semantic_model, contracts)
+    catalog_result = MetricCatalogService().classify(semantic_model_cat, contracts_cat)
+    if catalog_result.is_empty():
+        st.caption("語意模型中沒有找到指標。")
+        return
 
-        if catalog_result.is_empty():
-            st.info("No metrics found in the loaded semantic model.")
-            return
+    if catalog_result.certified_ready:
+        st.caption("🔵 **可直接使用**")
+        for entry in catalog_result.certified_ready:
+            st.caption(f"`{entry.metric_name}` [{entry.aggregation}] — {entry.block_id}")
 
-        # ── Zone 1: Certified Ready ──────────────────────────────────────
-        if catalog_result.certified_ready:
-            st.markdown(
-                "🔵 **可直接使用** — 認證積木，可加入報表",
-                help="All required blocks are certified. Click + to add to report.",
-            )
-            for entry in catalog_result.certified_ready:
-                col_label, col_btn = st.columns([5, 1])
-                with col_label:
-                    st.caption(
-                        f"`{entry.metric_name}` [{entry.aggregation}] "
-                        f"— {entry.block_id}"
-                    )
-                with col_btn:
-                    if st.button("+", key=f"cat_add_{entry.block_id}_{entry.metric_name}",
-                                 help=f"Add {entry.metric_name} to report"):
-                        st.info(f"Add Visual 面板中選擇 {entry.metric_name} 以加入報表。")
+    if catalog_result.needs_blocks:
+        st.caption("⬜ **需補充積木**")
+        for entry in catalog_result.needs_blocks:
+            missing = ", ".join(f"`{b}`" for b in (entry.missing_blocks or []))
+            st.caption(f"`{entry.metric_name}` — 缺少: {missing}")
 
-        # ── Zone 2: Needs Blocks ────────────────────────────────────────
-        if catalog_result.needs_blocks:
-            st.markdown(
-                "⬜ **需補充積木** — 認證指標，但缺少維度積木",
-                help="Metric is certified but some required dimension blocks are missing.",
-            )
-            for entry in catalog_result.needs_blocks:
-                with st.container():
-                    st.caption(
-                        f"`{entry.metric_name}` [{entry.aggregation}] — {entry.block_id}"
-                    )
-                    if entry.missing_blocks:
-                        missing_str = ", ".join(f"`{b}`" for b in entry.missing_blocks)
-                        st.caption(f"缺少: {missing_str}")
-
-        # ── Zone 3: Sandbox ─────────────────────────────────────────────
-        if catalog_result.sandbox:
-            st.markdown(
-                "🟡 **Sandbox 指標** — 未認證積木，僅供探索",
-                help="Owner block is not yet certified. Cannot be used in published reports.",
-            )
-            for entry in catalog_result.sandbox:
-                col_label, col_btn = st.columns([5, 1])
-                with col_label:
-                    st.caption(
-                        f"`{entry.metric_name}` [{entry.aggregation}] "
-                        f"— {entry.block_id}"
-                    )
-                with col_btn:
-                    if st.button(
-                        "+",
-                        key=f"cat_sandbox_{entry.block_id}_{entry.metric_name}",
-                        help=f"Add {entry.metric_name} (sandbox) to report",
-                    ):
-                        st.info(f"Add Visual 面板中選擇 {entry.metric_name} 以加入報表（沙盒模式）。")
-
-        st.caption("ℹ️ 點 + 後，至下方「＋ Add Visual」選取指標並設定圖表。")
+    if catalog_result.sandbox:
+        st.caption("🟡 **Sandbox（未認證）**")
+        for entry in catalog_result.sandbox:
+            st.caption(f"`{entry.metric_name}` [{entry.aggregation}] — {entry.block_id}")
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +429,7 @@ def _render_add_visual_panel(
     5. Preview VisualQuerySpec as JSON.
     6. 'Add to Report' → adds visual to current page and increments revision.
     """
-    with st.expander("＋ Add Visual", expanded=False):
+    with st.expander("新增圖表設定", expanded=False):
         if report.read_only:
             st.warning("Read-only mode — adding visuals is disabled.")
             return
@@ -623,10 +606,14 @@ def _render_draft_controls(
 ) -> dict[str, object]:
     with st.sidebar:
         st.title("AI for BI")
-        st.caption("Validated semiconductor demo draft")
-        st.warning("Draft only: relationship path is certified; data blocks are not published.")
+
+        # ── Zone 0: 想觀察的數字 (spec 8.1 primary entry) ────────────────
+        _render_metric_first_entry(report, cache)
+
         st.markdown("---")
-        st.subheader("Slicers")
+
+        # ── Zone 1: 篩選條件 ─────────────────────────────────────────────
+        st.subheader("篩選條件")
         steps = st.multiselect(
             report.controls["process_step"].label,
             report.controls["process_step"].options,
@@ -657,82 +644,100 @@ def _render_draft_controls(
                 st.rerun()
 
         st.markdown("---")
-        st.subheader("Draft Report")
-        st.caption(f"Revision {report.revision} | `{report.semantic_model_ref}`")
 
-        # Report title editor
-        if not report.read_only:
-            new_title = st.text_input("Report title", value=report.title, key="widget_report_title")
-            if new_title != report.title:
-                title_proposal = build_title_proposal(report.title, new_title)
-                workspace.stage_proposal(title_proposal)
-                st.rerun()
+        # ── Zone 2: 對這張圖說話 ─────────────────────────────────────────
+        _render_visual_assistant(report, cache)
 
-        if not report.read_only and len(report.pages) > 1:
-            delete_page_id = st.selectbox(
-                "Delete page",
-                list(report.pages.keys()),
-                format_func=lambda page_id: report.pages[page_id].display_name or page_id,
-                key="widget_delete_page",
-            )
-            if st.button("Stage Page Delete", width="stretch"):
-                workspace.stage_proposal(
-                    build_page_delete_proposal(workspace.current_report(), delete_page_id)
+        st.markdown("---")
+
+        # ── Zone 3: 報告草稿 (collapsible) ──────────────────────────────
+        with st.expander("📋 報告草稿", expanded=False):
+            st.caption(f"版本 {report.revision} | `{report.semantic_model_ref}`")
+
+            if not report.read_only:
+                new_title = st.text_input("報表標題", value=report.title, key="widget_report_title")
+                if new_title != report.title:
+                    title_proposal = build_title_proposal(report.title, new_title)
+                    workspace.stage_proposal(title_proposal)
+                    st.rerun()
+
+            if not report.read_only and len(report.pages) > 1:
+                delete_page_id = st.selectbox(
+                    "刪除頁面",
+                    list(report.pages.keys()),
+                    format_func=lambda page_id: report.pages[page_id].display_name or page_id,
+                    key="widget_delete_page",
                 )
-                workspace.set_message(f"Page '{delete_page_id}' deletion staged.")
-                st.rerun()
+                if st.button("Stage Page Delete", width="stretch"):
+                    workspace.stage_proposal(
+                        build_page_delete_proposal(workspace.current_report(), delete_page_id)
+                    )
+                    workspace.set_message(f"Page '{delete_page_id}' deletion staged.")
+                    st.rerun()
 
-        button_cols = st.columns(2)
-        with button_cols[0]:
-            if st.button("Undo", disabled=not workspace.can_undo(), width="stretch"):
-                workspace.undo()
-                _clear_visual_assistant_context()
-                _request_widget_sync()
-                cache.invalidate_all()
-                st.rerun()
-        with button_cols[1]:
-            if st.button("Redo", disabled=not workspace.can_redo(), width="stretch"):
-                workspace.redo()
-                _clear_visual_assistant_context()
-                _request_widget_sync()
-                cache.invalidate_all()
-                st.rerun()
-        if st.button("Save Local Draft", width="stretch", disabled=report.read_only):
-            path = store.save(report)
-            workspace.set_message(f"Saved local draft: {path.name}")
-            st.rerun()
-        available = store.list_paths()
-        if available:
-            chosen = st.selectbox("Saved local drafts", available, format_func=lambda path: path.stem)
-            if st.button("Load Draft", width="stretch"):
-                try:
-                    workspace.replace_with_loaded(store.load(chosen))
+            button_cols = st.columns(2)
+            with button_cols[0]:
+                if st.button("復原", disabled=not workspace.can_undo(), width="stretch"):
+                    workspace.undo()
+                    _clear_visual_assistant_context()
                     _request_widget_sync()
                     cache.invalidate_all()
-                except (OSError, ValueError, json.JSONDecodeError) as exc:
-                    workspace.set_message(f"Draft load rejected: {exc}")
+                    st.rerun()
+            with button_cols[1]:
+                if st.button("重做", disabled=not workspace.can_redo(), width="stretch"):
+                    workspace.redo()
+                    _clear_visual_assistant_context()
+                    _request_widget_sync()
+                    cache.invalidate_all()
+                    st.rerun()
+            if st.button("儲存草稿", width="stretch", disabled=report.read_only):
+                path = store.save(report)
+                workspace.set_message(f"Saved local draft: {path.name}")
                 st.rerun()
-        if st.button("Clear query cache", width="stretch"):
-            cache.invalidate_all()
-            st.rerun()
+            available = store.list_paths()
+            if available:
+                chosen = st.selectbox("已儲存的草稿", available, format_func=lambda path: path.stem)
+                if st.button("載入草稿", width="stretch"):
+                    try:
+                        workspace.replace_with_loaded(store.load(chosen))
+                        _request_widget_sync()
+                        cache.invalidate_all()
+                    except (OSError, ValueError, json.JSONDecodeError) as exc:
+                        workspace.set_message(f"Draft load rejected: {exc}")
+                    st.rerun()
+            if st.button("清除查詢快取", width="stretch"):
+                cache.invalidate_all()
+                st.rerun()
 
-        st.markdown("---")
-        _render_metric_catalog_panel(report, cache)
+        # ── Zone 4a: 手動新增圖表（進階） ──────────────────────────────────
+        with st.expander("➕ 手動新增圖表", expanded=False):
+            st.caption("自訂指標、維度與圖表類型（進階使用者）。")
+            _render_add_visual_panel(report, cache)
 
-        st.markdown("---")
-        _render_add_visual_panel(report, cache)
+        # ── Zone 4b: 分享與發布 ──────────────────────────────────────────
+        with st.expander("📤 分享與發布", expanded=False):
+            st.caption("檢查報表是否符合發布條件，建立唯讀分享連結，或載入已發布版本。")
+            _render_publication_readiness(report)
+            st.markdown("---")
+            _render_published_snapshot_browser(report, cache)
 
-        st.markdown("---")
-        _render_pin_versions_panel(report)
+        # ── Zone 4c: 系統工具 (hidden by default) ────────────────────────
+        with st.expander("🔧 系統工具", expanded=False):
+            st.caption("資料積木資訊與版本鎖定（進階使用者）。")
+            _render_pin_versions_panel(report)
+            st.markdown("---")
+            _render_block_library_panel()
 
+        # ── Footer: status ───────────────────────────────────────────────
         st.markdown("---")
-        _render_publication_readiness(report)
-
-        st.markdown("---")
-        _render_published_snapshot_browser(report, cache)
-
-        st.markdown("---")
-        _render_block_library_panel()
+        try:
+            from ai4bi.ai.llm_adapter import LLMAdapter
+            _is_llm = LLMAdapter().active_mode == "llm"
+        except Exception:  # noqa: BLE001
+            _is_llm = False
+        _dot = "🟢" if _is_llm else "⚫"
+        _status = "AI 輔助中" if _is_llm else "規則模式"
+        st.caption(f"{_dot} {_status}　|　草稿模式，尚未認證發布")
 
     return report.merged_filters()
 
@@ -776,38 +781,273 @@ def _render_visual_assistant_context() -> None:
                 st.markdown(f"- {note}")
 
 
+def _render_explanation_panel(component_id: str, visual) -> None:
+    """Per-visual Explanation Panel (spec 8.1 — Explain before trust)."""
+    meta = get_metadata(component_id)
+    with st.expander("ℹ️ 資料來源與說明", expanded=False):
+        if meta is None:
+            st.caption("尚未執行查詢，請等待圖表載入後再開啟。")
+            return
+
+        # Metrics
+        if meta.metrics_used:
+            st.markdown("**指標定義**")
+            for m in meta.metrics_used:
+                agg = getattr(m.get("agg"), "value", None) or m.get("agg", "")
+                st.caption(f"`{m['name']}` — {m['metric_id']} ({agg}) from `{m['block_id']}`")
+
+        # Dimensions
+        if meta.dimensions_used:
+            st.markdown("**分組維度**")
+            st.caption("  ".join(f"`{d}`" for d in meta.dimensions_used))
+
+        # Filters
+        if meta.filters_applied:
+            st.markdown("**套用篩選**")
+            for f in meta.filters_applied:
+                st.caption(f"`{f}`")
+
+        # Blocks & Relationships
+        if meta.blocks_used:
+            st.markdown("**資料來源**")
+            st.caption("Blocks: " + "  ".join(f"`{b}`" for b in meta.blocks_used))
+        if meta.relationships_used:
+            for r in meta.relationships_used:
+                cert = "✅ 已認證" if "certified" in r else "⚠️ 未認證"
+                st.caption(f"→ {r}  {cert}")
+
+        # Data freshness
+        if meta.data_freshness:
+            st.markdown("**資料更新時間**")
+            for block_id, ts in meta.data_freshness.items():
+                st.caption(f"`{block_id}`: {ts[:19].replace('T', ' ')} UTC")
+
+        # Row count & execution time
+        st.caption(
+            f"回傳 **{meta.row_count}** 列 ｜ "
+            f"查詢時間: {meta.executed_at[:19].replace('T', ' ')} UTC"
+        )
+
+        # Quality warnings
+        if meta.quality_warnings:
+            for w in meta.quality_warnings:
+                st.warning(w, icon="⚠️")
+
+        # SQL preview (for transparency / debug)
+        if meta.sql_preview:
+            with st.expander("SQL 預覽", expanded=False):
+                st.code(meta.sql_preview, language="sql")
+
+
+def _render_llm_mode_badge() -> None:
+    """Render a prominent LLM mode status badge (spec 9.4 mode indicator)."""
+    try:
+        from ai4bi.ai.llm_adapter import get_llm_mode_label, LLMAdapter
+        label = get_llm_mode_label()
+        adapter = LLMAdapter()
+        is_llm = adapter.active_mode == "llm"
+        model_full = adapter._model if is_llm else ""
+    except Exception:  # noqa: BLE001
+        label, is_llm, model_full = "Mock NL2", False, ""
+
+    if is_llm:
+        bg, border, text_color, icon = "#d1fae5", "#10b981", "#065f46", "🤖"
+        mode_label = "AI 模式"
+        sub_label = model_full.replace("claude-", "").replace("-20251001", "")
+    else:
+        bg, border, text_color, icon = "#f3f4f6", "#9ca3af", "#374151", "⚙️"
+        mode_label = "規則模式"
+        sub_label = "keyword routing"
+
+    st.markdown(
+        f"""<div style="
+            display:inline-flex; align-items:center; gap:8px;
+            background:{bg}; border:1.5px solid {border};
+            border-radius:8px; padding:6px 12px; margin-bottom:4px;
+        ">
+            <span style="font-size:1.2rem;">{icon}</span>
+            <div>
+                <div style="font-weight:700; font-size:0.85rem; color:{text_color}; line-height:1.2;">{mode_label}</div>
+                <div style="font-size:0.72rem; color:{text_color}; opacity:0.75;">{sub_label}</div>
+            </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_metric_first_entry(report: ExecutableReportSpec, cache: QueryCache) -> None:
+    """Primary entry point: '想觀察的數字' (spec 8.1).
+
+    Shows certified metrics from the semantic model.  Clicking '+' on any metric
+    immediately stages a KPI card + line chart pair as a proposal — no 5-step
+    manual workflow needed.
+    """
+    st.subheader("想觀察的數字")
+    st.caption("選擇你想追蹤的指標，畫布自動產生 KPI 與趨勢圖。")
+
+    if report.read_only:
+        st.caption("唯讀模式")
+        return
+
+    contracts = _load_all_contracts()
+    try:
+        sm = json.loads(_SEMANTIC_MODEL.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        st.caption("無法載入指標清單")
+        return
+
+    from ai4bi.report.catalog import build_catalog
+    from ai4bi.report.builder import build_add_visual_proposal, build_visual_from_selection
+    catalog = build_catalog(sm, contracts)
+    if not catalog:
+        st.caption("目前沒有可用的指標。")
+        return
+
+    existing_ids = set(report.pages.get("main", type("_", (), {"visuals": {}})()).visuals.keys())
+
+    for block_catalog in catalog:
+        for metric_entry in block_catalog.metrics[:4]:  # show top 4 per block
+            m_name = metric_entry.metric_name
+            m_display = metric_entry.display_name or m_name
+            m_agg = metric_entry.aggregation or ""
+
+            col_info, col_btn = st.columns([5, 1])
+            with col_info:
+                st.caption(f"**{m_display}** `[{m_agg}]`")
+            with col_btn:
+                btn_key = f"metric_add_{block_catalog.block_id}_{m_name}"
+                if st.button("＋", key=btn_key, help=f"加入 {m_display}"):
+                    # Stage KPI card
+                    kpi_id = f"kpi_{m_name}"
+                    counter = 1
+                    while kpi_id in existing_ids:
+                        kpi_id = f"kpi_{m_name}_{counter}"; counter += 1
+
+                    try:
+                        kpi_q, kpi_v = build_visual_from_selection(
+                            visual_id=kpi_id,
+                            block_id=block_catalog.block_id,
+                            metric_names=[m_name],
+                            dimension_names=[],
+                            visual_type=VisualType.kpi_card,
+                            contracts=contracts,
+                            semantic_model=sm,
+                        )
+                        proposal_kpi = build_add_visual_proposal("main", kpi_id, kpi_q, kpi_v)
+                        workspace.stage_proposal(proposal_kpi)
+                        workspace.accept_pending()
+                        existing_ids.add(kpi_id)
+                    except Exception as exc:  # noqa: BLE001
+                        workspace.set_message(f"無法新增 KPI：{exc}")
+                        st.rerun()
+                        return
+
+                    # Stage line chart if time dimension available
+                    time_dims = [
+                        d for d in block_catalog.dimensions
+                        if any(t in d.column_name for t in ("date", "time", "event"))
+                    ]
+                    if time_dims:
+                        trend_id = f"trend_{m_name}"
+                        counter = 1
+                        while trend_id in existing_ids:
+                            trend_id = f"trend_{m_name}_{counter}"; counter += 1
+                        try:
+                            td = time_dims[0]
+                            trend_q, trend_v = build_visual_from_selection(
+                                visual_id=trend_id,
+                                block_id=block_catalog.block_id,
+                                metric_names=[m_name],
+                                dimension_names=[f"{td.block_id}.{td.column_name}"],
+                                visual_type=VisualType.line_chart,
+                                contracts=contracts,
+                                semantic_model=sm,
+                            )
+                            proposal_trend = build_add_visual_proposal("main", trend_id, trend_q, trend_v)
+                            workspace.stage_proposal(proposal_trend)
+                            workspace.accept_pending()
+                            existing_ids.add(trend_id)
+                        except Exception:  # noqa: BLE001
+                            pass
+
+                    cache.invalidate_all()
+                    workspace.set_message(f"已加入「{m_display}」的 KPI 與趨勢圖。")
+                    st.rerun()
+
+
+def _render_chat_history() -> None:
+    """Render the prompt history panel (spec 7.5 chat_history)."""
+    history = st.session_state.get(_CHAT_HISTORY_KEY, [])
+    if not history:
+        return
+    with st.expander(f"歷史記錄 ({len(history)})", expanded=False):
+        for entry in reversed(history):
+            status = "✅" if entry["ok"] else "❌"
+            st.markdown(
+                f"{status} {entry['icon']} `{entry['ts']}` **{entry['visual_id']}**  \n"
+                f"_{entry['prompt'][:60]}_  \n"
+                f"<span style='color:#6b7280;font-size:0.8em'>{entry['message']}</span>",
+                unsafe_allow_html=True,
+            )
+        if st.button("清除歷史", key="clear_chat_history"):
+            st.session_state[_CHAT_HISTORY_KEY] = []
+            st.rerun()
+
+
 def _render_visual_assistant(report: ExecutableReportSpec, cache: QueryCache) -> None:
-    with st.container(border=True):
-        st.subheader("Visual Assistant")
-        st.caption("Requests become a reviewable proposal or governed analysis plan before anything changes.")
+    with st.expander("🧠 探索與設計", expanded=True):
+        st.caption("用自然語言新增圖表、調整分析、改變外觀。輸入後產生草稿提案，確認後才套用。")
         display_names = {
             component_id: visual.visualization.title or component_id
             for component_id, visual in report.pages["main"].visuals.items()
         }
-        selected = st.selectbox(
-            "Selected visual",
-            list(display_names),
-            format_func=lambda component_id: display_names[component_id],
+        display_names_with_none = {"": "（不指定，對整個報表）"} | display_names
+        selected_raw = st.selectbox(
+            "① 選擇圖表（可選）",
+            list(display_names_with_none),
+            format_func=lambda cid: display_names_with_none[cid],
             key="selected_component_id",
             disabled=report.read_only,
         )
+        selected = selected_raw or None
         prompt = st.text_input(
-            "Ask Visual Assistant",
-            placeholder="make this line chart red, only show Logic-B, analyze queue time drivers",
+            "② 告訴我你想做什麼",
+            placeholder="例：加一張供應商等候時間的趨勢圖、把離群值標紅色、改成依月份顯示",
             disabled=report.read_only,
         )
-        if st.button("Analyze Request", type="primary", disabled=report.read_only):
-            result = prompt_to_proposal(prompt, report, selected)
+        if st.button("送出請求", type="primary", disabled=report.read_only, width="stretch"):
+            # Load semantic model for LLM governance context
+            try:
+                _sm = json.loads(_SEMANTIC_MODEL.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                _sm = None
+            _contracts = _load_all_contracts()
+            result = prompt_to_proposal(prompt, report, selected, semantic_model=_sm, contracts=_contracts)
             _store_visual_assistant_context(result)
-            if result.proposal is not None:
+            _record_chat(prompt, selected, result)
+            st.session_state["_disambiguation"] = getattr(result, "disambiguation", None)
+            if result.is_mixed:
+                workspace.cancel_pending()
+                st.session_state["split_proposals"] = result.split_proposals
+                workspace.set_message(result.message)
+            elif result.proposal is not None:
+                st.session_state["split_proposals"] = None
                 workspace.stage_proposal(result.proposal)
                 workspace.set_message(result.message)
             else:
+                st.session_state["split_proposals"] = None
                 workspace.cancel_pending()
                 workspace.set_message(result.message)
             st.rerun()
 
         _render_visual_assistant_context()
+
+        # Disambiguation question from LLM (spec 9.3)
+        disam = st.session_state.get("_disambiguation")
+        if disam:
+            st.info(f"🤔 {disam}", icon="❓")
+
+        _render_chat_history()
 
         pending = workspace.pending_proposal()
         if pending is not None:
@@ -828,6 +1068,41 @@ def _render_visual_assistant(report: ExecutableReportSpec, cache: QueryCache) ->
             with actions[1]:
                 if st.button("Cancel Proposal", width="stretch"):
                     workspace.cancel_pending()
+                    _clear_visual_assistant_context()
+                    st.rerun()
+
+        # Mixed-prompt split proposals (style + analysis shown separately)
+        split = st.session_state.get("split_proposals")
+        if split:
+            st.markdown("---")
+            labels = ["🎨 Style (display only)", "📊 Analysis (re-queries data)"]
+            for i, (prop, label) in enumerate(zip(split, labels)):
+                st.markdown(f"**{label}**")
+                st.dataframe(_proposal_rows(prop), hide_index=True, width="stretch")
+                cols = st.columns(2)
+                with cols[0]:
+                    if st.button(f"Apply {label.split()[0]}", key=f"split_apply_{i}", type="primary", width="stretch"):
+                        workspace.stage_proposal(prop)
+                        if workspace.accept_pending():
+                            _request_widget_sync()
+                            cache.invalidate_all()
+                        _clear_visual_assistant_context()
+                        st.session_state["split_proposals"] = None
+                        st.rerun()
+            all_cols = st.columns(2)
+            with all_cols[0]:
+                if st.button("Apply Both", key="split_apply_all", width="stretch"):
+                    for prop in split:
+                        workspace.stage_proposal(prop)
+                        workspace.accept_pending()
+                    _request_widget_sync()
+                    cache.invalidate_all()
+                    _clear_visual_assistant_context()
+                    st.session_state["split_proposals"] = None
+                    st.rerun()
+            with all_cols[1]:
+                if st.button("Cancel All", key="split_cancel", width="stretch"):
+                    st.session_state["split_proposals"] = None
                     _clear_visual_assistant_context()
                     st.rerun()
 
@@ -948,6 +1223,7 @@ def _render_page(
             component_id,
         )
         render_visual(query, visual.visualization, cache, executor, active_filters)
+        _render_explanation_panel(component_id, visual)
 
     # Render visuals in visual_order, pairing adjacent kpi_cards into two columns.
     order = page.visual_order
@@ -1061,13 +1337,10 @@ def main() -> None:
         with st.expander("Why this result is trusted"):
             st.markdown(_trusted_markdown)
     else:
-        canvas, assistant = st.columns([3, 2])
-        with assistant:
-            _render_visual_assistant(report, cache)
-        with canvas:
-            _render_canvas(report, cache, executor, active_filters)
-            with st.expander("Why this result is trusted"):
-                st.markdown(_trusted_markdown)
+        # Canvas is now full-width
+        _render_canvas(report, cache, executor, active_filters)
+        with st.expander("Why this result is trusted"):
+            st.markdown(_trusted_markdown)
 
 
 if __name__ == "__main__":

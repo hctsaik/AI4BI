@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -28,6 +29,30 @@ from ai4bi.query_spec import (
 logger = logging.getLogger(__name__)
 
 _DEFAULT_REGISTRY = Path(__file__).parent.parent.parent / "tests" / "fixtures" / "blocks"
+
+
+# ---------------------------------------------------------------------------
+# ResultMetadata — spec section 7.4
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ResultMetadata:
+    """Execution lineage returned alongside each query result.
+
+    Satisfies spec 7.4 (ResultMetadata) and the "Explain before trust" principle.
+    Stored in st.session_state["metadata_by_component"][component_id].
+    """
+    component_id: str
+    row_count: int
+    executed_at: str                          # ISO 8601 UTC
+    blocks_used: list[str] = field(default_factory=list)
+    relationships_used: list[str] = field(default_factory=list)  # "A → B (many_to_one)"
+    metrics_used: list[dict] = field(default_factory=list)       # {name, formula, agg}
+    dimensions_used: list[str] = field(default_factory=list)
+    filters_applied: list[str] = field(default_factory=list)
+    quality_warnings: list[str] = field(default_factory=list)
+    data_freshness: dict[str, str] = field(default_factory=dict)  # block_id → ISO timestamp
+    sql_preview: str = ""                     # first 400 chars of generated SQL
 _APPROVED_AGGREGATIONS = {
     DisaggregationMethod.sum: AggFunction.sum,
     DisaggregationMethod.average: AggFunction.avg,
@@ -272,9 +297,10 @@ class Executor:
         if where_parts:
             sql_parts.append("WHERE\n    " + "\n    AND ".join(where_parts))
         if spec.dimensions and spec.metrics:
-            sql_parts.append(
-                "GROUP BY " + ", ".join(_quote(d.alias or d.column_name) for d in spec.dimensions)
-            )
+            # Use positional GROUP BY to avoid ambiguous column references when
+            # the same column name exists in both the fact table and a joined dim table.
+            dim_positions = ", ".join(str(i + 1) for i in range(len(spec.dimensions)))
+            sql_parts.append(f"GROUP BY {dim_positions}")
         if spec.sort:
             sql_parts.append(
                 "ORDER BY " + ", ".join(
@@ -292,11 +318,29 @@ class Executor:
         active_filters: Optional[dict[str, Any]] = None,
         version_snapshot: Optional[dict[str, str]] = None,
     ) -> pd.DataFrame:
+        df, _ = self.run_with_metadata(
+            spec, active_filters=active_filters, version_snapshot=version_snapshot
+        )
+        return df
+
+    def run_with_metadata(
+        self,
+        spec: VisualQuerySpec,
+        active_filters: Optional[dict[str, Any]] = None,
+        version_snapshot: Optional[dict[str, str]] = None,
+        component_id: Optional[str] = None,
+    ) -> tuple[pd.DataFrame, ResultMetadata]:
+        """Execute and return (DataFrame, ResultMetadata).
+
+        ResultMetadata contains the full execution lineage required by spec 7.4
+        and displayed in the per-visual Explanation Panel (spec 8.1).
+        """
         if active_filters is not None:
             spec = self._apply_active_filters(spec, active_filters)
 
         conn = duckdb.connect(database=":memory:")
         contracts: dict[str, DataBlockContract] = {}
+        executed_at = datetime.now(timezone.utc).isoformat()
         try:
             for ref in spec.block_refs:
                 contract = self._resolve_block_contract(ref, version_snapshot=version_snapshot)
@@ -307,6 +351,69 @@ class Executor:
             params: list[Any] = []
             sql = self._build_sql(spec, contracts, joins, params)
             logger.debug("[executor] SQL:\n%s\nparams=%s", sql, params)
-            return conn.execute(sql, params).df()
+            df = conn.execute(sql, params).df()
+
+            # Build metadata
+            blocks_used = [ref.block_id for ref in spec.block_refs]
+            relationships_used = [
+                f"{j.from_block} → {j.to_block} "
+                f"({getattr(j, 'cardinality', 'many_to_one')}) "
+                f"[{getattr(j, 'certification_status', 'certified')}]"
+                for j in joins
+            ]
+            metrics_used = []
+            for m in spec.metrics:
+                contract = contracts.get(m.block_id)
+                defn = next(
+                    (md for md in (contract.metrics if contract else []) if md.name == m.metric_name),
+                    None,
+                )
+                metrics_used.append({
+                    "name": m.alias or m.metric_name,
+                    "metric_id": m.metric_name,
+                    "formula": getattr(defn, "formula", None) or m.metric_name,
+                    "agg": getattr(defn, "disaggregation_method", None) or "unknown",
+                    "block_id": m.block_id,
+                })
+            dimensions_used = [
+                f"{d.alias or d.column_name}"
+                + (f" (DATE_TRUNC {d.truncate_date_to})" if d.truncate_date_to else "")
+                for d in spec.dimensions
+            ]
+            filters_applied = [
+                f"{f.block_id}.{f.column_name} {f.operator.value} {f.value!r}"
+                for f in spec.filters
+                if f.value is not None
+            ]
+            quality_warnings: list[str] = []
+            if df.empty:
+                quality_warnings.append("Query returned 0 rows — check active filters.")
+            data_freshness: dict[str, str] = {}
+            for ref in spec.block_refs:
+                block_path = self._resolve_block_path(ref)
+                if block_path.exists():
+                    mtime = datetime.fromtimestamp(
+                        block_path.stat().st_mtime, tz=timezone.utc
+                    ).isoformat()
+                    data_freshness[ref.block_id] = mtime
+
+            metadata = ResultMetadata(
+                component_id=component_id or spec.spec_id,
+                row_count=len(df),
+                executed_at=executed_at,
+                blocks_used=blocks_used,
+                relationships_used=relationships_used,
+                metrics_used=metrics_used,
+                dimensions_used=dimensions_used,
+                filters_applied=filters_applied,
+                quality_warnings=quality_warnings,
+                data_freshness=data_freshness,
+                sql_preview=sql[:400],
+            )
+            logger.debug(
+                "[executor] run_with_metadata spec=%s rows=%d blocks=%s",
+                spec.spec_id, len(df), blocks_used,
+            )
+            return df, metadata
         finally:
             conn.close()
