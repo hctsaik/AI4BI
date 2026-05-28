@@ -2493,3 +2493,112 @@ class PublicationGateResult:
 ### 013-G. Next Round Prompt
 
 > Round 014 聚焦三件事：(1) **Dynamic Canvas** — `ReportPageSpec` 加入 `visual_order: list[str]`，canvas loop 依序渲染，新增 visual 自動插入底部並繼承當前 global filter；(2) **BlockRegistry** (013-D 補做) — `FilesystemBlockRegistry` + `_meta.json` atomic write + Executor 整合 + 8 個 demo _meta.json + tests；(3) **AggStep SQL injection hardening** — 將 `_build_agg_sql()` 的 filter 插值改為 DuckDB parameterized query。`grain_check()` 與 `AuditMetadata` dataclass 可作為次要目標。
+
+---
+
+## Round 014 — Dynamic Canvas, SQL Hardening, AuditMetadata, BlockRef Pin (2026-05-28)
+
+### 014-A. Session Context
+
+Round 014 continues from Round 013's Visual Builder + Publication Gate + Composition Planner baseline (197 tests). Three agents ran in parallel; all three completed successfully.
+
+### 014-B. Agents and Outcomes
+
+| Agent ID | Task | Status | Tests Added |
+| --- | --- | --- | --- |
+| a7932ce6d7f7b04f4 | 014-A Dynamic Canvas + Filter Inheritance | Completed | +9 (206 total) |
+| a2c34966840a48d23 | 014-B SQL Hardening + grain_check | Completed | +19 (includes updated existing) |
+| a938dcc5e3342eae2 | 014-C AuditMetadata + BlockRef Pin Workflow | Completed | +9 (234 total) |
+
+**Final passing test count: 234**
+
+### 014-C. Decisions Made
+
+#### Dynamic Canvas (014-A)
+
+- **`visual_order: list[str]`** added to `ReportPageSpec`. Defaults to `list(visuals.keys())` from the template. Preserved in `to_dict()` / `from_dict()` round-trips.
+- **`ReportPageSpec.add_visual(visual_id, visual_spec)`**: appends `visual_id` to `visual_order`; raises `ReportValidationError` if the `visual_id` already exists.
+- **`pages/{page_id}/add_visual` proposal path**: `apply_report_proposal()` recognises this path and calls `page.add_visual()` atomically. `before=None`, `new_value={"visual_id": str, "visual": dict}`.
+- **`build_add_visual_proposal(page_id, visual_id, query_spec, viz_spec) -> ReportProposal`** in `builder.py` — `affects_data=True`.
+- **Canvas loop** in `app.py` now iterates `page.visual_order` instead of a hardcoded list. Adjacent `kpi_card` pairs share a two-column layout; all other types render full-width.
+- **Filter inheritance**: when "Add to Report" is clicked, active filters whose key starts with the selected `block_id` are copied into the new visual's `VisualQuerySpec.filters`.
+
+#### AggStep SQL Hardening (014-B)
+
+- **`_build_agg_sql()` now returns `(sql_fragment: str, params: list)`**. SQL uses `?` placeholders for all filter values; `params` holds the ordered values.
+- **`AggStep.filter_values: dict[str, list]`** — new field for parameterized filter values. The legacy `filters: list[str]` field is retained for trusted-internal raw SQL predicates only.
+- **`CompositionExecutor.run()`** collects params from each CTE step and passes the combined list to `con.execute(full_sql, all_params)`.
+- **`grain_check(semantic_model: dict) -> list[str]`** added to `CompositionPlan`. Checks `semantic_model["certified_joins"]` in both directions for the `(left_block, right_block, join_key)` triple. Returns a warning string if not certified (not an error — planner proceeds with warning).
+- **`CompositionPlanner.plan(semantic_model: dict | None = None)`** — optional parameter; calls `grain_check()` and logs warnings at WARNING level when semantic_model is provided.
+- `tests/test_composition_planner.py` updated: 3 call sites of `_build_agg_sql()` now unpack `(sql, params)` tuple.
+
+#### AuditMetadata + BlockRef Pin (014-C)
+
+- **`AuditMetadata` dataclass** (in `models.py`): `{report_id, created_by, created_at, last_modified_by, last_modified_at, revision}`. Has own `to_dict()` / `from_dict()`.
+- **`ExecutableReportSpec`** now carries `audit: AuditMetadata` instead of standalone `report_id` and `revision`. Backward-compat `report_id` and `revision` properties delegate to `self.audit.*`. Old drafts without `"audit"` key deserialize gracefully.
+- **`DraftReportStore.save()`** sets `saved.audit.last_modified_at` to `datetime.now(timezone.utc).isoformat()` on every save.
+- **Publication gate** `audit_metadata` check now uses `report.audit.report_id` and `report.audit.revision`.
+- **`pin_block_version_proposal(report, page_id, visual_id, block_id, certified_version, pin_reason)`** in `proposals.py` — creates a proposal targeting `pages/{page_id}/visuals/{visual_id}/query/block_refs/{block_id}/pinned_version` with `affects_data=False`.
+- **`apply_report_proposal()`** supports the 8-part `block_refs/{block_id}/pinned_version` path; locates the matching `BlockRef` by `block_id` and updates `pinned_version` and `pin_reason`.
+
+### 014-D. Updated File Inventory
+
+| File | Change | Purpose |
+| --- | --- | --- |
+| `ai4bi/report/models.py` | Modified | `AuditMetadata`, `visual_order`, `add_visual()`, pin path support |
+| `ai4bi/report/builder.py` | Modified | `build_add_visual_proposal()` |
+| `ai4bi/report/proposals.py` | Modified | `pin_block_version_proposal()` |
+| `ai4bi/report/publication.py` | Modified | `audit_metadata` check uses `report.audit.*` |
+| `ai4bi/report/templates.py` | Modified | `AuditMetadata(report_id=...)` in template |
+| `ai4bi/planning/composition_plan.py` | Modified | `AggStep.filter_values`, `CompositionPlan.grain_check()`, `CompositionPlanner.plan(semantic_model)` |
+| `ai4bi/analysis/composition_executor.py` | Modified | `_build_agg_sql()` returns tuple, parameterized DuckDB execution |
+| `ai4bi/ui/app.py` | Modified | Canvas loop over `visual_order`, filter inheritance in Add Visual |
+| `tests/test_dynamic_canvas.py` | New | 9 tests |
+| `tests/test_composition_hardening.py` | New | 19 tests (incl. SQL injection safety) |
+| `tests/test_audit_and_pin.py` | New | 9 tests |
+| `tests/test_composition_planner.py` | Modified | 3 call sites updated for tuple return |
+
+### 014-E. Validated Data Contract Additions
+
+```python
+@dataclass
+class AuditMetadata:
+    report_id: str
+    created_by: str = "unknown"
+    created_at: str | None = None
+    last_modified_by: str = "unknown"
+    last_modified_at: str | None = None
+    revision: int = 0
+
+# AggStep extended
+@dataclass
+class AggStep:
+    ...
+    filter_values: dict[str, list] = field(default_factory=dict)  # parameterized
+
+# grain_check on CompositionPlan
+def grain_check(self, semantic_model: dict) -> list[str]: ...
+
+# New proposal helper
+def pin_block_version_proposal(
+    report: ExecutableReportSpec,
+    page_id: str,
+    visual_id: str,
+    block_id: str,
+    certified_version: str,
+    pin_reason: str = "manually pinned by user",
+) -> ReportProposal: ...
+```
+
+### 014-F. Open Questions -> Round 015
+
+1. **Published report sharing**: The publication gate and `AuditMetadata` are now in place. Round 015 can wire up a simple share-link mechanism (write `published/` subdirectory, generate a read-only URL with `?mode=readonly&draft=<path>`).
+2. **`visual_order` reordering**: Users can now add visuals but cannot reorder them. A drag-reorder or move-up/down proposal would complete the canvas authoring loop.
+3. **BlockRef pin UI**: `pin_block_version_proposal()` is implemented. Round 015 should add the sidebar "Pin version" button in `app.py` that looks up the certified version from `FilesystemBlockRegistry` and stages the proposal.
+4. **`created_by` / `last_modified_by` identity**: Currently hardcoded to `"unknown"`. Round 015 can pick up a configurable `ANALYST_NAME` env var or Streamlit session param.
+5. **Cross-page global filter sync**: Still pending (P3 item).
+6. **Streamlit AppTest coverage for dynamic canvas**: The 9 new canvas tests cover the model layer. An `AppTest` smoke run for the add-visual + confirm flow would close the UI gap.
+
+### 014-G. Next Round Prompt
+
+> Round 015 聚焦三件事：(1) **Published Report Sharing** — 將已通過 publication gate 的 draft 寫入 `published/` 子目錄，`app.py` 生成 `?mode=readonly&draft=<path>` share URL 並在 UI 顯示；(2) **Pin Version UI** — sidebar 「Pin version」按鈕查詢 `FilesystemBlockRegistry` 取得 certified version，呼叫 `pin_block_version_proposal()` 並 stage；(3) **Canvas Reorder** — `ReportPageSpec` 支援 `move_visual_up(visual_id)` / `move_visual_down(visual_id)`，對應 proposal path `pages/{page_id}/reorder_visual`。`created_by` 身份可從 `ANALYST_NAME` env var 讀取作為次要目標。

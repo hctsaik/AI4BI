@@ -16,6 +16,7 @@ from ai4bi.query_spec import (
     VisualType,
 )
 from ai4bi.report.models import (
+    AuditMetadata,
     ControlSpec,
     ExecutableReportSpec,
     ReportPageSpec,
@@ -138,7 +139,7 @@ def build_semiconductor_queue_time_report() -> ExecutableReportSpec:
         ),
     }
     report = ExecutableReportSpec(
-        report_id="etch_queue_time_explorer",
+        audit=AuditMetadata(report_id="semiconductor_queue_time_v1"),
         title="ETCH Queue-Time Explorer",
         semantic_model_ref="semiconductor_process_demo@1.0.0",
         status="validated_demo_draft",

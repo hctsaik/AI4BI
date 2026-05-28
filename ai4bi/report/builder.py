@@ -30,6 +30,13 @@ from ai4bi.query_spec import (
     VisualType,
 )
 from ai4bi.report.catalog import _certified_dim_targets, _make_display_name
+from ai4bi.report.models import (
+    ReportChange,
+    ReportProposal,
+    ReportVisualSpec,
+    query_to_dict,
+    visualization_to_dict,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -259,3 +266,50 @@ def _default_visualization(visual_type: VisualType, title: str) -> Visualization
     elif visual_type == VisualType.kpi_card:
         kwargs["extra"] = {}
     return VisualizationSpec(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Proposal builder
+# ---------------------------------------------------------------------------
+
+def build_add_visual_proposal(
+    page_id: str,
+    visual_id: str,
+    query_spec: VisualQuerySpec,
+    viz_spec: VisualizationSpec,
+) -> ReportProposal:
+    """Build a ReportProposal that adds a new visual to a report page.
+
+    Parameters
+    ----------
+    page_id:
+        The id of the page to add the visual to (e.g. ``"main"``).
+    visual_id:
+        Unique identifier for the new visual.
+    query_spec:
+        The VisualQuerySpec for the new visual.
+    viz_spec:
+        The VisualizationSpec (chart type, title, etc.) for the new visual.
+
+    Returns
+    -------
+    ReportProposal
+        A single-change proposal with ``affects_data=True`` and path
+        ``"pages/{page_id}/add_visual"``.
+    """
+    visual_spec = ReportVisualSpec(
+        component_id=visual_id,
+        query=query_spec,
+        visualization=viz_spec,
+    )
+    change = ReportChange(
+        path=f"pages/{page_id}/add_visual",
+        label=f"Add {viz_spec.visual_type.value} visual",
+        before=None,
+        after={"visual_id": visual_id, "visual": visual_spec.to_dict()},
+        affects_data=True,
+    )
+    return ReportProposal(
+        description=f"Add visual '{visual_id}' to page '{page_id}'",
+        changes=[change],
+    )

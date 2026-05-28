@@ -6,7 +6,7 @@ import copy
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +27,39 @@ from ai4bi.query_spec import (
 
 class ReportValidationError(ValueError):
     """Raised when a report or proposal does not conform to the draft contract."""
+
+
+@dataclass
+class AuditMetadata:
+    """Governance audit trail for a report draft."""
+
+    report_id: str
+    created_by: str = "unknown"
+    created_at: str | None = None      # ISO-8601 string, set on first save
+    last_modified_by: str = "unknown"
+    last_modified_at: str | None = None
+    revision: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "report_id": self.report_id,
+            "created_by": self.created_by,
+            "created_at": self.created_at,
+            "last_modified_by": self.last_modified_by,
+            "last_modified_at": self.last_modified_at,
+            "revision": self.revision,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "AuditMetadata":
+        return cls(
+            report_id=payload["report_id"],
+            created_by=payload.get("created_by", "unknown"),
+            created_at=payload.get("created_at"),
+            last_modified_by=payload.get("last_modified_by", "unknown"),
+            last_modified_at=payload.get("last_modified_at"),
+            revision=int(payload.get("revision", 0)),
+        )
 
 
 @dataclass
@@ -261,18 +294,43 @@ class ReportPageSpec:
         page.validate()
         return page
 
+    def add_visual(self, visual_id: str, visual_spec: "ReportVisualSpec") -> None:
+        """Add a visual to this page, appending its id to visual_order."""
+        if visual_id in self.visuals:
+            raise ReportValidationError(
+                f"Visual '{visual_id}' already exists on page '{self.page_id}'."
+            )
+        self.visuals[visual_id] = visual_spec
+        self.visual_order.append(visual_id)
+
 
 @dataclass
 class ExecutableReportSpec:
-    report_id: str
+    audit: AuditMetadata
     title: str
     semantic_model_ref: str
     status: str
     pages: dict[str, ReportPageSpec]
     controls: dict[str, ControlSpec]
-    revision: int = 0
     read_only: bool = False
     saved_at: str | None = None
+
+    # ------------------------------------------------------------------
+    # Backward-compat properties so existing code using report.report_id
+    # and report.revision continues to work without modification.
+    # ------------------------------------------------------------------
+
+    @property
+    def report_id(self) -> str:
+        return self.audit.report_id
+
+    @property
+    def revision(self) -> int:
+        return self.audit.revision
+
+    @revision.setter
+    def revision(self, value: int) -> None:
+        self.audit.revision = value
 
     def validate(self) -> None:
         if self.status != "validated_demo_draft":
@@ -297,13 +355,12 @@ class ExecutableReportSpec:
     def to_dict(self) -> dict[str, Any]:
         return {
             "spec_version": "2.0-draft",
-            "report_id": self.report_id,
+            "audit": self.audit.to_dict(),
             "title": self.title,
             "semantic_model_ref": self.semantic_model_ref,
             "status": self.status,
             "pages": {key: page.to_dict() for key, page in self.pages.items()},
             "controls": {key: control.to_dict() for key, control in self.controls.items()},
-            "revision": self.revision,
             "read_only": self.read_only,
             "saved_at": self.saved_at,
         }
@@ -312,8 +369,16 @@ class ExecutableReportSpec:
     def from_dict(cls, payload: dict[str, Any]) -> "ExecutableReportSpec":
         if payload.get("spec_version") != "2.0-draft":
             raise ReportValidationError("Unsupported report draft spec version.")
+        # Backward compat: old drafts have top-level report_id/revision, no audit key
+        if "audit" in payload:
+            audit = AuditMetadata.from_dict(payload["audit"])
+        else:
+            audit = AuditMetadata(
+                report_id=payload.get("report_id", ""),
+                revision=int(payload.get("revision", 0)),
+            )
         report = cls(
-            report_id=payload["report_id"],
+            audit=audit,
             title=payload["title"],
             semantic_model_ref=payload["semantic_model_ref"],
             status=payload["status"],
@@ -325,7 +390,6 @@ class ExecutableReportSpec:
                 key: ControlSpec.from_dict(value)
                 for key, value in payload["controls"].items()
             },
-            revision=int(payload.get("revision", 0)),
             read_only=bool(payload.get("read_only", False)),
             saved_at=payload.get("saved_at"),
         )
@@ -357,6 +421,9 @@ def _get_path(report: ExecutableReportSpec, path: str) -> Any:
     parts = path.split("/")
     if len(parts) == 3 and parts[0] == "controls" and parts[2] == "value":
         return report.controls[parts[1]].value
+    if len(parts) == 3 and parts[0] == "pages" and parts[2] == "add_visual":
+        # For add_visual the "current" state is None (visual does not exist yet).
+        return None
     if len(parts) == 7 and parts[0] == "pages" and parts[2] == "visuals":
         visual = report.pages[parts[1]].visuals[parts[3]]
         if parts[4:] == ["visualization", "extra", "line_color"]:
@@ -375,6 +442,13 @@ def _get_path(report: ExecutableReportSpec, path: str) -> Any:
                 }
                 for dimension in visual.query.dimensions
             ]
+    if len(parts) == 8 and parts[0] == "pages" and parts[2] == "visuals" and parts[4] == "query" and parts[5] == "block_refs" and parts[7] == "pinned_version":
+        visual = report.pages[parts[1]].visuals[parts[3]]
+        block_id = parts[6]
+        for ref in visual.query.block_refs:
+            if ref.block_id == block_id:
+                return ref.pinned_version
+        raise ReportValidationError(f"BlockRef '{block_id}' not found in visual '{parts[3]}'.")
     raise ReportValidationError(f"Unsupported proposal path '{path}'.")
 
 
@@ -382,6 +456,13 @@ def _set_path(report: ExecutableReportSpec, path: str, value: Any) -> None:
     parts = path.split("/")
     if len(parts) == 3 and parts[0] == "controls" and parts[2] == "value":
         report.controls[parts[1]].value = copy.deepcopy(value)
+        return
+    if len(parts) == 3 and parts[0] == "pages" and parts[2] == "add_visual":
+        # value is {"visual_id": str, "visual": dict}
+        page = report.pages[parts[1]]
+        visual_id = value["visual_id"]
+        visual_spec = ReportVisualSpec.from_dict(value["visual"])
+        page.add_visual(visual_id, visual_spec)
         return
     if len(parts) == 7 and parts[0] == "pages" and parts[2] == "visuals":
         visual = report.pages[parts[1]].visuals[parts[3]]
@@ -404,6 +485,16 @@ def _set_path(report: ExecutableReportSpec, path: str, value: Any) -> None:
                 for dimension in value
             ]
             return
+    if len(parts) == 8 and parts[0] == "pages" and parts[2] == "visuals" and parts[4] == "query" and parts[5] == "block_refs" and parts[7] == "pinned_version":
+        visual = report.pages[parts[1]].visuals[parts[3]]
+        block_id = parts[6]
+        for ref in visual.query.block_refs:
+            if ref.block_id == block_id:
+                ref.pinned_version = value
+                if ref.pin_reason is None:
+                    ref.pin_reason = "manually pinned by user"
+                return
+        raise ReportValidationError(f"BlockRef '{block_id}' not found in visual '{parts[3]}'.")
     raise ReportValidationError(f"Unsupported proposal path '{path}'.")
 
 
@@ -420,7 +511,7 @@ def apply_report_proposal(
                 f"Proposal is stale for '{change.label}': expected {change.before!r}, got {current!r}."
             )
         _set_path(candidate, change.path, change.after)
-    candidate.revision += 1
+    candidate.audit.revision += 1
     candidate.saved_at = None
     candidate.validate()
     return candidate
@@ -443,6 +534,7 @@ class DraftReportStore:
         report.validate()
         saved = report.deep_copy()
         saved.saved_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        saved.audit.last_modified_at = datetime.now(timezone.utc).isoformat()
         self.directory.mkdir(parents=True, exist_ok=True)
         path = self.directory / f"{self._safe_name(saved.report_id)}.json"
         path.write_text(json.dumps(saved.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")

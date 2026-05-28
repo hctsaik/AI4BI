@@ -11,13 +11,12 @@ import streamlit as st
 from ai4bi.analysis.executor import Executor
 from ai4bi.blocks.loader import BlockLoader
 from ai4bi.blocks.contracts import DataBlockContract
-from ai4bi.report.builder import build_visual_from_selection
+from ai4bi.report.builder import build_add_visual_proposal, build_visual_from_selection
 from ai4bi.report.catalog import build_catalog
 from ai4bi.report.models import (
     DraftReportStore,
     ExecutableReportSpec,
     ReportProposal,
-    ReportVisualSpec,
 )
 from ai4bi.report.proposals import controls_to_proposal, prompt_to_proposal
 from ai4bi.report.publication import GateCheckResult, run_publication_gate
@@ -223,30 +222,38 @@ def _render_add_visual_panel(
             key="add_visual_submit",
         ):
             if query_spec is not None and viz_spec is not None:
-                # Mutate a deep copy of the report via workspace commit.
-                new_report = workspace.current_report().deep_copy()
-                page = new_report.pages["main"]
-                new_visual = ReportVisualSpec(
-                    component_id=visual_id,
-                    query=query_spec,
-                    visualization=viz_spec,
+                # Carry matching active filters into the new visual's query spec.
+                current_report = workspace.current_report()
+                active = current_report.active_filters()
+                from ai4bi.query_spec import FilterSpec, FilterOperator
+                inherited_filters = []
+                for filter_key, filter_value in active.items():
+                    key_block_id = filter_key.split(".")[0] if "." in filter_key else ""
+                    if key_block_id == selected_block_id:
+                        col_name = filter_key.split(".", 1)[1] if "." in filter_key else filter_key
+                        inherited_filters.append(
+                            FilterSpec(
+                                block_id=key_block_id,
+                                column_name=col_name,
+                                operator=FilterOperator.in_,
+                                value=filter_value if isinstance(filter_value, list) else [filter_value],
+                                inherit_global_filter=True,
+                            )
+                        )
+                if inherited_filters:
+                    from dataclasses import replace as _replace
+                    query_spec = _replace(query_spec, filters=inherited_filters)
+
+                proposal = build_add_visual_proposal(
+                    page_id="main",
+                    visual_id=visual_id,
+                    query_spec=query_spec,
+                    viz_spec=viz_spec,
                 )
-                page.visuals[visual_id] = new_visual
-                page.visual_order.append(visual_id)
-                new_report.revision += 1
-                new_report.saved_at = None
-                try:
-                    new_report.validate()
-                    # Use workspace internal commit helper via apply_immediately bypass.
-                    # We directly commit because there is no proposal path for "add visual".
-                    import ai4bi.ui.workspace as _ws
-                    _ws._commit(new_report)  # noqa: SLF001
-                    workspace.set_message(
-                        f"Visual '{viz_spec.title or visual_id}' added to report."
-                    )
-                    cache.invalidate_all()
-                except Exception as exc:  # noqa: BLE001
-                    workspace.set_message(f"Add visual failed: {exc}")
+                workspace.stage_proposal(proposal)
+                workspace.set_message(
+                    f"Visual '{viz_spec.title or visual_id}' staged — confirm in the proposal panel."
+                )
                 st.rerun()
 
 
@@ -415,24 +422,34 @@ def _render_canvas(
     executor: Executor,
     active_filters: dict[str, object],
 ) -> None:
-    visuals = report.pages["main"].visuals
+    page = report.pages["main"]
+    visuals = page.visuals
 
     def render(component_id: str) -> None:
         visual = visuals[component_id]
         query = replace(visual.query, data_version=f"draft-r{report.revision}")
         render_visual(query, visual.visualization, cache, executor, active_filters)
 
-    kpis = st.columns(2)
-    with kpis[0]:
-        render("kpi_move_count")
-    with kpis[1]:
-        render("kpi_avg_queue")
-    charts = st.columns(2)
-    with charts[0]:
-        render("line_queue_by_day")
-    with charts[1]:
-        render("bar_queue_by_tool_dimension")
-    render("table_queue_by_tool_dimension")
+    # Render visuals in visual_order, pairing adjacent kpi_cards into two columns.
+    order = page.visual_order
+    i = 0
+    while i < len(order):
+        vid = order[i]
+        visual = visuals[vid]
+        from ai4bi.query_spec import VisualType as _VT
+        if visual.visualization.visual_type == _VT.kpi_card and i + 1 < len(order):
+            next_vid = order[i + 1]
+            next_visual = visuals[next_vid]
+            if next_visual.visualization.visual_type == _VT.kpi_card:
+                cols = st.columns(2)
+                with cols[0]:
+                    render(vid)
+                with cols[1]:
+                    render(next_vid)
+                i += 2
+                continue
+        render(vid)
+        i += 1
 
 
 def main() -> None:

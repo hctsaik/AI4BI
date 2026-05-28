@@ -320,14 +320,14 @@ class TestForbiddenAvgYieldPct:
             # Wrong approach: AVG(yield_pct) — numerically incorrect for LOT-1002
             # (Y003=96.0, Y004=94.0 → AVG=95.0; but correct weighted = 95.0 here —
             # the divergence is seen when yields differ substantially across wafers)
-            wrong_sql = _build_agg_sql(wrong_yield_step, "wafer_yield_fact", "agg_wrong")
+            wrong_sql, wrong_params = _build_agg_sql(wrong_yield_step, "wafer_yield_fact", "agg_wrong")
             full_wrong = f"WITH {wrong_sql} SELECT * FROM agg_wrong ORDER BY lot_id"
-            wrong_df = con.execute(full_wrong).df()
+            wrong_df = con.execute(full_wrong, wrong_params).df()
 
             # Correct approach: SUM(good_die)/SUM(tested_die)*100
-            correct_sql = _build_agg_sql(correct_yield_step, "wafer_yield_fact", "agg_correct")
+            correct_sql, correct_params = _build_agg_sql(correct_yield_step, "wafer_yield_fact", "agg_correct")
             full_correct = f"WITH {correct_sql} SELECT * FROM agg_correct ORDER BY lot_id"
-            correct_df = con.execute(full_correct).df()
+            correct_df = con.execute(full_correct, correct_params).df()
 
             # For LOT-1001: AVG(98.0, 97.0) = 97.5 == SUM(980+970)/2000*100 = 97.5
             # For LOT-1003: AVG(92.5, 89.8) = 91.15 == SUM(925+898)/2000*100 = 91.15
@@ -551,7 +551,7 @@ class TestEndToEndSqlCorrectness:
 
         cte_sqls = []
         for step in canonical_plan.agg_steps:
-            cte_sql = _build_agg_sql(step, step.block_id, cte_aliases[step.block_id])
+            cte_sql, _params = _build_agg_sql(step, step.block_id, cte_aliases[step.block_id])
             cte_sqls.append(cte_sql)
 
         compose_sql = _build_compose_sql(

@@ -160,13 +160,18 @@ def _check_policy(
 
 def _check_audit_metadata(report: ExecutableReportSpec) -> GateCheckResult:
     """Report must declare author, purpose, and valid_period metadata fields."""
-    # ExecutableReportSpec does not yet carry these fields; mark as a warning.
+    # Verify core AuditMetadata fields are present.
     missing = []
-    if not hasattr(report, "author") or not getattr(report, "author", None):
+    if not report.audit.report_id:
+        missing.append("audit.report_id")
+    if report.audit.revision < 0:
+        missing.append("audit.revision (must be >= 0)")
+    # These extended fields are not yet carried; mark as a warning.
+    if not getattr(report, "author", None):
         missing.append("author")
-    if not hasattr(report, "purpose") or not getattr(report, "purpose", None):
+    if not getattr(report, "purpose", None):
         missing.append("purpose")
-    if not hasattr(report, "valid_period") or not getattr(report, "valid_period", None):
+    if not getattr(report, "valid_period", None):
         missing.append("valid_period")
 
     if missing:

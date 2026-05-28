@@ -40,9 +40,13 @@ def _build_agg_sql(
     step: AggStep,
     registered_table: str,
     step_alias: str,
-) -> str:
+) -> tuple[str, list]:
     """
     Build a SQL CTE fragment that aggregates one fact to the shared grain.
+
+    Returns a tuple of (sql_fragment, params) where sql_fragment uses ``?``
+    placeholders for filter values and params is the ordered list of values.
+    Pass the combined params list to ``con.execute(final_sql, params)``.
 
     Example output (for process_move_fact, group_by=[lot_id]):
         agg_process_move_fact AS (
@@ -73,10 +77,27 @@ def _build_agg_sql(
             )
 
     select_clause = ",\n        ".join(select_cols)
+
+    # Build parameterized WHERE clause from AggStep.filter_values (dict[str, list]).
+    # Raw string filters (legacy AggStep.filters list) are kept for backward
+    # compatibility but should not be used for user-supplied values.
+    params: list = []
+    where_parts: list[str] = []
+
+    # New parameterized filters from filter_values dict
+    for col, vals in (step.filter_values or {}).items():
+        placeholders = ", ".join("?" for _ in vals)
+        where_parts.append(f'"{col}" IN ({placeholders})')
+        params.extend(vals)
+
+    # Legacy raw-string filters (not parameterized — only for trusted internal use)
+    where_parts.extend(step.filters)
+
     where_clause = ""
-    if step.filters:
-        where_clause = "\n    WHERE " + "\n      AND ".join(step.filters)
-    return (
+    if where_parts:
+        where_clause = "\n    WHERE " + "\n      AND ".join(where_parts)
+
+    sql_fragment = (
         f"{step_alias} AS (\n"
         f"    SELECT\n"
         f"        {select_clause}\n"
@@ -84,6 +105,7 @@ def _build_agg_sql(
         f"    GROUP BY {gb_cols}\n"
         f")"
     )
+    return sql_fragment, params
 
 
 def _build_compose_sql(
@@ -187,13 +209,15 @@ class CompositionExecutor:
         for step in plan.agg_steps:
             cte_aliases[step.block_id] = f"agg_{step.block_id}"
 
-        # Build CTE fragments
+        # Build CTE fragments (parameterized)
         cte_parts: list[str] = []
+        all_params: list = []
         for step in plan.agg_steps:
             registered_name = registered_tables[step.block_id]
             step_alias = cte_aliases[step.block_id]
-            cte_sql = _build_agg_sql(step, registered_name, step_alias)
+            cte_sql, step_params = _build_agg_sql(step, registered_name, step_alias)
             cte_parts.append(cte_sql)
+            all_params.extend(step_params)
 
         # Build the final compose SELECT
         left_alias = cte_aliases[plan.compose_step.left_step_id]
@@ -206,7 +230,7 @@ class CompositionExecutor:
 
         logger.debug("[composition_executor] SQL:\n%s", full_sql)
 
-        return con.execute(full_sql).df()
+        return con.execute(full_sql, all_params).df()
 
     def run_from_registry(
         self,

@@ -16,9 +16,12 @@ Safety rules (non-negotiable):
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from ai4bi.blocks.contracts import BlockType, DataBlockContract
 from ai4bi.query_spec import MetricRef, VisualQuerySpec
@@ -106,13 +109,16 @@ class AggStep:
     group_by_columns must be columns that exist in this fact's schema.
     metric_exprs defines what to compute; each must only reference columns
     from this same fact block.
-    filters is an optional list of raw SQL WHERE predicates applied before
-    aggregation (e.g. ["\"step_id\" = 'ETCH'"]).
+    filter_values is a dict of {column_name: [val1, val2, ...]} that generates
+    parameterized ``col IN (?, ?, ...)`` predicates (safe against SQL injection).
+    filters is a list of raw SQL WHERE predicates for trusted internal use only
+    (legacy — prefer filter_values for user-supplied values).
     """
     block_id: str
     group_by_columns: list[str]
     metric_exprs: list[MetricExpr]
     filters: list[str] = field(default_factory=list)
+    filter_values: dict[str, list] = field(default_factory=dict)
     # Legacy field kept for backwards compatibility with callers using MetricRef
     metrics: list[MetricRef] = field(default_factory=list)
 
@@ -235,6 +241,35 @@ class CompositionPlan:
                     f"'{self.compose_step.join_key}'."
                 )
 
+    def grain_check(self, semantic_model: dict) -> list[str]:
+        """
+        Returns a list of warning strings (empty = OK).
+
+        Checks: if the join_key is declared in semantic_model["certified_joins"]
+        as a relationship between the two block_ids, then the grain is certified.
+        If no such relationship exists, return a warning (not an error — let the
+        planner proceed with a warning rather than refusing).
+        """
+        join_key = self.compose_step.join_key
+        left_block = self.compose_step.left_step_id
+        right_block = self.compose_step.right_step_id
+
+        certified_joins = semantic_model.get("certified_joins", [])
+        for cj in certified_joins:
+            cj_key = cj.get("join_key")
+            cj_from = cj.get("from_block")
+            cj_to = cj.get("to_block")
+            if cj_key == join_key and (
+                (cj_from == left_block and cj_to == right_block)
+                or (cj_from == right_block and cj_to == left_block)
+            ):
+                return []  # certified — no warnings
+
+        return [
+            f"grain_check: join_key '{join_key}' between '{left_block}' and "
+            f"'{right_block}' is not in certified_joins — verify grain compatibility"
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Planner
@@ -260,7 +295,7 @@ class CompositionPlanner:
         self,
         spec: VisualQuerySpec,
         contracts: dict[str, DataBlockContract],
-        semantic_model: dict[str, Any],
+        semantic_model: dict[str, Any] | None = None,
         *,
         agg_steps: list[AggStep] | None = None,
         compose_step: ComposeStep | None = None,
@@ -276,7 +311,8 @@ class CompositionPlanner:
         contracts:
             Loaded block contracts keyed by block_id.
         semantic_model:
-            The project semantic model dict (for prohibited path checks).
+            The project semantic model dict (for prohibited path checks and
+            grain_check).  Pass None to skip semantic-model validation.
         agg_steps:
             Pre-built AggStep list.  If None, the planner will raise if
             cross-fact composition is needed (caller must supply steps).
@@ -292,6 +328,8 @@ class CompositionPlanner:
             None  →  single-fact query; caller uses SafeJoinPlanner.
             plan  →  cross-fact query; caller uses CompositionExecutor.
         """
+        effective_sm: dict[str, Any] = semantic_model or {}
+
         # Collect the unique fact block_ids referenced by metrics
         metric_block_ids: list[str] = list(
             dict.fromkeys(m.block_id for m in spec.metrics)
@@ -314,7 +352,7 @@ class CompositionPlanner:
             )
 
         # Check semantic model for prohibited detail joins
-        self._check_prohibited_paths(fact_block_ids, semantic_model)
+        self._check_prohibited_paths(fact_block_ids, effective_sm)
 
         # If caller did not supply agg_steps, we cannot auto-plan (ratio metrics
         # need explicit numerator/denominator)
@@ -336,6 +374,13 @@ class CompositionPlanner:
             final_metrics=self._collect_final_metrics(agg_steps),
         )
         plan.validate(contracts)
+
+        # grain_check: log warnings but do not raise
+        if semantic_model is not None:
+            warnings = plan.grain_check(semantic_model)
+            for w in warnings:
+                logger.warning("[CompositionPlanner] %s", w)
+
         return plan
 
     # ------------------------------------------------------------------
