@@ -2602,3 +2602,76 @@ def pin_block_version_proposal(
 ### 014-G. Next Round Prompt
 
 > Round 015 聚焦三件事：(1) **Published Report Sharing** — 將已通過 publication gate 的 draft 寫入 `published/` 子目錄，`app.py` 生成 `?mode=readonly&draft=<path>` share URL 並在 UI 顯示；(2) **Pin Version UI** — sidebar 「Pin version」按鈕查詢 `FilesystemBlockRegistry` 取得 certified version，呼叫 `pin_block_version_proposal()` 並 stage；(3) **Canvas Reorder** — `ReportPageSpec` 支援 `move_visual_up(visual_id)` / `move_visual_down(visual_id)`，對應 proposal path `pages/{page_id}/reorder_visual`。`created_by` 身份可從 `ANALYST_NAME` env var 讀取作為次要目標。
+
+---
+
+## Round 015 — Published Sharing, Pin Version UI, Canvas Reorder, ANALYST_NAME (2026-05-28)
+
+### 015-A. Session Context
+
+Round 015 continues from Round 014 baseline (234 tests). Goal: wire the publication gate to an actual publish action that writes a shareable snapshot, add Pin/Unpin version UI, and add canvas visual reorder. Three agents ran in parallel; all three completed.
+
+### 015-B. Agents and Outcomes
+
+| Agent ID | Task | Status | Tests Added |
+| --- | --- | --- | --- |
+| a2a11ac1edf20dca3 | 015-A Published Report Sharing | Completed | +8 (242 total) |
+| a89f71bace7c5a34a | 015-B Pin Version UI + unpin proposal | Completed | +9 (251 total) |
+| a5efc88372a28634f | 015-C Canvas Reorder + ANALYST_NAME | Completed | +10 (261 total) |
+
+**Final passing test count: 261**
+
+### 015-C. Decisions Made
+
+#### Published Report Sharing (015-A)
+
+- **`PublishBlockedError(Exception)`** raised when `gate_result.can_publish` is False.
+- **`PublishedReportStore`** (in `models.py`):
+  - `publish(report, gate_result) -> (Path, str)`: fail-closed gate check, writes timestamped JSON to `root/<report_id>/<iso_timestamp>.json`, sets `audit.last_modified_at`, returns `(path, share_url)`.
+  - `share_url` format: `?mode=readonly&draft=<absolute_path>` — paste into browser address bar.
+  - `list_published(report_id) -> list[Path]`: all snapshots for a report_id, newest first.
+- **`app.py` Publication Readiness panel**: "Publish & Share" primary button when gate passes; disabled with tooltip when gate fails. On click: re-runs gate fail-closed, calls `PublishedReportStore.publish()`, shows `st.success(share_url)`, stores in `st.session_state["last_share_url"]`.
+- **`.gitignore`**: `published/` added — runtime output never committed.
+
+#### Pin Version UI (015-B)
+
+- **`unpin_block_version_proposal(report, page_id, visual_id, block_id)`** in `proposals.py`: `affects_data=False`; sets both `pinned_version=None` and `pin_reason=None`.
+- **`_set_path()` fix in `models.py`**: unpin (`value=None`) now correctly clears both `pinned_version` AND `pin_reason` (previously only cleared `pinned_version`).
+- **"Pin versions" sidebar expander** in `app.py`: iterates `visual_order` → each visual's `block_refs`. Unpinned refs show "Pin {block_id}" button (looks up `FilesystemBlockRegistry.get_certified_latest()`, stages `pin_block_version_proposal`). Pinned refs show label + "Unpin" button (stages `unpin_block_version_proposal`).
+
+#### Canvas Reorder + ANALYST_NAME (015-C)
+
+- **`ReportPageSpec.move_visual_up(visual_id)`**: swaps with the element before; no-op if already first; raises `ReportValidationError` if `visual_id` not in `visual_order`.
+- **`ReportPageSpec.move_visual_down(visual_id)`**: swaps with the element after; no-op if already last; raises `ReportValidationError` if unknown.
+- **`pages/{page_id}/reorder_visual` proposal path**: `new_value = {"visual_id": str, "direction": "up"|"down"}`.
+- **`build_reorder_visual_proposal(page_id, visual_id, direction, current_order)`** in `builder.py`: `affects_data=False`.
+- **Canvas `app.py`**: inline up/down arrow buttons in visual header row; click stages a reorder proposal via `workspace.stage_proposal()`.
+- **`ANALYST_NAME` env var**: `DraftReportStore.save()` sets `audit.last_modified_by`; `build_semiconductor_queue_time_report()` sets `audit.created_by`. Falls back to `"unknown"` if env var not set.
+
+### 015-D. Updated File Inventory
+
+| File | Change | Purpose |
+| --- | --- | --- |
+| `ai4bi/report/models.py` | Modified | `PublishedReportStore`, `PublishBlockedError`, `move_visual_up/down`, reorder path, ANALYST_NAME, unpin fix |
+| `ai4bi/report/proposals.py` | Modified | `unpin_block_version_proposal()` |
+| `ai4bi/report/builder.py` | Modified | `build_reorder_visual_proposal()` |
+| `ai4bi/report/templates.py` | Modified | `audit.created_by` from ANALYST_NAME |
+| `ai4bi/ui/app.py` | Modified | Publish & Share button, Pin versions panel, up/down reorder buttons |
+| `.gitignore` | Modified | `published/` excluded from git |
+| `tests/test_published_store.py` | New | 8 tests |
+| `tests/test_pin_ui_workflow.py` | New | 9 tests |
+| `tests/test_canvas_reorder.py` | New | 10 tests |
+
+### 015-E. Open Questions -> Round 016
+
+1. **Cross-page global filter sync**: Still pending. Multiple pages in a report should share the same global filter state.
+2. **Undo after publish**: Should publishing be an undoable action? Currently it writes a permanent file; undo would need to either delete the file or mark it as superseded.
+3. **Published snapshot versioning**: `list_published()` returns all snapshots. A UI to browse, compare, and restore previous published versions would complete the lifecycle story.
+4. **`created_at` field**: `AuditMetadata.created_at` is still null. Should be set on first `DraftReportStore.save()` (only if currently null), not on every save.
+5. **Streamlit AppTest coverage gap**: Pin versions panel and reorder buttons have model-layer tests but no AppTest smoke tests.
+6. **Report title editing**: Business users cannot rename a report from the UI. A simple proposal path `"title"` with `new_value: str` would close this gap.
+7. **Multi-page support**: `ExecutableReportSpec.pages` is a dict but the UI only renders `pages["main"]`. Round 016 could add a page-tab switcher.
+
+### 015-F. Next Round Prompt
+
+> Round 016 聚焦三件事：(1) **Cross-page global filter sync** — `ExecutableReportSpec` 加入 `global_filters: dict[str, FilterSpec]`，canvas 套用時同步到所有 page 的 visuals；(2) **Report title editing** — proposal path `"title"` with `new_value: str`，sidebar 加一個 text_input；(3) **created_at fix** — `DraftReportStore.save()` 只在 `audit.created_at is None` 時設定，確保初次儲存時間被保留。`AuditMetadata` 的 `PublishedReportStore.publish()` 也要同步設定 `created_by` / `last_modified_by` from `ANALYST_NAME`。Multi-page tab switcher 可作為次要目標。

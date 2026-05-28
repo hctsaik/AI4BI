@@ -20,6 +20,8 @@ ValueError
 
 from __future__ import annotations
 
+from typing import Literal
+
 from ai4bi.blocks.contracts import DataBlockContract
 from ai4bi.query_spec import (
     BlockRef,
@@ -271,6 +273,44 @@ def _default_visualization(visual_type: VisualType, title: str) -> Visualization
 # ---------------------------------------------------------------------------
 # Proposal builder
 # ---------------------------------------------------------------------------
+
+def build_reorder_visual_proposal(
+    page_id: str,
+    visual_id: str,
+    direction: Literal["up", "down"],
+    current_order: list[str],
+) -> ReportProposal:
+    """Build a ReportProposal that reorders a visual on a report page.
+
+    Parameters
+    ----------
+    page_id:
+        The id of the page containing the visual (e.g. ``"main"``).
+    visual_id:
+        Unique identifier of the visual to reorder.
+    direction:
+        ``"up"`` to move the visual earlier, ``"down"`` to move it later.
+    current_order:
+        The current ``visual_order`` list for the page (used as the ``before`` snapshot).
+
+    Returns
+    -------
+    ReportProposal
+        A single-change proposal with ``affects_data=False`` and path
+        ``"pages/{page_id}/reorder_visual"``.
+    """
+    change = ReportChange(
+        path=f"pages/{page_id}/reorder_visual",
+        label=f"Move visual '{visual_id}' {direction}",
+        before=list(current_order),
+        after={"visual_id": visual_id, "direction": direction},
+        affects_data=False,
+    )
+    return ReportProposal(
+        description=f"Reorder visual '{visual_id}' {direction} on page '{page_id}'",
+        changes=[change],
+    )
+
 
 def build_add_visual_proposal(
     page_id: str,

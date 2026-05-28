@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from ai4bi.query_spec import (
     AggFunction,
     BlockRef,
@@ -139,7 +141,10 @@ def build_semiconductor_queue_time_report() -> ExecutableReportSpec:
         ),
     }
     report = ExecutableReportSpec(
-        audit=AuditMetadata(report_id="semiconductor_queue_time_v1"),
+        audit=AuditMetadata(
+            report_id="semiconductor_queue_time_v1",
+            created_by=os.environ.get("ANALYST_NAME", "unknown"),
+        ),
         title="ETCH Queue-Time Explorer",
         semantic_model_ref="semiconductor_process_demo@1.0.0",
         status="validated_demo_draft",

@@ -11,14 +11,20 @@ import streamlit as st
 from ai4bi.analysis.executor import Executor
 from ai4bi.blocks.loader import BlockLoader
 from ai4bi.blocks.contracts import DataBlockContract
-from ai4bi.report.builder import build_add_visual_proposal, build_visual_from_selection
+from ai4bi.report.builder import (
+    build_add_visual_proposal,
+    build_reorder_visual_proposal,
+    build_visual_from_selection,
+)
 from ai4bi.report.catalog import build_catalog
 from ai4bi.report.models import (
     DraftReportStore,
     ExecutableReportSpec,
+    PublishedReportStore,
     ReportProposal,
 )
-from ai4bi.report.proposals import controls_to_proposal, prompt_to_proposal
+from ai4bi.blocks.registry import FilesystemBlockRegistry, BlockNotFoundError, NoCertifiedVersionError
+from ai4bi.report.proposals import controls_to_proposal, pin_block_version_proposal, prompt_to_proposal, unpin_block_version_proposal
 from ai4bi.report.publication import GateCheckResult, run_publication_gate
 from ai4bi.report.templates import build_semiconductor_queue_time_report
 from ai4bi.query_spec import VisualType
@@ -31,6 +37,8 @@ _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
 _BLOCKS_DIR = _DEMO_ROOT / "blocks"
 _SEMANTIC_MODEL = _DEMO_ROOT / "semantic_model.json"
 _DRAFT_STORE = _DEMO_ROOT / "draft_reports"
+_REGISTRY_DIR = _DEMO_ROOT / "registry"
+_PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 
 def _load_all_contracts() -> dict[str, DataBlockContract]:
@@ -55,6 +63,49 @@ def _gate_check_icon(check: GateCheckResult) -> str:
     return "⚠️"
 
 
+def _render_pin_versions_panel(report: ExecutableReportSpec) -> None:
+    """Render the 'Pin versions' expander in the sidebar."""
+    with st.expander("Pin versions", expanded=False):
+        if report.read_only:
+            st.warning("Read-only mode — pinning is disabled.")
+            return
+        registry = FilesystemBlockRegistry(_REGISTRY_DIR)
+        page = report.pages.get("main")
+        if page is None:
+            st.info("No 'main' page found in report.")
+            return
+        for visual_id in page.visual_order:
+            visual = page.visuals[visual_id]
+            for block_ref in visual.query.block_refs:
+                block_id = block_ref.block_id
+                if block_ref.pinned_version is None:
+                    btn_key = f"pin_{visual_id}_{block_id}"
+                    if st.button(f"Pin {block_id}", key=btn_key):
+                        try:
+                            certified_version = registry.get_certified_latest(block_id)
+                        except (BlockNotFoundError, NoCertifiedVersionError):
+                            st.warning(f"{block_id}: no certified version found")
+                            continue
+                        current_report = workspace.current_report()
+                        proposal = pin_block_version_proposal(
+                            current_report, "main", visual_id, block_id, certified_version
+                        )
+                        workspace.stage_proposal(proposal)
+                        st.rerun()
+                else:
+                    st.markdown(
+                        f"`{block_id}` pinned @ `{block_ref.pinned_version}`"
+                    )
+                    unpin_key = f"unpin_{visual_id}_{block_id}"
+                    if st.button("Unpin", key=unpin_key):
+                        current_report = workspace.current_report()
+                        proposal = unpin_block_version_proposal(
+                            current_report, "main", visual_id, block_id
+                        )
+                        workspace.stage_proposal(proposal)
+                        st.rerun()
+
+
 def _render_publication_readiness(report: ExecutableReportSpec) -> None:
     """Render the Publication Readiness expander in the sidebar."""
     with st.expander("Publication Readiness", expanded=False):
@@ -72,6 +123,22 @@ def _render_publication_readiness(report: ExecutableReportSpec) -> None:
             label = check.check_name.replace("_", " ").title()
             st.markdown(f"{icon} **{label}**")
             st.caption(check.message)
+
+        if gate.can_publish:
+            if st.button("Publish & Share", type="primary", key="publish_share_btn"):
+                # Re-run gate fail-closed before writing
+                final_gate = run_publication_gate(report, contracts, semantic_model)
+                pub_store = PublishedReportStore(_PROJECT_ROOT / "published")
+                _, share_url = pub_store.publish(report, final_gate)
+                st.success(f"Published! Share URL: {share_url}")
+                st.session_state["last_share_url"] = share_url
+        else:
+            st.button(
+                "Publish & Share",
+                disabled=True,
+                key="publish_share_btn",
+                help="Fix failing checks before publishing",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +418,9 @@ def _render_draft_controls(
         _render_add_visual_panel(report, cache)
 
         st.markdown("---")
+        _render_pin_versions_panel(report)
+
+        st.markdown("---")
         _render_publication_readiness(report)
 
     return report.active_filters()
@@ -416,6 +486,53 @@ def _render_visual_assistant(report: ExecutableReportSpec, cache: QueryCache) ->
                     st.rerun()
 
 
+def _render_reorder_buttons(
+    report: ExecutableReportSpec,
+    page_id: str,
+    visual_id: str,
+    idx: int,
+    order_len: int,
+) -> None:
+    """Render inline up/down arrow buttons for reordering a visual."""
+    if report.read_only:
+        return
+    btn_cols = st.columns([1, 1, 10])
+    with btn_cols[0]:
+        if st.button(
+            "↑",
+            key=f"reorder_up_{visual_id}",
+            disabled=(idx == 0),
+            help="Move visual up",
+        ):
+            current_order = list(report.pages[page_id].visual_order)
+            proposal = build_reorder_visual_proposal(
+                page_id=page_id,
+                visual_id=visual_id,
+                direction="up",
+                current_order=current_order,
+            )
+            workspace.stage_proposal(proposal)
+            workspace.set_message(f"Staged: move '{visual_id}' up.")
+            st.rerun()
+    with btn_cols[1]:
+        if st.button(
+            "↓",
+            key=f"reorder_down_{visual_id}",
+            disabled=(idx == order_len - 1),
+            help="Move visual down",
+        ):
+            current_order = list(report.pages[page_id].visual_order)
+            proposal = build_reorder_visual_proposal(
+                page_id=page_id,
+                visual_id=visual_id,
+                direction="down",
+                current_order=current_order,
+            )
+            workspace.stage_proposal(proposal)
+            workspace.set_message(f"Staged: move '{visual_id}' down.")
+            st.rerun()
+
+
 def _render_canvas(
     report: ExecutableReportSpec,
     cache: QueryCache,
@@ -425,8 +542,47 @@ def _render_canvas(
     page = report.pages["main"]
     visuals = page.visuals
 
-    def render(component_id: str) -> None:
+    def render(component_id: str, idx: int, order_len: int) -> None:
         visual = visuals[component_id]
+        title = visual.visualization.title or component_id
+        header_cols = st.columns([8, 1, 1])
+        with header_cols[0]:
+            st.markdown(f"**{title}**")
+        if not report.read_only:
+            with header_cols[1]:
+                if st.button(
+                    "↑",
+                    key=f"reorder_up_{component_id}",
+                    disabled=(idx == 0),
+                    help="Move visual up",
+                ):
+                    current_order = list(report.pages["main"].visual_order)
+                    proposal = build_reorder_visual_proposal(
+                        page_id="main",
+                        visual_id=component_id,
+                        direction="up",
+                        current_order=current_order,
+                    )
+                    workspace.stage_proposal(proposal)
+                    workspace.set_message(f"Staged: move '{component_id}' up.")
+                    st.rerun()
+            with header_cols[2]:
+                if st.button(
+                    "↓",
+                    key=f"reorder_down_{component_id}",
+                    disabled=(idx == order_len - 1),
+                    help="Move visual down",
+                ):
+                    current_order = list(report.pages["main"].visual_order)
+                    proposal = build_reorder_visual_proposal(
+                        page_id="main",
+                        visual_id=component_id,
+                        direction="down",
+                        current_order=current_order,
+                    )
+                    workspace.stage_proposal(proposal)
+                    workspace.set_message(f"Staged: move '{component_id}' down.")
+                    st.rerun()
         query = replace(visual.query, data_version=f"draft-r{report.revision}")
         render_visual(query, visual.visualization, cache, executor, active_filters)
 
@@ -443,12 +599,12 @@ def _render_canvas(
             if next_visual.visualization.visual_type == _VT.kpi_card:
                 cols = st.columns(2)
                 with cols[0]:
-                    render(vid)
+                    render(vid, i, len(order))
                 with cols[1]:
-                    render(next_vid)
+                    render(next_vid, i + 1, len(order))
                 i += 2
                 continue
-        render(vid)
+        render(vid, i, len(order))
         i += 1
 
 

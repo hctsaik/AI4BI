@@ -113,6 +113,39 @@ def pin_block_version_proposal(
     )
 
 
+def unpin_block_version_proposal(
+    report: ExecutableReportSpec,
+    page_id: str,
+    visual_id: str,
+    block_id: str,
+) -> ReportProposal:
+    """Creates a proposal that clears pinned_version and pin_reason for block_id in the given visual."""
+    page = report.pages.get(page_id)
+    if page is None:
+        raise ReportValidationError(f"Page '{page_id}' not found in report.")
+    visual = page.visuals.get(visual_id)
+    if visual is None:
+        raise ReportValidationError(f"Visual '{visual_id}' not found on page '{page_id}'.")
+    matching = [ref for ref in visual.query.block_refs if ref.block_id == block_id]
+    if not matching:
+        raise ReportValidationError(
+            f"BlockRef '{block_id}' not found in visual '{visual_id}' on page '{page_id}'."
+        )
+    current_version = matching[0].pinned_version
+    path = f"pages/{page_id}/visuals/{visual_id}/query/block_refs/{block_id}/pinned_version"
+    change = ReportChange(
+        path=path,
+        label=f"Unpin {block_id}",
+        before=current_version,
+        after=None,
+        affects_data=False,
+    )
+    return ReportProposal(
+        description=f"Unpin block '{block_id}' (restore to latest certified)",
+        changes=[change],
+    )
+
+
 def prompt_to_proposal(
     prompt: str,
     report: ExecutableReportSpec,

@@ -6,3 +6,4 @@ __pycache__/
 venv/
 .streamlit/secrets.toml
 data/semiconductor_demo/draft_reports/
+published/

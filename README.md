@@ -23,9 +23,10 @@ python -m pytest tests/ -q             # run full test suite
 | **Round 012** | ✅ Done | `ExecutableReportSpec`, proposal workflow, undo/redo, local draft save/load | +39 |
 | **Round 013** | ✅ Done | `CatalogBrowser`, `build_visual_from_selection`, `PublicationGate` (5 checks), `ReadonlyMode`, `CompositionPlanner`/`CompositionExecutor` (CTE cross-fact SQL), `RatioMetricExpr` | +54 |
 | **Round 014** | ✅ Done | `visual_order` dynamic canvas, `build_add_visual_proposal`, filter inheritance, `AuditMetadata`, `pin_block_version_proposal`, `grain_check()`, parameterized SQL in `CompositionExecutor` | +37 |
-| **Round 015** | 🔄 In Progress | Published report sharing, Pin Version UI, canvas reorder | — |
+| **Round 015** | ✅ Done | `PublishedReportStore` (share URL), `unpin_block_version_proposal`, Pin versions sidebar, `move_visual_up/down`, reorder proposal, `ANALYST_NAME` identity | +27 |
+| **Round 016** | 🔄 In Progress | Cross-page global filter sync, report title editing, `created_at` fix | — |
 
-**Total tests: 234 passing** (updated each round)
+**Total tests: 261 passing** (updated each round)
 
 ## Architecture
 

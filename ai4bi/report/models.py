@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -27,6 +28,10 @@ from ai4bi.query_spec import (
 
 class ReportValidationError(ValueError):
     """Raised when a report or proposal does not conform to the draft contract."""
+
+
+class PublishBlockedError(Exception):
+    """Raised when attempting to publish a report that has not passed the publication gate."""
 
 
 @dataclass
@@ -303,6 +308,34 @@ class ReportPageSpec:
         self.visuals[visual_id] = visual_spec
         self.visual_order.append(visual_id)
 
+    def move_visual_up(self, visual_id: str) -> None:
+        """Moves visual_id one position earlier in visual_order. No-op if already first."""
+        if visual_id not in self.visual_order:
+            raise ReportValidationError(
+                f"Visual '{visual_id}' is not in visual_order for page '{self.page_id}'."
+            )
+        idx = self.visual_order.index(visual_id)
+        if idx == 0:
+            return  # already first, no-op
+        self.visual_order[idx - 1], self.visual_order[idx] = (
+            self.visual_order[idx],
+            self.visual_order[idx - 1],
+        )
+
+    def move_visual_down(self, visual_id: str) -> None:
+        """Moves visual_id one position later in visual_order. No-op if already last."""
+        if visual_id not in self.visual_order:
+            raise ReportValidationError(
+                f"Visual '{visual_id}' is not in visual_order for page '{self.page_id}'."
+            )
+        idx = self.visual_order.index(visual_id)
+        if idx == len(self.visual_order) - 1:
+            return  # already last, no-op
+        self.visual_order[idx], self.visual_order[idx + 1] = (
+            self.visual_order[idx + 1],
+            self.visual_order[idx],
+        )
+
 
 @dataclass
 class ExecutableReportSpec:
@@ -424,6 +457,8 @@ def _get_path(report: ExecutableReportSpec, path: str) -> Any:
     if len(parts) == 3 and parts[0] == "pages" and parts[2] == "add_visual":
         # For add_visual the "current" state is None (visual does not exist yet).
         return None
+    if len(parts) == 3 and parts[0] == "pages" and parts[2] == "reorder_visual":
+        return list(report.pages[parts[1]].visual_order)
     if len(parts) == 7 and parts[0] == "pages" and parts[2] == "visuals":
         visual = report.pages[parts[1]].visuals[parts[3]]
         if parts[4:] == ["visualization", "extra", "line_color"]:
@@ -464,6 +499,18 @@ def _set_path(report: ExecutableReportSpec, path: str, value: Any) -> None:
         visual_spec = ReportVisualSpec.from_dict(value["visual"])
         page.add_visual(visual_id, visual_spec)
         return
+    if len(parts) == 3 and parts[0] == "pages" and parts[2] == "reorder_visual":
+        # value is {"visual_id": str, "direction": "up" | "down"}
+        page = report.pages[parts[1]]
+        visual_id = value["visual_id"]
+        direction = value["direction"]
+        if direction == "up":
+            page.move_visual_up(visual_id)
+        elif direction == "down":
+            page.move_visual_down(visual_id)
+        else:
+            raise ReportValidationError(f"Invalid reorder direction '{direction}'; must be 'up' or 'down'.")
+        return
     if len(parts) == 7 and parts[0] == "pages" and parts[2] == "visuals":
         visual = report.pages[parts[1]].visuals[parts[3]]
         if parts[4:] == ["visualization", "extra", "line_color"]:
@@ -491,7 +538,10 @@ def _set_path(report: ExecutableReportSpec, path: str, value: Any) -> None:
         for ref in visual.query.block_refs:
             if ref.block_id == block_id:
                 ref.pinned_version = value
-                if ref.pin_reason is None:
+                if value is None:
+                    # Unpinning — clear both fields
+                    ref.pin_reason = None
+                elif ref.pin_reason is None:
                     ref.pin_reason = "manually pinned by user"
                 return
         raise ReportValidationError(f"BlockRef '{block_id}' not found in visual '{parts[3]}'.")
@@ -535,6 +585,7 @@ class DraftReportStore:
         saved = report.deep_copy()
         saved.saved_at = datetime.now().astimezone().isoformat(timespec="seconds")
         saved.audit.last_modified_at = datetime.now(timezone.utc).isoformat()
+        saved.audit.last_modified_by = os.environ.get("ANALYST_NAME", "unknown")
         self.directory.mkdir(parents=True, exist_ok=True)
         path = self.directory / f"{self._safe_name(saved.report_id)}.json"
         path.write_text(json.dumps(saved.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
@@ -552,3 +603,53 @@ class DraftReportStore:
         return ExecutableReportSpec.from_dict(
             json.loads(candidate.read_text(encoding="utf-8"))
         )
+
+
+class PublishedReportStore:
+    """Filesystem store for formally published report snapshots."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = Path(root)
+
+    def publish(
+        self,
+        report: "ExecutableReportSpec",
+        gate_result: "Any",
+    ) -> "tuple[Path, str]":
+        """Publish a report if the gate result permits it.
+
+        Fails with PublishBlockedError when gate_result.can_publish is False.
+        Writes report JSON to root/<report_id>/<iso_timestamp>.json.
+        Sets report.audit.last_modified_at to now (UTC).
+        Returns (written_path, share_url) where
+            share_url = '?mode=readonly&draft=<written_path>'.
+        """
+        if not gate_result.can_publish:
+            raise PublishBlockedError(
+                "Cannot publish: one or more blocking gate checks failed."
+            )
+
+        now = datetime.now(timezone.utc)
+        timestamp = now.strftime("%Y%m%dT%H%M%S%fZ")
+
+        report_dir = self.root / report.report_id
+        report_dir.mkdir(parents=True, exist_ok=True)
+
+        snapshot = report.deep_copy()
+        snapshot.audit.last_modified_at = now.isoformat()
+
+        file_path = report_dir / f"{timestamp}.json"
+        file_path.write_text(
+            json.dumps(snapshot.to_dict(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        share_url = f"?mode=readonly&draft={file_path}"
+        return file_path, share_url
+
+    def list_published(self, report_id: str) -> "list[Path]":
+        """Return all published snapshots for report_id, newest first."""
+        report_dir = self.root / report_id
+        if not report_dir.exists():
+            return []
+        return sorted(report_dir.glob("*.json"), reverse=True)
