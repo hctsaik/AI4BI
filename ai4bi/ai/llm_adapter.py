@@ -88,7 +88,7 @@ _CLASSIFY_TOOL = {
                     "Intent-specific parameters.  Supply only the relevant "
                     "keys for the chosen intent:\n"
                     "- style_change: color (English name, e.g. 'red')\n"
-                    "- chart_type_change: target_type ('bar_chart' | 'line_chart')\n"
+                    "- chart_type_change: target_type ('bar_chart' | 'line_chart' | 'pie_chart' | 'scatter')\n"
                     "- dimension_change: granularity ('month'|'week'|'day'|'quarter'|'year')\n"
                     "- add_metric: metric_name (snake_case identifier)\n"
                     "- remove_metric: metric_name (snake_case identifier)\n"

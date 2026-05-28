@@ -25,7 +25,8 @@ class VisualType(str, Enum):
     kpi_card    = "kpi_card"
     line_chart  = "line_chart"
     bar_chart   = "bar_chart"
-    scatter     = "scatter"
+    pie_chart   = "pie_chart"    # Round 029
+    scatter     = "scatter"      # Round 029
     table       = "table"
     pivot       = "pivot"
     map         = "map"

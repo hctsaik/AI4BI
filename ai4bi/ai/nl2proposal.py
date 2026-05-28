@@ -65,6 +65,7 @@ _DIM_KEYWORD_MAP: dict[str, tuple[str, str, str, str | None]] = {
 _CHART_TYPE_SAFE_TRANSITIONS: dict[VisualType, VisualType] = {
     VisualType.bar_chart:  VisualType.line_chart,
     VisualType.line_chart: VisualType.bar_chart,
+    VisualType.pie_chart:  VisualType.bar_chart,
 }
 
 _CHART_TYPE_KEYWORDS: dict[str, VisualType] = {
@@ -76,6 +77,15 @@ _CHART_TYPE_KEYWORDS: dict[str, VisualType] = {
     "line chart": VisualType.line_chart,
     "折線圖": VisualType.line_chart,
     "trend chart": VisualType.line_chart,
+    "pie": VisualType.pie_chart,
+    "pie chart": VisualType.pie_chart,
+    "donut": VisualType.pie_chart,
+    "圓餅圖": VisualType.pie_chart,
+    "甜甜圈圖": VisualType.pie_chart,
+    "scatter": VisualType.scatter,
+    "scatter chart": VisualType.scatter,
+    "散點圖": VisualType.scatter,
+    "散佈圖": VisualType.scatter,
 }
 
 # ---------------------------------------------------------------------------
@@ -932,17 +942,17 @@ class NL2ProposalService:
                 target_scope=f"visual:{visual_id}",
             )
 
-        # Safety: only allow bar ↔ line transitions
-        if current_type not in _CHART_TYPE_SAFE_TRANSITIONS:
+        # Safety: block kpi_card and table (require different query contracts)
+        _UNSUPPORTED_SOURCE = {VisualType.kpi_card, VisualType.table, VisualType.pivot, VisualType.map}
+        _UNSUPPORTED_TARGET = {VisualType.kpi_card, VisualType.table, VisualType.pivot, VisualType.map}
+        if current_type in _UNSUPPORTED_SOURCE:
             return self._unsupported(
-                f"Chart type change is not supported for {current_type.value} visuals. "
-                "Only bar chart and line chart can be converted to each other.",
+                f"Chart type change is not supported for {current_type.value} visuals.",
                 target_scope=f"visual:{visual_id}",
             )
-        if target_type not in (VisualType.bar_chart, VisualType.line_chart):
+        if target_type in _UNSUPPORTED_TARGET:
             return self._unsupported(
-                "Only bar chart ↔ line chart conversions are supported. "
-                "table and kpi_card require different query contracts.",
+                "Cannot convert to table or kpi_card — they require different query contracts.",
                 target_scope=f"visual:{visual_id}",
             )
         if current_type == target_type:
@@ -1641,16 +1651,17 @@ def _visual_mentions_queue(visual_id: str, visual: ReportVisualSpec) -> bool:
 # ---------------------------------------------------------------------------
 
 def _looks_like_chart_type_change(prompt: str, normalized: str) -> bool:
-    """Detect requests to change chart type: bar chart, line chart, 折線圖, 長條圖."""
-    chart_keywords = ("bar chart", "line chart", "長條圖", "柱狀圖", "折線圖", "trend chart")
+    """Detect requests to change chart type."""
+    chart_keywords = (
+        "bar chart", "line chart", "pie chart", "scatter chart", "donut",
+        "長條圖", "柱狀圖", "折線圖", "trend chart", "圓餅圖", "甜甜圈圖", "散點圖", "散佈圖",
+    )
     change_keywords = ("change", "convert", "switch", "改成", "換成", "轉成", "改為", "換為")
     has_chart = any(k in normalized or k in prompt for k in chart_keywords)
     has_change = any(k in normalized or k in prompt for k in change_keywords)
-    # Also match "bar" or "line" with explicit change intent
     if has_chart and has_change:
         return True
-    # Chinese patterns: 把...改成長條圖
-    if re.search(r"(改|換|轉)(成|為|做)\s*(長條圖|折線圖|bar|line)", prompt):
+    if re.search(r"(改|換|轉)(成|為|做)\s*(長條圖|折線圖|圓餅圖|散點圖|bar|line|pie|scatter)", prompt):
         return True
     return False
 
