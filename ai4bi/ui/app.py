@@ -32,6 +32,8 @@ from ai4bi.ui.cache import QueryCache
 from ai4bi.ui.render_visual import render_visual
 from ai4bi.ui import workspace
 from ai4bi.ui.viewer import get_draft_path_from_params, is_readonly_mode, render_readonly_banner
+from ai4bi.report.metric_catalog import MetricCatalogService, MetricZone
+from ai4bi.blocks.contracts import LifecycleStatus
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
 _BLOCKS_DIR = _DEMO_ROOT / "blocks"
@@ -39,6 +41,44 @@ _SEMANTIC_MODEL = _DEMO_ROOT / "semantic_model.json"
 _DRAFT_STORE = _DEMO_ROOT / "draft_reports"
 _REGISTRY_DIR = _DEMO_ROOT / "registry"
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
+_ASSISTANT_PLAN_KEY = "visual_assistant_analysis_plan"
+_ASSISTANT_TRUST_KEY = "visual_assistant_trust_notes"
+
+
+def _is_sandbox_visual(visual, contracts: dict[str, "DataBlockContract"]) -> bool:
+    """Return True if any block_ref in this visual uses a non-certified contract."""
+    for ref in visual.query.block_refs:
+        contract = contracts.get(ref.block_id)
+        if contract is None or contract.block_lifecycle != LifecycleStatus.certified:
+            return True
+    return False
+
+
+def _has_sandbox_blocks(report: ExecutableReportSpec, contracts: dict) -> bool:
+    """Return True if any visual in the report uses a non-certified block."""
+    for page in report.pages.values():
+        for visual in page.visuals.values():
+            if _is_sandbox_visual(visual, contracts):
+                return True
+    return False
+
+
+def _render_sandbox_banner() -> None:
+    """Render the non-closeable amber sandbox banner (002-E consensus)."""
+    st.markdown(
+        '<div style="background:#fef3c7;border:2px solid #f59e0b;border-radius:6px;'
+        'padding:8px 14px;margin-bottom:10px;">'
+        '🔬 <strong>沙盒模式</strong> — 此報表含未認證積木，不可對外發布分享。'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+_SANDBOX_BADGE_HTML = (
+    '<span style="background:#fef3c7;color:#92400e;border:1px solid #f59e0b;'
+    'border-radius:4px;padding:2px 6px;font-size:0.75rem;vertical-align:middle;">'
+    '🔬 實驗中</span>'
+)
 
 
 def _active_cross_filter_for_page(page_id: str) -> dict | None:
@@ -229,6 +269,87 @@ def _render_published_snapshot_browser(
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 workspace.set_message(f"Published snapshot load rejected: {exc}")
             st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Metric Catalog panel (003-E three-zone design)
+# ---------------------------------------------------------------------------
+
+def _render_metric_catalog_panel(report: ExecutableReportSpec, cache: QueryCache) -> None:
+    """Render the three-zone Metric Catalog in the sidebar (design-council 003-E)."""
+    with st.expander("Metric Catalog", expanded=False):
+        if report.read_only:
+            st.warning("Read-only mode — adding metrics is disabled.")
+            return
+
+        contracts = _load_all_contracts()
+        try:
+            semantic_model = json.loads(_SEMANTIC_MODEL.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not load semantic model: {exc}")
+            return
+
+        catalog_result = MetricCatalogService().classify(semantic_model, contracts)
+
+        if catalog_result.is_empty():
+            st.info("No metrics found in the loaded semantic model.")
+            return
+
+        # ── Zone 1: Certified Ready ──────────────────────────────────────
+        if catalog_result.certified_ready:
+            st.markdown(
+                "🔵 **可直接使用** — 認證積木，可加入報表",
+                help="All required blocks are certified. Click + to add to report.",
+            )
+            for entry in catalog_result.certified_ready:
+                col_label, col_btn = st.columns([5, 1])
+                with col_label:
+                    st.caption(
+                        f"`{entry.metric_name}` [{entry.aggregation}] "
+                        f"— {entry.block_id}"
+                    )
+                with col_btn:
+                    if st.button("+", key=f"cat_add_{entry.block_id}_{entry.metric_name}",
+                                 help=f"Add {entry.metric_name} to report"):
+                        st.info(f"Add Visual 面板中選擇 {entry.metric_name} 以加入報表。")
+
+        # ── Zone 2: Needs Blocks ────────────────────────────────────────
+        if catalog_result.needs_blocks:
+            st.markdown(
+                "⬜ **需補充積木** — 認證指標，但缺少維度積木",
+                help="Metric is certified but some required dimension blocks are missing.",
+            )
+            for entry in catalog_result.needs_blocks:
+                with st.container():
+                    st.caption(
+                        f"`{entry.metric_name}` [{entry.aggregation}] — {entry.block_id}"
+                    )
+                    if entry.missing_blocks:
+                        missing_str = ", ".join(f"`{b}`" for b in entry.missing_blocks)
+                        st.caption(f"缺少: {missing_str}")
+
+        # ── Zone 3: Sandbox ─────────────────────────────────────────────
+        if catalog_result.sandbox:
+            st.markdown(
+                "🟡 **Sandbox 指標** — 未認證積木，僅供探索",
+                help="Owner block is not yet certified. Cannot be used in published reports.",
+            )
+            for entry in catalog_result.sandbox:
+                col_label, col_btn = st.columns([5, 1])
+                with col_label:
+                    st.caption(
+                        f"`{entry.metric_name}` [{entry.aggregation}] "
+                        f"— {entry.block_id}"
+                    )
+                with col_btn:
+                    if st.button(
+                        "+",
+                        key=f"cat_sandbox_{entry.block_id}_{entry.metric_name}",
+                        help=f"Add {entry.metric_name} (sandbox) to report",
+                    ):
+                        st.info(f"Add Visual 面板中選擇 {entry.metric_name} 以加入報表（沙盒模式）。")
+
+        st.caption("ℹ️ 點 + 後，至下方「＋ Add Visual」選取指標並設定圖表。")
 
 
 # ---------------------------------------------------------------------------
@@ -499,12 +620,14 @@ def _render_draft_controls(
         with button_cols[0]:
             if st.button("Undo", disabled=not workspace.can_undo(), width="stretch"):
                 workspace.undo()
+                _clear_visual_assistant_context()
                 _request_widget_sync()
                 cache.invalidate_all()
                 st.rerun()
         with button_cols[1]:
             if st.button("Redo", disabled=not workspace.can_redo(), width="stretch"):
                 workspace.redo()
+                _clear_visual_assistant_context()
                 _request_widget_sync()
                 cache.invalidate_all()
                 st.rerun()
@@ -526,6 +649,9 @@ def _render_draft_controls(
         if st.button("Clear query cache", width="stretch"):
             cache.invalidate_all()
             st.rerun()
+
+        st.markdown("---")
+        _render_metric_catalog_panel(report, cache)
 
         st.markdown("---")
         _render_add_visual_panel(report, cache)
@@ -554,10 +680,36 @@ def _proposal_rows(proposal: ReportProposal) -> list[dict[str, str]]:
     ]
 
 
+def _clear_visual_assistant_context() -> None:
+    st.session_state[_ASSISTANT_PLAN_KEY] = None
+    st.session_state[_ASSISTANT_TRUST_KEY] = ()
+
+
+def _store_visual_assistant_context(result) -> None:
+    st.session_state[_ASSISTANT_PLAN_KEY] = result.analysis_plan
+    st.session_state[_ASSISTANT_TRUST_KEY] = tuple(result.trust_notes)
+
+
+def _render_visual_assistant_context() -> None:
+    plan = st.session_state.get(_ASSISTANT_PLAN_KEY)
+    trust_notes = tuple(st.session_state.get(_ASSISTANT_TRUST_KEY) or ())
+    if plan is not None:
+        st.markdown("**Analysis Plan**")
+        st.write(plan.question)
+        for step in plan.steps:
+            st.markdown(f"- {step}")
+        if plan.suggested_visuals:
+            st.caption(f"Suggested visuals: {', '.join(plan.suggested_visuals)}")
+    if trust_notes:
+        with st.expander("Why this response is trusted", expanded=False):
+            for note in trust_notes:
+                st.markdown(f"- {note}")
+
+
 def _render_visual_assistant(report: ExecutableReportSpec, cache: QueryCache) -> None:
     with st.container(border=True):
         st.subheader("Visual Assistant")
-        st.caption("Prompt changes become a reviewable proposal before they affect the report.")
+        st.caption("Requests become a reviewable proposal or governed analysis plan before anything changes.")
         display_names = {
             component_id: visual.visualization.title or component_id
             for component_id, visual in report.pages["main"].visuals.items()
@@ -570,16 +722,22 @@ def _render_visual_assistant(report: ExecutableReportSpec, cache: QueryCache) ->
             disabled=report.read_only,
         )
         prompt = st.text_input(
-            "Describe a report change",
-            placeholder="例如：把趨勢線改成紅色；只看 PHOTO；依供應商比較等待時間",
+            "Ask Visual Assistant",
+            placeholder="make this line chart red, only show Logic-B, analyze queue time drivers",
             disabled=report.read_only,
         )
-        if st.button("Create Proposal", type="primary", disabled=report.read_only):
+        if st.button("Analyze Request", type="primary", disabled=report.read_only):
             result = prompt_to_proposal(prompt, report, selected)
-            workspace.set_message(result.message)
+            _store_visual_assistant_context(result)
             if result.proposal is not None:
                 workspace.stage_proposal(result.proposal)
+                workspace.set_message(result.message)
+            else:
+                workspace.cancel_pending()
+                workspace.set_message(result.message)
             st.rerun()
+
+        _render_visual_assistant_context()
 
         pending = workspace.pending_proposal()
         if pending is not None:
@@ -595,10 +753,12 @@ def _render_visual_assistant(report: ExecutableReportSpec, cache: QueryCache) ->
                     if workspace.accept_pending():
                         _request_widget_sync()
                         cache.invalidate_all()
+                    _clear_visual_assistant_context()
                     st.rerun()
             with actions[1]:
                 if st.button("Cancel Proposal", width="stretch"):
                     workspace.cancel_pending()
+                    _clear_visual_assistant_context()
                     st.rerun()
 
 
@@ -659,13 +819,22 @@ def _render_page(
     """Render all visuals for a single page."""
     page = report.pages[page_id]
     visuals = page.visuals
+    contracts = _load_all_contracts()
 
     def render(component_id: str, idx: int, order_len: int) -> None:
         visual = visuals[component_id]
         title = visual.visualization.title or component_id
+        is_sandbox = _is_sandbox_visual(visual, contracts)
+
         header_cols = st.columns([8, 1, 1])
         with header_cols[0]:
-            st.markdown(f"**{title}**")
+            if is_sandbox:
+                st.markdown(
+                    f"**{title}** &nbsp; {_SANDBOX_BADGE_HTML}",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(f"**{title}**")
         if not report.read_only:
             with header_cols[1]:
                 if st.button(
@@ -799,6 +968,12 @@ def main() -> None:
             "Editable validated demo draft: process movement facts use a certified direct "
             "relationship path to tool dimensions."
         )
+
+    # Sandbox banner: shown whenever the report contains non-certified blocks (002-E)
+    if not readonly:
+        _loaded_contracts = _load_all_contracts()
+        if _has_sandbox_blocks(report, _loaded_contracts):
+            _render_sandbox_banner()
 
     if workspace.message():
         st.info(workspace.message())

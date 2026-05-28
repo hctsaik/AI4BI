@@ -2769,3 +2769,59 @@ Round 018 candidates:
 4. Add AppTest coverage once published-store root injection is cleaner.
 
 > Round 017 聚焦三件事：(1) **Cross-filter broadcast** — `VisualQuerySpec.cross_filter_emit: DimensionRef | None` 設計已存在；Round 017 把 emit 值寫入 `st.session_state["cross_filters"]` 並在 `merged_filters()` 中套用，讓一個 visual 的點擊可以 filter 同 page 其他 visuals；(2) **Page delete proposal** — `delete_page(page_id)` on `ExecutableReportSpec`，proposal path `"pages/{page_id}/delete"`，undo 可恢復整個 page；(3) **Published snapshot browser** — sidebar 加一個 "Published versions" expander，呼叫 `list_published()` 顯示時間戳清單，點擊 "Load" 可以 stage 一個 restore proposal（只讀預覽）。`ReportSummary` dataclass 可作為次要目標。
+
+---
+
+### Round 018 — Metric Catalog + Sandbox Visual Language
+
+| 欄位 | 記錄 |
+| --- | --- |
+| Status | `completed` |
+| Date | `2026-05-28` |
+| Goal | 實作設計共識 003-E Metric Catalog 三分區 + 002-E Sandbox 視覺語言 |
+| Agent perspectives | Architecture planning agent + NL2 scope analysis agent |
+| Input | design-council-log.md 002-E, 003-E; 現有 BlockRegistry + DataBlockContract |
+
+#### 018-A. 實作交付物
+
+**新模組 `ai4bi/report/metric_catalog.py`**：
+- `MetricZone` enum：`CERTIFIED_READY / NEEDS_BLOCKS / SANDBOX`
+- `CatalogMetricEntry` dataclass：block_id, metric_name, display_name, aggregation, zone, missing_blocks
+- `MetricCatalogService.classify(semantic_model, contracts) -> CatalogResult`
+  - owner block lifecycle = certified AND all certified dim blocks → CERTIFIED_READY
+  - owner certified but missing/non-certified dim blocks → NEEDS_BLOCKS
+  - owner block 非 certified（validated/draft/etc.）→ SANDBOX
+
+**`app.py` 新增功能（002-E + 003-E）**：
+- `_is_sandbox_visual(visual, contracts)` — 逐 BlockRef 檢查 lifecycle
+- `_has_sandbox_blocks(report, contracts)` — 全報表 sandbox 掃描
+- `_render_sandbox_banner()` — 琥珀色不可關閉頂部橫幅（沙盒模式）
+- `_render_metric_catalog_panel(report, cache)` — 三分區 sidebar expander
+- `_render_page()` 更新 — 每個 sandbox visual 標題旁加 `🔬 實驗中` badge
+
+**Publication Gate**：block_lifecycle check 已在 Round 013 實作，sandbox blocks 自動擋 publish（既有邏輯驗證正確）。
+
+#### 018-B. 驗收測試
+
+- **Unit tests** (`tests/test_metric_catalog.py`)：14 tests — 三分區分類、missing blocks、全 certified、全 sandbox、aggregation 提取
+- **Playwright E2E** (`tests/e2e/test_round018_sandbox_ui.py`)：11 tests — banner 存在、三分區 catalog、sandbox badge、publication gate 封鎖
+
+| 指標 | 結果 |
+| Unit tests | 14 passed |
+| Playwright E2E | 11 passed |
+| Full regression | 329 passed |
+
+#### 018-C. Demo 狀態說明
+
+半導體 Demo 所有 block 均為 `validated`（非 `certified`），因此：
+- Sandbox banner 永遠顯示（符合設計意圖，Demo 是 validated draft）
+- Metric Catalog 所有指標顯示於 🟡 Sandbox 區（符合實際 lifecycle 狀態）
+- Publication Gate 正確封鎖發布（block_lifecycle check 失敗）
+
+#### Next Round Prompt
+
+> Round 019：依據 NL2 Scope Analysis Agent 的評估，新增三個受治理的 NL2 intent：
+> 1. `chart_type_change` — 「把這個改成長條圖」，affects_data=False，改 visualization.visual_type
+> 2. `dimension_change` — 「改用月份分組」，affects_data=True，改 query/dimensions（僅允許 semantic model 已認證維度）
+> 3. `add_metric` — 「也加上 move_count 指標」，affects_data=True，必須先驗證指標在 semantic model 中且 owner block 已認證
+> 每個 intent 必須同時測試「non-certified 被拒」case（governance 防護）。

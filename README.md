@@ -26,8 +26,9 @@ python -m pytest tests/ -q             # run full test suite
 | **Round 015** | ✅ Done | `PublishedReportStore` (share URL), `unpin_block_version_proposal`, Pin versions sidebar, `move_visual_up/down`, reorder proposal, `ANALYST_NAME` identity | +27 |
 | **Round 016** | ✅ Done | `global_filters`/`merged_filters()`, `build_global_filter_proposal`, title editing proposal, `created_at` first-save fix, `display_name`/`add_page()`, multi-page `st.tabs()` canvas | +34 |
 | **Round 017** | ✅ Done | `cross_filter_emit`, page-scoped `cross_filters`, page delete proposal, published snapshot browser/load, published readonly URL fix | +15 |
+| **Round 018** | ✅ Done | `MetricCatalogService` (3-zone: certified_ready/needs_blocks/sandbox), Metric Catalog sidebar panel, sandbox amber banner, per-visual 🔬 badge, Playwright E2E test suite | +25 (14 unit + 11 E2E) |
 
-**Total tests: 310 passing** (updated each round)
+**Total tests: 329 passing + 11 E2E** (updated each round)
 
 ## Architecture
 
