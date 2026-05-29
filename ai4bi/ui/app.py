@@ -1714,6 +1714,21 @@ def main() -> None:
     if workspace.message():
         st.info(workspace.message())
 
+    # Round 056: one-click Excel export of the whole report (one sheet per visual)
+    if not readonly:
+        try:
+            from ai4bi.analysis.excel_export import build_report_excel
+            _xlsx = build_report_excel(report, executor, active_filters)
+            st.download_button(
+                "⬇ 下載整份報表 (Excel)",
+                data=_xlsx,
+                file_name=f"{report.audit.report_id}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="report_xlsx_dl",
+            )
+        except Exception:  # noqa: BLE001 — export must never break the page
+            pass
+
     _trusted_markdown = (
         "- 示範資料：合成數據，非真實業務資料。\n"
         "- 退貨率（return_rate）以平均值計算，不加總，避免錯誤數字。\n"
