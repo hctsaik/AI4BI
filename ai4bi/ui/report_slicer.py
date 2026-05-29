@@ -34,7 +34,36 @@ from ai4bi.query_spec import FilterOperator, FilterSpec
 _SLICER_STATE_KEY = "report_slicers"   # dict: slicer_id → value
 _SLICER_CACHE_KEY = "report_slicers_cache"  # cached list[SlicerDefinition]
 
-SlicerType = Literal["categorical", "date_range", "numeric"]
+SlicerType = Literal["categorical", "date_range", "numeric", "relative_date"]
+
+# Round 069: relative-date presets, anchored on the data's latest date so they
+# never go stale as new data arrives.
+_REL_PRESETS = {
+    "all": "全部期間",
+    "last_7": "最近 7 天",
+    "last_30": "最近 30 天",
+    "last_90": "最近 90 天",
+    "mtd": "本月至今",
+    "ytd": "今年至今",
+}
+
+
+def _relative_bounds(preset: str, anchor):
+    """Return (lo, hi) dates for a relative preset, or (None, None) for 'all'."""
+    import datetime as _dt
+    if anchor is None:
+        return None, None
+    if preset == "last_7":
+        return anchor - _dt.timedelta(days=6), anchor
+    if preset == "last_30":
+        return anchor - _dt.timedelta(days=29), anchor
+    if preset == "last_90":
+        return anchor - _dt.timedelta(days=89), anchor
+    if preset == "mtd":
+        return anchor.replace(day=1), anchor
+    if preset == "ytd":
+        return anchor.replace(month=1, day=1), anchor
+    return None, None  # 'all'
 
 
 @dataclass
@@ -85,13 +114,15 @@ def _discover_slicers(
                     dates = pd.to_datetime(df[col_name].dropna()).dt.date.unique()
                     dates = sorted(dates)
                     if len(dates) >= 2:
+                        # Round 069: prefer a relative-date preset slicer (never
+                        # goes stale) over an absolute min/max range.
                         slicers.append(SlicerDefinition(
                             slicer_id=slicer_id,
                             label=col_name.replace("_", " ").title(),
                             block_id=block_id,
                             column=col_name,
-                            slicer_type="date_range",
-                            options=[],
+                            slicer_type="relative_date",
+                            options=list(_REL_PRESETS.keys()),
                             min_val=dates[0],
                             max_val=dates[-1],
                         ))
@@ -148,6 +179,17 @@ def get_slicer_filters(
                 value=str(val[1]),
                 inherit_global_filter=False,
             ))
+        elif slicer.slicer_type == "relative_date" and val and val != "all":
+            lo, hi = _relative_bounds(val, slicer.max_val)
+            if lo is not None and hi is not None:
+                filters.append(FilterSpec(
+                    block_id=slicer.block_id, column_name=slicer.column,
+                    operator=FilterOperator.gte, value=str(lo), inherit_global_filter=False,
+                ))
+                filters.append(FilterSpec(
+                    block_id=slicer.block_id, column_name=slicer.column,
+                    operator=FilterOperator.lte, value=str(hi), inherit_global_filter=False,
+                ))
     return filters
 
 
@@ -210,6 +252,18 @@ def render_report_slicer(
                     if new_list != current:
                         state[slicer.slicer_id] = new_list
                         changed = True
+            elif slicer.slicer_type == "relative_date":
+                current = state.get(slicer.slicer_id, "all")
+                opts = list(_REL_PRESETS.keys())
+                new_val = st.selectbox(
+                    slicer.label, opts,
+                    index=opts.index(current) if current in opts else 0,
+                    format_func=lambda k: _REL_PRESETS.get(k, k),
+                    key=f"slicer_{slicer.slicer_id}",
+                )
+                if new_val != current:
+                    state[slicer.slicer_id] = new_val
+                    changed = True
 
         if state:
             if st.button("清除所有篩選器", key="slicer_clear_all"):
