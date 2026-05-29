@@ -458,6 +458,10 @@ def render_visual(
     # ------------------------------------------------------------------
     # Happy path — dispatch to component
     # ------------------------------------------------------------------
+    # Round 054: result post-processing (running total / moving avg / Pareto)
+    if (style.extra or {}).get("postprocess"):
+        from ai4bi.analysis.postprocess import apply_postprocess
+        df = apply_postprocess(df, query_spec, style)
     # Round 047: period-over-period KPI (trailing-window delta). Falls back
     # to the plain all-period KPI if comparison data is unavailable.
     if style.visual_type == VisualType.kpi_card and style.extra.get("compare_period"):

@@ -319,6 +319,25 @@ def build_retail_demo_report() -> ExecutableReportSpec:
         col_span=12,
     )
 
+    # ── Product ABC / Pareto analysis (Round 054) ─────────────────────────────
+    table_abc = ReportVisualSpec(
+        "table_product_abc",
+        _q(
+            "table_product_abc",
+            metrics=[MetricRef(_BLOCK_ID, "revenue", "營收")],
+            dimensions=[DimensionRef(_BLOCK_ID, "product_name", "商品")],
+            sort=[SortSpec("營收", SortDirection.desc)],
+        ),
+        VisualizationSpec(
+            VisualType.table,
+            title="商品 ABC 分析（哪些商品貢獻 80% 營收）",
+            height_px=320,
+            # Round 054: post-process into a Pareto table (cumulative % + ABC class)
+            extra={"postprocess": "pareto", "postprocess_column": "營收"},
+        ),
+        col_span=12,
+    )
+
     visuals = {
         "kpi_revenue":           kpi_revenue,
         "kpi_orders":            kpi_orders,
@@ -328,6 +347,7 @@ def build_retail_demo_report() -> ExecutableReportSpec:
         "bar_revenue_by_store":  bar_store,
         "pie_revenue_by_category": pie_category,
         "table_top_products":    table_products,
+        "table_product_abc":     table_abc,
     }
     visual_order = list(visuals.keys())
 
