@@ -301,7 +301,9 @@ def build_retail_demo_report() -> ExecutableReportSpec:
             x_axis_label="日期",
             y_axis_label="營收（NT$）",
             height_px=320,
-            extra={"line_color": None},
+            # Round 074: weekly revenue trend + 4-week linear forecast
+            extra={"line_color": None,
+                   "trend_line": {"method": "linear", "forecast_periods": 4}},
         ),
         col_span=12,
     )

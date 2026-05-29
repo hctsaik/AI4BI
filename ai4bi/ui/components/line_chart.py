@@ -53,6 +53,23 @@ _PLOTLY_COLORS = [
 ]
 
 
+def _future_x(xs: list, n: int) -> list:
+    """Round 074: generate ``n`` future x-axis labels for a forecast.
+
+    If the last two x values parse as dates, extend by their step (so weekly/
+    monthly data continues correctly); otherwise fall back to '預測+k' labels.
+    """
+    try:
+        if len(xs) >= 2:
+            prev, last = pd.to_datetime(xs[-2]), pd.to_datetime(xs[-1])
+            if pd.notna(prev) and pd.notna(last):
+                step = last - prev
+                return [(last + step * (k + 1)).date().isoformat() for k in range(n)]
+    except Exception:  # noqa: BLE001
+        pass
+    return [f"預測+{k + 1}" for k in range(n)]
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -265,6 +282,20 @@ def render_line_chart(
                     line=dict(color=color, dash=dash, width=2),
                     showlegend=True,
                 ))
+                # Round 074: project the linear trend into the future
+                forecast_n = int(trend_cfg.get("forecast_periods", 0))
+                if method == "linear" and forecast_n > 0:
+                    fut_idx = np.arange(len(y_vals), len(y_vals) + forecast_n)
+                    fut_y = np.polyval(coeffs, fut_idx)
+                    fut_x = _future_x(list(df[x_col]), forecast_n)
+                    fig.add_trace(go.Scatter(
+                        x=[df[x_col].iloc[-1]] + fut_x,
+                        y=[float(trend[-1])] + [float(v) for v in fut_y],
+                        mode="lines+markers",
+                        name=f"預測 (+{forecast_n})",
+                        line=dict(color="#E45756", dash="dash", width=2),
+                        showlegend=True,
+                    ))
         except Exception:  # noqa: BLE001
             pass
 
