@@ -494,6 +494,11 @@ class NL2ProposalService:
             augmented = period_raw if period_raw else prompt
             return self._date_filter_change(augmented, _normalize(augmented), report)
 
+        if intent == "explain_change":  # Round 081
+            decomp = self._explain_change(prompt, normalized, report, contracts)
+            if decomp is not None:
+                return decomp
+
         if intent == "answer_metric":  # Round 078
             answer = self._answer_metric(prompt, normalized, report, semantic_model, contracts)
             if answer is not None:
@@ -543,6 +548,14 @@ class NL2ProposalService:
         # "how much revenue") asks for a number, not a canvas edit — answer it
         # before any edit-intent routing. Gated on explicit question markers so
         # imperative edit commands ("加一張營收圖") are never intercepted.
+        # Round 081: "why did <metric> change? decompose by <dim>" — checked
+        # before the plain-answer engine so a "why" question decomposes instead
+        # of returning a single total. Falls through if no dimension resolves.
+        if _looks_like_explain_change(prompt, normalized):
+            decomp = self._explain_change(prompt, normalized, report, contracts)
+            if decomp is not None:
+                return decomp
+
         if _looks_like_metric_question(prompt, normalized):
             answer = self._answer_metric(prompt, normalized, report, semantic_model, contracts)
             if answer is not None:
@@ -1058,6 +1071,100 @@ class NL2ProposalService:
             direct_answer=answer,
             trust_notes=notes,
             risk_level="low",
+        )
+
+    def _explain_change(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 081: answer "why did <metric> change?" by decomposing the
+        period-over-period delta across a dimension.
+
+        Reuses time_intelligence.compute_grouped_comparison (today only reachable
+        from the sidebar panel) to rank the biggest contributors to the change,
+        and returns them as a sentence. Returns None to fall through when a
+        metric/dimension/date can't be resolved.
+        """
+        executor = getattr(self, "_executor", None)
+        if executor is None or not contracts:
+            return None
+
+        idx = SchemaIndex.build(contracts)
+        metric = idx.best_metric_match(prompt, normalized)
+        if metric is None:
+            return None
+        block_id, metric_name, alias = metric.block_id, metric.metric_name, metric.alias
+
+        dim_col = _resolve_decomp_dimension(idx, prompt, normalized, contracts, block_id)
+        if dim_col is None:
+            return None
+        date_col = _find_date_column(contracts, block_id)
+        if date_col is None or date_col == dim_col:
+            return None
+
+        period = _extract_answer_period(normalized, prompt)
+        if period == "all":
+            period = "month"  # decomposition needs two comparable windows
+
+        from ai4bi.analysis.time_intelligence import compute_grouped_comparison
+        from ai4bi.query_spec import BlockRef, VisualQuerySpec
+
+        base = VisualQuerySpec(
+            spec_id=f"explain_{metric_name}",
+            block_refs=[BlockRef(block_id)],
+            metrics=[MetricRef(block_id, metric_name, alias)],
+            inherit_global_filter=False,
+        )
+        try:
+            df = compute_grouped_comparison(
+                executor, base, date_block_id=block_id, date_column=date_col,
+                dimension_col=dim_col, period=period, metric_col=alias,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        if df is None or df.empty:
+            return None
+
+        unit = _metric_unit(contracts, block_id, metric_name)
+        total = float(df["delta"].sum())
+        cur_total = float(df["current"].sum())
+        prev_total = float(df["previous"].sum())
+        delta_pct = ((cur_total - prev_total) / abs(prev_total) * 100.0) if prev_total else None
+        scope = _PERIOD_TITLE.get(period, period)
+
+        sentence = _compose_decomposition_sentence(
+            alias, dim_col, df, total, unit, scope
+        )
+        notes = [
+            f"指標「{alias}」依「{dim_col}」拆解（{scope} vs 前一期），重用治理查詢路徑。",
+            "依各維度對總變化的貢獻排序，未產生自由 SQL。",
+        ]
+        answer = DirectAnswer(
+            question=prompt.strip(),
+            metric_block_id=block_id,
+            metric_name=metric_name,
+            metric_alias=alias,
+            sentence=sentence,
+            value=cur_total,
+            period=period,
+            previous=prev_total,
+            delta_pct=delta_pct,
+            unit=unit,
+            trust_notes=notes,
+        )
+        intent = AIIntent(
+            intent_kind="analysis_request",
+            target_scope="semantic_model",
+            selection=SemanticSelection(metric_block_id=block_id, metric_name=metric_name),
+            trust_notes=notes,
+            risk_level="low",
+        )
+        return NL2ProposalResult(
+            intent=intent, message=sentence, direct_answer=answer,
+            trust_notes=notes, risk_level="low",
         )
 
     def _build_answer_kpi_proposal(
@@ -2209,6 +2316,88 @@ def _format_metric_value(value: float | None, unit: str) -> str:
     if abs(value - round(value)) < 1e-9:
         return f"{value:,.0f}"
     return f"{value:,.2f}"
+
+
+# --- Round 081: explain-change (decomposition) parsing -----------------------
+
+_EXPLAIN_TRIGGERS: tuple[str, ...] = (
+    "為何", "為什麼", "為甚麼", "原因", "怎麼會", "怎會",
+    "變化分解", "拆解", "分解", "貢獻",
+    "why did", "why is", "why has", "what caused", "what drove",
+    "decompose", "break down", "breakdown", "contribut",
+)
+_CHANGE_WORDS: tuple[str, ...] = (
+    "變", "升", "降", "增", "減", "漲", "跌", "掉", "成長", "衰退",
+    "change", "changed", "dip", "drop", "fell", "fall", "rose", "rise",
+    "grew", "grow", "increase", "decrease", "decline", "down", "up",
+)
+# "by <dim>" / "依/按/照 <dim>" decomposition-axis markers.
+_DECOMP_BY_MARKERS: tuple[str, ...] = ("依", "按", "照", "以", "by ", "per ", "across ")
+
+
+def _looks_like_explain_change(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    has_trigger = any(t in hay for t in _EXPLAIN_TRIGGERS)
+    if not has_trigger:
+        return False
+    # A "why" / "原因" needs an accompanying change word; explicit decompose
+    # verbs ("拆解", "decompose", "break down") stand on their own.
+    explicit = any(t in hay for t in ("變化分解", "拆解", "分解", "decompose", "break down", "breakdown"))
+    return explicit or any(c in hay for c in _CHANGE_WORDS)
+
+
+def _resolve_decomp_dimension(idx, prompt: str, normalized: str, contracts, block_id: str):
+    """Pick a categorical column on ``block_id`` to decompose by.
+
+    Prefers an explicit "by <dim>" phrase, else the best dimension keyword
+    match; rejects date columns (decomposition needs a categorical axis).
+    """
+    hay = f"{prompt.lower()} {normalized}"
+
+    def _is_categorical(col: str) -> bool:
+        contract = contracts.get(block_id)
+        for c in getattr(contract, "columns", None) or []:
+            if c.name == col:
+                if getattr(c, "data_type", "") in ("string", "str", "object", "text", "varchar"):
+                    return True
+                return False
+        return False
+
+    # Try the token right after a "by"/"依" marker first.
+    for marker in _DECOMP_BY_MARKERS:
+        i = hay.find(marker)
+        if i >= 0:
+            tail = hay[i + len(marker):].strip()
+            token = re.split(r"[\s,。.，?？]+", tail)[0] if tail else ""
+            if token:
+                entry = idx.find_dim(token)
+                if entry and entry.block_id == block_id and _is_categorical(entry.column_name):
+                    return entry.column_name
+
+    best = idx.best_dim_match(prompt, normalized)
+    if best and best.block_id == block_id and _is_categorical(best.column_name):
+        return best.column_name
+    return None
+
+
+def _compose_decomposition_sentence(alias, dim_col, df, total, unit, scope) -> str:
+    """Build the ranked-contributor answer sentence for a change decomposition."""
+    arrow = "成長" if total >= 0 else "下降"
+    head = f"{scope}「{alias}」整體{arrow} {_format_metric_value(abs(total), unit)}，依「{dim_col}」拆解："
+    dim_name = df.columns[0]
+    # df is sorted by delta ascending (biggest decliners first).
+    decliners = df[df["delta"] < 0].head(2)
+    risers = df[df["delta"] > 0].sort_values("delta", ascending=False).head(2)
+    parts: list[str] = []
+    for _, row in decliners.iterrows():
+        parts.append(f"{row[dim_name]} ↓{_format_metric_value(abs(row['delta']), unit)}"
+                     f"（佔{abs(row['contribution_pct']):.0f}%）")
+    for _, row in risers.iterrows():
+        parts.append(f"{row[dim_name]} ↑{_format_metric_value(abs(row['delta']), unit)}"
+                     f"（佔{abs(row['contribution_pct']):.0f}%）")
+    if not parts:
+        return head + "各維度變化不顯著。"
+    return head + "；".join(parts) + "。"
 
 
 # --- Round 080: measure-filter (HAVING) parsing -----------------------------
