@@ -136,6 +136,75 @@ def _period_spec(
     )
 
 
+def compute_grouped_comparison(
+    executor,
+    base_spec: VisualQuerySpec,
+    *,
+    date_block_id: str,
+    date_column: str,
+    dimension_col: str,
+    period: str,
+    metric_col: str,
+    anchor: Optional[date] = None,
+) -> pd.DataFrame:
+    """Per-dimension current-vs-previous deltas (Round 071).
+
+    Runs the metric GROUPED BY ``dimension_col`` for the current and previous
+    trailing windows and returns a DataFrame:
+        [dimension_col, current, previous, delta, delta_pct, contribution_pct]
+    sorted by delta ascending (biggest decliners first). Answers
+    "why did <metric> change?" by store/category, same-store YoY, etc.
+    Returns an empty DataFrame if the period/anchor can't be resolved.
+    """
+    days = _PERIOD_DAYS.get(period)
+    if days is None:
+        return pd.DataFrame()
+    if anchor is None:
+        anchor = latest_date(executor, base_spec, date_block_id, date_column)
+    if anchor is None:
+        return pd.DataFrame()
+
+    cur_start = anchor - timedelta(days=days - 1)
+    prev_end = cur_start - timedelta(days=1)
+    prev_start = prev_end - timedelta(days=days - 1)
+
+    dim = DimensionRef(date_block_id, dimension_col, dimension_col)
+
+    def _grouped(start: date, end: date, suffix: str) -> pd.DataFrame:
+        spec = _period_spec(base_spec, date_block_id, date_column, start, end, suffix)
+        spec = replace(spec, dimensions=[dim], sort=[], limit=None)
+        try:
+            return executor.run(spec)
+        except Exception:  # noqa: BLE001
+            return pd.DataFrame()
+
+    cur = _grouped(cur_start, anchor, "gcur")
+    prev = _grouped(prev_start, prev_end, "gprev")
+    if cur.empty and prev.empty:
+        return pd.DataFrame()
+
+    def _norm(df: pd.DataFrame, value_name: str) -> pd.DataFrame:
+        if df.empty or dimension_col not in df.columns:
+            return pd.DataFrame(columns=[dimension_col, value_name])
+        col = metric_col if metric_col in df.columns else df.columns[-1]
+        return df[[dimension_col, col]].rename(columns={col: value_name})
+
+    merged = _norm(cur, "current").merge(
+        _norm(prev, "previous"), on=dimension_col, how="outer"
+    ).fillna(0.0)
+    merged["delta"] = merged["current"] - merged["previous"]
+
+    def _pct(row) -> float:
+        return (row["delta"] / abs(row["previous"]) * 100.0) if row["previous"] else float("nan")
+
+    merged["delta_pct"] = merged.apply(_pct, axis=1).round(1)
+    total_change = merged["delta"].sum()
+    merged["contribution_pct"] = (
+        (merged["delta"] / total_change * 100.0).round(1) if total_change else 0.0
+    )
+    return merged.sort_values("delta").reset_index(drop=True)
+
+
 def _scalar(df: Optional[pd.DataFrame], col: str) -> Optional[float]:
     if df is None or df.empty:
         return None

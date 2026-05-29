@@ -56,6 +56,7 @@ from ai4bi.ui.cross_fact_panel import render_cross_fact_panel  # Round 055
 from ai4bi.ui.what_if_panel import render_what_if_panel, get_parameters  # Round 060
 from ai4bi.ui.bookmark_panel import render_bookmark_panel  # Round 061
 from ai4bi.ui.cohort_panel import render_cohort_panel  # Round 062
+from ai4bi.ui.change_panel import render_change_panel  # Round 071
 from ai4bi.report.share_auth import hash_password, verify_password  # Round 064
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
@@ -951,6 +952,10 @@ def _render_draft_controls(
 
         # ── Zone 3d6: 客戶留存分析 (Round 062) ────────────────────────────
         render_cohort_panel()
+
+        # ── Zone 3d7: 變化分解 (Round 071) ────────────────────────────────
+        if executor is not None:
+            render_change_panel(_load_all_contracts(), executor)
 
         # ── Zone 3d5: 書籤 / 儲存檢視 (Round 061) ──────────────────────────
         render_bookmark_panel(cache)
