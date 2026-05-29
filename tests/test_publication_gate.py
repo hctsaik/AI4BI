@@ -154,15 +154,19 @@ def test_relationship_certified_passes_for_demo_report(demo_report, contracts, s
 
 
 # ---------------------------------------------------------------------------
-# Test 8: policy_check is non-blocking and passes (deferred)
+# Test 8: policy_check is non-blocking and honestly reports "not enforced"
 # ---------------------------------------------------------------------------
 
-def test_policy_check_is_non_blocking_and_passes(demo_report, contracts, semantic_model):
-    """policy_check is explicitly deferred; must pass=True, blocking=False."""
+def test_policy_check_is_non_blocking_and_not_enforced(demo_report, contracts, semantic_model):
+    """Round 057 honesty fix: RBAC/RLS is NOT enforced, so the check must NOT
+    assert passed=True. It reports passed=False (a warning) but stays
+    non-blocking so PLG publishing still works."""
     result = run_publication_gate(demo_report, contracts, semantic_model)
     policy_check = next(c for c in result.checks if c.check_name == "policy_check")
-    assert policy_check.passed is True
+    assert policy_check.passed is False
     assert policy_check.blocking is False
+    # must not silently claim enforcement
+    assert "RBAC" in policy_check.message or "尚未啟用" in policy_check.message
 
 
 # ---------------------------------------------------------------------------

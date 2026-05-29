@@ -149,11 +149,22 @@ def _check_policy(
     report: ExecutableReportSpec,  # noqa: ARG001
     contracts: dict[str, DataBlockContract],  # noqa: ARG001
 ) -> GateCheckResult:
-    """Audience role policy check — not yet enforced in this MVP."""
+    """Audience role policy check.
+
+    Round 057 (honesty fix): role-based access control (RBAC) and row-level
+    security (RLS) are NOT enforced in this MVP, and read-only share links are
+    not password-protected. Previously this returned passed=True ("not yet
+    enforced"), which actively asserted a guarantee the system does not provide.
+    We now return passed=False (non-blocking) so the gate surfaces the real risk
+    instead of hiding it — PLG publishing still works, but the user is warned.
+    """
     return GateCheckResult(
         check_name="policy_check",
-        passed=True,
-        message="Not yet enforced — role-based policy checks are deferred to a future gate version.",
+        passed=False,
+        message=(
+            "⚠️ 角色權限（RBAC/RLS）尚未啟用：此版本不依使用者角色限制資料存取，"
+            "且唯讀分享連結未加密碼保護。請勿用於發布機密或個人資料。"
+        ),
         blocking=False,
     )
 
