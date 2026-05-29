@@ -249,21 +249,23 @@ def build_retail_demo_report() -> ExecutableReportSpec:
         col_span=12,
     )
 
-    # ── Revenue by store (bar) ────────────────────────────────────────────────
+    # ── Revenue drill-down: 地區 › 門市 › 商品 (bar) ───────────────────────────
     bar_store = ReportVisualSpec(
         "bar_revenue_by_store",
         _q(
             "bar_revenue_by_store",
             metrics=[MetricRef(_BLOCK_ID, "revenue", "營收")],
-            dimensions=[DimensionRef(_BLOCK_ID, "store_name", "門市")],
+            dimensions=[DimensionRef(_BLOCK_ID, "city", "地區")],
             sort=[SortSpec("營收", SortDirection.desc)],
         ),
         VisualizationSpec(
             VisualType.bar_chart,
-            title="各門市營收排名",
-            x_axis_label="門市",
+            title="營收下鑽（地區 › 門市 › 商品）",
+            x_axis_label="地區",
             y_axis_label="營收（NT$）",
             height_px=300,
+            # Round 049: click a bar to drill into the next level
+            extra={"drill_hierarchy": ["city", "store_name", "product_name"]},
         ),
         col_span=6,
     )

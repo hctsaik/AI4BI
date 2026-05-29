@@ -45,6 +45,9 @@ from ai4bi.ui.audit_trail import render_audit_trail, record_change  # Round 040
 from ai4bi.ui.report_slicer import render_report_slicer, get_slicer_filters, SlicerDefinition  # Round 041
 from ai4bi.ui.connector_panel import render_connector_panel  # Round 043
 from ai4bi.ui.alert_panel import render_alert_manager, render_alert_banner  # Round 048
+from ai4bi.ui.drilldown import (  # Round 049
+    apply_drill, process_pending_drill, render_drill_controls, hierarchy_of,
+)
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
 _BLOCKS_DIR = _DEMO_ROOT / "blocks"
@@ -1470,6 +1473,10 @@ def _render_visual_cell(
 
     st.session_state["_current_render_page_id"] = page_id
     query = replace(visual.query, data_version=f"draft-r{report.revision}")
+    # Round 049: drill-down breadcrumb + per-level query rewrite (if drillable)
+    if hierarchy_of(visual.visualization):
+        render_drill_controls(component_id, visual.visualization)
+        query = apply_drill(query, component_id, visual.visualization)
     query = _apply_cross_filter_to_query(query, _active_cross_filter_for_page(page_id), component_id, contracts)
     # Round 041: inject report-level slicer filters
     _slicers = st.session_state.get("_active_slicers", [])
@@ -1544,6 +1551,10 @@ def _render_page(
 ) -> None:
     """Render all visuals for a single page using a 12-column grid layout."""
     page = report.pages[page_id]
+    # Round 049: consume any pending drill-down click before visuals render,
+    # so it doesn't leak to neighbours as a cross-filter.
+    if process_pending_drill(report, page_id):
+        st.rerun()
     _render_grain_mismatch_warning(page)
     visuals = page.visuals
     contracts = _load_all_contracts()
