@@ -71,6 +71,7 @@ _PROJECT_ROOT = Path(__file__).parent.parent.parent
 _ASSISTANT_PLAN_KEY = "visual_assistant_analysis_plan"
 _ASSISTANT_TRUST_KEY = "visual_assistant_trust_notes"
 _ASSISTANT_ANSWER_KEY = "visual_assistant_direct_answer"  # Round 078
+_ASSISTANT_TABLE_KEY = "visual_assistant_result_table"  # Round 086
 _CHAT_HISTORY_KEY = "chat_history"
 
 
@@ -92,7 +93,8 @@ def _record_chat(prompt: str, visual_id: str, result) -> None:
         "icon": icon_map.get(kind, "💬"),
         "message": result.message[:80],
         "ok": result.proposal is not None or getattr(result, "is_mixed", False)
-        or result.analysis_plan is not None or getattr(result, "direct_answer", None) is not None,
+        or result.analysis_plan is not None or getattr(result, "direct_answer", None) is not None
+        or getattr(result, "result_table", None) is not None,
     })
     # Keep last 20 entries
     st.session_state[_CHAT_HISTORY_KEY] = st.session_state[_CHAT_HISTORY_KEY][-20:]
@@ -1041,16 +1043,31 @@ def _clear_visual_assistant_context() -> None:
     st.session_state[_ASSISTANT_PLAN_KEY] = None
     st.session_state[_ASSISTANT_TRUST_KEY] = ()
     st.session_state[_ASSISTANT_ANSWER_KEY] = None
+    st.session_state[_ASSISTANT_TABLE_KEY] = None
 
 
 def _store_visual_assistant_context(result) -> None:
     # Use getattr for robustness against Streamlit hot-reload module cache mismatches.
     st.session_state[_ASSISTANT_PLAN_KEY] = getattr(result, "analysis_plan", None)
     st.session_state[_ASSISTANT_ANSWER_KEY] = getattr(result, "direct_answer", None)
+    st.session_state[_ASSISTANT_TABLE_KEY] = getattr(result, "result_table", None)
     st.session_state[_ASSISTANT_TRUST_KEY] = tuple(getattr(result, "trust_notes", ()))
 
 
 def _render_visual_assistant_context() -> None:
+    # Round 086: a tabular analytics answer (churn / decline / basket).
+    table = st.session_state.get(_ASSISTANT_TABLE_KEY)
+    if table is not None:
+        try:
+            import pandas as _pd
+            if isinstance(table, _pd.DataFrame) and not table.empty:
+                st.dataframe(table, width="stretch", hide_index=True)
+                csv = table.to_csv(index=False).encode("utf-8-sig")
+                st.download_button("⬇ 下載名單 CSV", data=csv,
+                                   file_name="answer_list.csv", key="answer_table_csv")
+        except Exception:  # noqa: BLE001 — table render must never break the page
+            pass
+
     # Round 078: a direct computed answer is shown most prominently.
     answer = st.session_state.get(_ASSISTANT_ANSWER_KEY)
     if answer is not None:

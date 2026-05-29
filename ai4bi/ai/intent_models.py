@@ -96,6 +96,7 @@ class NL2ProposalResult:
     proposal: ReportProposal | None = None
     analysis_plan: AnalysisPlan | None = None
     direct_answer: "DirectAnswer | None" = None  # Round 078: computed NL answer
+    result_table: Any = None  # Round 086: a result DataFrame to show in the answer pane
     refusal: GovernanceRefusal | None = None
     trust_notes: list[str] = field(default_factory=list)
     risk_level: RiskLevel = "low"

@@ -497,6 +497,11 @@ class NL2ProposalService:
             augmented = period_raw if period_raw else prompt
             return self._date_filter_change(augmented, _normalize(augmented), report)
 
+        if intent == "panel_analysis":  # Round 086
+            panel = self._run_panel_analysis(prompt, normalized, contracts)
+            if panel is not None:
+                return panel
+
         if intent == "explain_change":  # Round 081
             decomp = self._explain_change(prompt, normalized, report, contracts)
             if decomp is not None:
@@ -551,6 +556,14 @@ class NL2ProposalService:
         # "how much revenue") asks for a number, not a canvas edit — answer it
         # before any edit-intent routing. Gated on explicit question markers so
         # imperative edit commands ("加一張營收圖") are never intercepted.
+        # Round 086: route churn / declining-streak / basket questions to the
+        # pre-built pandas analytics engines. Checked early — these are specific
+        # named analyses, more specific than a plain metric question.
+        if _detect_panel_analysis(prompt, normalized) is not None:
+            panel = self._run_panel_analysis(prompt, normalized, contracts)
+            if panel is not None:
+                return panel
+
         # Round 081: "why did <metric> change? decompose by <dim>" — checked
         # before the plain-answer engine so a "why" question decomposes instead
         # of returning a single total. Falls through if no dimension resolves.
@@ -967,6 +980,75 @@ class NL2ProposalService:
             proposal=merged,
             trust_notes=notes,
             risk_level="low",
+        )
+
+    def _run_panel_analysis(
+        self,
+        prompt: str,
+        normalized: str,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 086: route a question to a pre-built pandas analytics engine.
+
+        Churn/RFM, declining-streaks and market-basket are fully implemented and
+        tested but were sidebar-only. This bridges them to the ask box: it picks
+        the analysis from keywords, auto-guesses the columns (same heuristics the
+        panels use), materialises the fact, runs the engine, and returns a
+        summary sentence + the result table. Returns None to fall through.
+        """
+        if not contracts:
+            return None
+        kind = _detect_panel_analysis(prompt, normalized)
+        if kind is None:
+            return None
+
+        from ai4bi.blocks.contracts import BlockType
+        from ai4bi.blocks.datastore import materialize_dataframe
+
+        # Pick the fact block whose columns best fit this analysis.
+        facts = {
+            bid: c for bid, c in contracts.items()
+            if getattr(c, "block_type", None) in (
+                BlockType.fact, BlockType.snapshot_fact, BlockType.target_fact)
+        }
+        if not facts:
+            return None
+
+        best = _pick_fact_for_analysis(facts, kind)
+        if best is None:
+            return None
+        block_id, contract, cols_map = best
+
+        if kind == "decline":
+            # Period: explicit word wins; default weekly (more periods available).
+            period = _extract_answer_period(normalized, prompt)
+            cols_map["period"] = {"all": "week", "year": "month"}.get(period, period)
+            sm = re.search(r"連續\s*(\d+)|(\d+)\s*(?:期|個月|個週|週|周|months?)", f"{prompt} {normalized}")
+            cols_map["min_streak"] = int(next(g for g in sm.groups() if g)) if sm else 3
+
+        try:
+            df = materialize_dataframe(contract)
+        except Exception:  # noqa: BLE001 — external connectors aren't materialisable
+            return None
+        if df is None or df.empty:
+            return None
+
+        table, sentence = _execute_panel_analysis(kind, df, cols_map)
+        if table is None or table.empty:
+            return None
+
+        notes = [
+            f"使用「{_PANEL_LABELS[kind]}」分析（純 pandas，於記憶體資料計算）。",
+            f"自動選用欄位：{', '.join(f'{k}={v}' for k, v in cols_map.items() if v)}。",
+            f"來源資料集：{block_id}。",
+        ]
+        intent = AIIntent(
+            intent_kind="analysis_request", target_scope="semantic_model",
+            trust_notes=notes, risk_level="low",
+        )
+        return NL2ProposalResult(
+            intent=intent, message=sentence, result_table=table,
+            trust_notes=notes, risk_level="low",
         )
 
     def _answer_metric(
@@ -2401,6 +2483,119 @@ def _format_metric_value(value: float | None, unit: str) -> str:
     if abs(value - round(value)) < 1e-9:
         return f"{value:,.0f}"
     return f"{value:,.2f}"
+
+
+# --- Round 086: NL routing to pandas analytics engines -----------------------
+
+_PANEL_LABELS = {
+    "churn": "客戶流失風險 / RFM",
+    "decline": "連續下滑偵測",
+    "basket": "商品關聯（常一起買）",
+}
+_CHURN_TRIGGERS = ("流失", "churn", "rfm", "快走", "要走", "好久沒來", "沉睡", "回購率", "誰快不來", "快不來")
+_DECLINE_TRIGGERS = ("連續下滑", "連續下跌", "一直下滑", "持續下滑", "持續下跌", "持續衰退",
+                     "連續衰退", "一直在掉", "越來越差", "走弱", "連續成長", "持續成長",
+                     "keeps declining", "declining", "consecutive", "months in a row",
+                     "in a row", "streak")
+_BASKET_TRIGGERS = ("一起買", "一起購買", "常買在一起", "搭配", "連帶", "商品關聯", "組合銷售",
+                    "bought together", "market basket", "affinity", "cross-sell", "cross sell")
+
+_CUSTOMER_HINTS = ("customer", "member", "client", "user", "客戶", "顧客", "會員")
+_DATE_COL_HINTS = ("date", "_at", "time", "日期", "時間")
+_MONEY_HINTS = ("revenue", "amount", "sales", "spend", "price", "total", "營收", "金額", "銷售", "消費")
+_ENTITY_HINTS = ("product", "sku", "item", "store", "category", "商品", "品項", "門市", "品類")
+_VALUE_HINTS = ("revenue", "amount", "sales", "qty", "quantity", "count", "營收", "金額", "銷售", "數量")
+_PRODUCT_HINTS = ("product", "item", "sku", "商品", "品項")
+_BASKET_KEY_HINTS = ("customer", "member", "date", "_at", "store", "客戶", "門市", "日期")
+
+
+def _detect_panel_analysis(prompt: str, normalized: str) -> str | None:
+    hay = f"{prompt.lower()} {normalized}"
+    if any(t in hay for t in _CHURN_TRIGGERS):
+        return "churn"
+    if any(t in hay for t in _DECLINE_TRIGGERS):
+        return "decline"
+    if any(t in hay for t in _BASKET_TRIGGERS):
+        return "basket"
+    return None
+
+
+def _guess_col(cols: list[str], hints: tuple[str, ...], exclude: set[str] | None = None) -> str | None:
+    exclude = exclude or set()
+    for c in cols:
+        if c in exclude:
+            continue
+        if any(h in c.lower() for h in hints):
+            return c
+    return None
+
+
+def _pick_fact_for_analysis(facts: dict, kind: str):
+    """Choose the fact block whose columns best satisfy ``kind`` + its column map."""
+    best = None
+    best_score = 0
+    for bid, contract in facts.items():
+        cols = [c.name for c in getattr(contract, "columns", [])]
+        if kind == "churn":
+            cmap = {
+                "customer": _guess_col(cols, _CUSTOMER_HINTS),
+                "date": _guess_col(cols, _DATE_COL_HINTS),
+                "money": _guess_col(cols, _MONEY_HINTS),
+            }
+            required = ("customer", "date", "money")
+        elif kind == "decline":
+            entity = _guess_col(cols, _ENTITY_HINTS)
+            date = _guess_col(cols, _DATE_COL_HINTS)
+            value = _guess_col(cols, _VALUE_HINTS, exclude={entity} if entity else set())
+            cmap = {"entity": entity, "date": date, "value": value}
+            required = ("entity", "date", "value")
+        else:  # basket
+            product = _guess_col(cols, _PRODUCT_HINTS)
+            keys = [c for c in cols
+                    if any(h in c.lower() for h in _BASKET_KEY_HINTS) and c != product]
+            cmap = {"product": product, "basket": keys[:3]}
+            required = ("product", "basket")
+        score = sum(1 for r in required if cmap.get(r))
+        if score == len(required) and score > best_score:
+            best, best_score = (bid, contract, cmap), score
+    return best
+
+
+def _execute_panel_analysis(kind: str, df, cols_map: dict):
+    """Run the chosen analysis; return (result_table, summary_sentence)."""
+    if kind == "churn":
+        from ai4bi.analysis.rfm import compute_rfm
+        table = compute_rfm(df, cols_map["customer"], cols_map["date"], cols_map["money"])
+        if table is None or table.empty:
+            return table, ""
+        at_risk = int(table["流失風險"].sum())
+        top = table[table["流失風險"]].head(3)
+        names = "、".join(str(x) for x in top[cols_map["customer"]].tolist())
+        sentence = (f"共 {len(table)} 位客戶，其中 ⚠️ {at_risk} 位有流失風險。"
+                    + (f"最該優先聯繫（高價值且久未回購）：{names}。" if names else ""))
+        return table.head(25), sentence
+    if kind == "decline":
+        from ai4bi.analysis.trends import declining_streaks
+        period = cols_map.get("period", "month")
+        min_streak = cols_map.get("min_streak", 3)
+        table = declining_streaks(df, cols_map["entity"], cols_map["date"], cols_map["value"],
+                                  period=period, min_streak=min_streak)
+        if table is None or table.empty:
+            return table, ""
+        worst = table.iloc[0]
+        sentence = (f"{len(table)} 個對象連續下滑 ≥ {min_streak} 期。"
+                    f"最嚴重：{worst[cols_map['entity']]}（連續 {worst['連續期數']} 期，"
+                    f"最新一期 {worst['變化%']}%）。")
+        return table.head(25), sentence
+    # basket
+    from ai4bi.analysis.basket import basket_affinity
+    table = basket_affinity(df, cols_map["product"], cols_map["basket"])
+    if table is None or table.empty:
+        return table, ""
+    top = table.iloc[0]
+    sentence = (f"找到 {len(table)} 組常一起購買的商品。最強關聯："
+                f"「{top['商品A']}」＋「{top['商品B']}」（提升度 {top['提升度']}）。")
+    return table.head(25), sentence
 
 
 # --- Round 084: KPI target / pacing parsing ----------------------------------

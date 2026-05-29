@@ -19,6 +19,7 @@ class ProposalResult:
     message: str
     analysis_plan: AnalysisPlan | None = None
     direct_answer: DirectAnswer | None = None  # Round 078: computed NL answer
+    result_table: object | None = None  # Round 086: analytics result DataFrame
     trust_notes: tuple[str, ...] = ()
     refusal: str | None = None
     split_proposals: tuple[ReportProposal, ...] = ()
@@ -281,6 +282,15 @@ def prompt_to_proposal(
             trust_notes=tuple(ai_result.trust_notes),
             split_proposals=ai_result.split_proposals,
             intent_kind="mixed",
+        )
+    # Round 086: analytics-engine result (churn/decline/basket) — a table answer.
+    if getattr(ai_result, "result_table", None) is not None:
+        return ProposalResult(
+            None,
+            ai_result.message,
+            result_table=ai_result.result_table,
+            trust_notes=tuple(ai_result.trust_notes),
+            intent_kind="answer",
         )
     # Round 078: direct computed answer to a metric question. Carries the
     # optional "add as KPI" proposal so the user can pin the answer in one click.
