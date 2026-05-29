@@ -71,6 +71,18 @@ def render_cohort_panel() -> None:
                 # Round 063: also compute a repeat-purchase funnel on the same customer
                 from ai4bi.analysis.funnel import purchase_frequency_funnel
                 st.session_state["_funnel_result"] = purchase_frequency_funnel(df, cust)
+                # Round 073: new-vs-returning revenue + value tiers (needs a revenue col)
+                from ai4bi.analysis.segments import new_vs_returning_revenue, value_tier_summary
+                _rev = next((c.name for c in contract.columns
+                             if c.data_type in ("float", "double", "number", "numeric")
+                             and any(t in c.name.lower() for t in ("revenue", "sales", "amount", "營收", "金額"))),
+                            None)
+                if _rev:
+                    st.session_state["_nvr_result"] = new_vs_returning_revenue(df, cust, date_col, _rev, period)
+                    st.session_state["_tier_result"] = value_tier_summary(df, cust, _rev)
+                else:
+                    st.session_state["_nvr_result"] = None
+                    st.session_state["_tier_result"] = None
             except Exception as exc:  # noqa: BLE001
                 st.error(f"無法計算：{exc}")
 
@@ -96,3 +108,16 @@ def render_cohort_panel() -> None:
                 st.plotly_chart(fig, width="stretch", key="cohort_funnel_chart")
             except Exception:  # noqa: BLE001
                 st.dataframe(funnel, width="stretch", hide_index=True)
+
+        # Round 073: new vs returning revenue + value tiers
+        nvr = st.session_state.get("_nvr_result")
+        if nvr is not None and not nvr.empty:
+            st.markdown("---")
+            st.caption("新客 vs 回頭客 營收（每期）")
+            st.bar_chart(nvr)
+        tiers = st.session_state.get("_tier_result")
+        if tiers is not None and not tiers.empty:
+            st.caption("客戶價值分層")
+            st.dataframe(tiers.rename(columns={
+                "tier": "分層", "customers": "人數", "revenue": "營收", "revenue_pct": "營收占比%"}),
+                width="stretch", hide_index=True)
