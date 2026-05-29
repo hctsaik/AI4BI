@@ -44,6 +44,7 @@ from ai4bi.ui.workspace_manager import render_workspace_panel  # Round 039
 from ai4bi.ui.audit_trail import render_audit_trail, record_change  # Round 040
 from ai4bi.ui.report_slicer import render_report_slicer, get_slicer_filters, SlicerDefinition  # Round 041
 from ai4bi.ui.connector_panel import render_connector_panel  # Round 043
+from ai4bi.ui.alert_panel import render_alert_manager, render_alert_banner  # Round 048
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
 _BLOCKS_DIR = _DEMO_ROOT / "blocks"
@@ -886,6 +887,9 @@ def _render_draft_controls(
         # ── Zone 3d: 資料模型 (Round 038) ─────────────────────────────────
         render_data_model_view()
 
+        # ── Zone 3e: 提醒設定 (Round 048) ─────────────────────────────────
+        render_alert_manager(_load_all_contracts())
+
         st.markdown("---")
 
         # ── Zone 4a: 手動新增圖表（進階） ──────────────────────────────────
@@ -1673,6 +1677,9 @@ def main() -> None:
         _loaded_contracts = _load_all_contracts()
         if _has_sandbox_blocks(report, _loaded_contracts):
             _render_sandbox_banner()
+
+    # Round 048: threshold alert banner (shown when a rule's condition is true)
+    render_alert_banner(executor)
 
     if workspace.message():
         st.info(workspace.message())
