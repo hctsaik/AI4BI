@@ -500,6 +500,11 @@ class NL2ProposalService:
         semantic_model: dict[str, Any] | None,
         contracts: dict[str, Any] | None,
     ) -> NL2ProposalResult:
+        # Round 066: "add a trend line / 趨勢線" overlay (keyword mode). Checked
+        # before add_visual since it is a more specific phrase.
+        if _looks_like_add_trend_line(prompt, normalized):
+            return self._add_trend_line({}, report, selected_component_id)
+
         # Round 065: "add a pie/bar/line chart" creates a NEW visual (keyword mode).
         # Checked before chart_type_change; the add-verb vs change-verb split keeps
         # them disjoint.
@@ -1939,6 +1944,23 @@ def _extract_chart_type(prompt: str, normalized: str) -> VisualType | None:
 _ADD_VISUAL_VERBS = (
     "add", "create", "新增", "加一", "加個", "加上", "加 ", "建立", "做一", "做個", "畫一", "畫個", "畫個",
 )
+
+
+def _looks_like_add_trend_line(prompt: str, normalized: str) -> bool:
+    """Detect a request to ADD a trend line / regression overlay.
+
+    Must be an *add* intent — a style request like "make the trend line red"
+    is a colour change, not an add, and must fall through to the style handler.
+    """
+    keys = ("趨勢線", "trend line", "trendline", "迴歸線", "回歸線", "regression")
+    if not any(k in normalized or k in prompt for k in keys):
+        return False
+    has_add = ("加" in prompt or any(v in normalized or v in prompt for v in _ADD_VISUAL_VERBS))
+    # exclude colour/style verbs ("make ... red", "改成紅色")
+    style_words = ("red", "blue", "green", "color", "colour", "紅", "藍", "綠",
+                   "顏色", "make", "改成", "換成", "改為", "換為", "style")
+    has_style = any(w in normalized or w in prompt for w in style_words)
+    return has_add and not has_style
 
 
 def _looks_like_add_visual(prompt: str, normalized: str) -> bool:

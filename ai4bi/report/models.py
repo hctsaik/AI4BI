@@ -512,7 +512,17 @@ class ReportProposal:
         return any(change.affects_data for change in self.changes)
 
 
-_ALLOWLISTED_VISUAL_EXTRA_KEYS = {"line_color", "bar_color"}
+# Presentation-only visualization.extra keys an AI proposal may set/get.
+# These never change query semantics or numbers — they are overlays/formatting.
+_ALLOWLISTED_VISUAL_EXTRA_KEYS = {
+    "line_color", "bar_color",
+    "trend_line",          # linear/avg overlay on a line chart
+    "moving_avg",          # moving-average overlay
+    "conditional_formats", # table cell highlighting rules
+    "data_labels",         # show value labels on bars (Round 058)
+    "number_format",       # display number format (Round 058)
+    "hole", "show_percent",  # pie/donut presentation
+}
 
 
 def _get_path(report: ExecutableReportSpec, path: str) -> Any:
