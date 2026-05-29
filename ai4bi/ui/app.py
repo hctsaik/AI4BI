@@ -1659,6 +1659,16 @@ def _render_page(
                     )
 
 
+def _resolve_active_page(page_ids: list[str], requested: str | None) -> str:
+    """Round 076: pick the active page — the requested one if valid, else the first."""
+    if requested in page_ids:
+        return requested
+    return page_ids[0]
+
+
+_ACTIVE_PAGE_KEY = "_active_page"
+
+
 def _render_canvas(
     report: ExecutableReportSpec,
     cache: QueryCache,
@@ -1668,12 +1678,20 @@ def _render_canvas(
     page_ids = list(report.pages.keys())
     if len(page_ids) == 1:
         _render_page(report, page_ids[0], cache, executor, active_filters)
-    else:
-        tab_labels = [report.pages[pid].display_name or pid for pid in page_ids]
-        tabs = st.tabs(tab_labels)
-        for tab, page_id in zip(tabs, page_ids):
-            with tab:
-                _render_page(report, page_id, cache, executor, active_filters)
+        return
+
+    # Round 076: state-driven page navigation (replaces st.tabs) so a page can be
+    # switched programmatically — the prerequisite for cross-page drill-through.
+    labels = {pid: (report.pages[pid].display_name or pid) for pid in page_ids}
+    active = _resolve_active_page(page_ids, st.session_state.get(_ACTIVE_PAGE_KEY))
+    # No widget key: `index` is honoured every run, so a programmatic change to
+    # _active_page (e.g. a drill-through) is reflected immediately.
+    chosen = st.radio(
+        "頁面", page_ids, index=page_ids.index(active),
+        format_func=lambda p: labels[p], horizontal=True,
+    )
+    st.session_state[_ACTIVE_PAGE_KEY] = chosen
+    _render_page(report, chosen, cache, executor, active_filters)
 
 
 def main() -> None:
