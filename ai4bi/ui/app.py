@@ -1371,9 +1371,12 @@ def _render_visual_assistant(report: ExecutableReportSpec, cache: QueryCache, ex
         with st.expander("💡 你可以這樣問（不只是改圖，也能直接得到答案）", expanded=False):
             st.markdown(
                 "- **直接問數字**：「上個月營收多少？」「總共幾筆訂單？」→ 立即算出答案＋來源\n"
+                "- **排名**：「最賺的 5 個商品」「每個地區營收最高的 2 個商品」→ 排行表\n"
                 "- **問原因**：「為什麼營收下降？依地區拆解」→ 找出貢獻最多增減的維度\n"
-                "- **彙總後篩選**：「營收超過 10 萬的地區」「買超過 3 次的客戶」→ 名單\n"
-                "- **改圖／分析**：「加一張趨勢圖」「改成依月份」「把離群值標紅色」"
+                "- **名單**：「買超過 3 次的客戶」「營收超過 10 萬的地區」「哪些客戶快流失」\n"
+                "- **趨勢**：「哪些商品連續下滑」「常一起買的商品」\n"
+                "- **目標**：「把營收目標設為 100 萬」「達標了嗎？」\n"
+                "- **改圖／分析**：「加一張趨勢圖」「加一張地圖」「改成依月份」「把離群值標紅色」"
             )
         if st.button("送出請求", type="primary", disabled=report.read_only, width="stretch"):
             # Load semantic model — merge demo SM with user-defined relationships (Round 037)
