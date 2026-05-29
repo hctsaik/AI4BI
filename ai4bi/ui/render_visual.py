@@ -48,6 +48,7 @@ from ai4bi.ui.components.kpi_card import render_kpi_card
 from ai4bi.ui.components.line_chart import render_line_chart
 from ai4bi.ui.components.map_chart import render_map  # Round 083
 from ai4bi.ui.components.pie_chart import render_pie_chart
+from ai4bi.ui.components.small_multiples import render_small_multiples  # Round 094
 from ai4bi.ui.components.pivot_table import render_pivot
 from ai4bi.ui.components.scatter_chart import render_scatter_chart
 
@@ -266,6 +267,7 @@ _COMPONENT_REGISTRY: dict[VisualType, Callable] = {
     VisualType.table:      render_data_table,
     VisualType.pivot:      render_pivot,          # Round 072
     VisualType.map:        render_map,            # Round 083
+    VisualType.small_multiples: render_small_multiples,  # Round 094
 }
 
 

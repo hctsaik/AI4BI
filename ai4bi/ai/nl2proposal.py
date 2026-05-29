@@ -114,6 +114,13 @@ _ADD_VISUAL_TYPE_KEYWORDS: dict[str, VisualType] = {
     "map": VisualType.map,           # Round 083
     "地圖": VisualType.map,
     "地圖視覺": VisualType.map,
+    "small multiples": VisualType.small_multiples,  # Round 094
+    "small multiple": VisualType.small_multiples,
+    "小倍數": VisualType.small_multiples,
+    "小倍數圖": VisualType.small_multiples,
+    "分面": VisualType.small_multiples,
+    "分面圖": VisualType.small_multiples,
+    "trellis": VisualType.small_multiples,
 }
 
 # ---------------------------------------------------------------------------
@@ -859,6 +866,16 @@ class NL2ProposalService:
             if loc_col:
                 dimensions = [DimensionRef(block_id, loc_col, loc_col)]
                 sort = [SortSpec(metric_alias, SortDirection.desc)]
+        elif vtype == VisualType.small_multiples:
+            # Round 094: facet by a category, x-axis over time → one mini trend
+            # per category. Falls back to a single facet dimension if no date.
+            if cat_col and date_col:
+                dimensions = [DimensionRef(block_id, cat_col, cat_col),
+                              DimensionRef(block_id, date_col, date_col, truncate_date_to="week")]
+                sort = [SortSpec(date_col, SortDirection.asc)]
+            elif cat_col:
+                dimensions = [DimensionRef(block_id, cat_col, cat_col)]
+                sort = [SortSpec(metric_alias, SortDirection.desc)]
         elif vtype == VisualType.pivot and len(cat_cols) >= 2:
             dimensions = [DimensionRef(block_id, cat_cols[0], cat_cols[0]),
                           DimensionRef(block_id, cat_cols[1], cat_cols[1])]
@@ -894,6 +911,7 @@ class NL2ProposalService:
             VisualType.line_chart: "折線圖", VisualType.scatter: "散點圖",
             VisualType.kpi_card: "KPI", VisualType.table: "表格",
             VisualType.pivot: "樞紐表", VisualType.map: "地圖",
+            VisualType.small_multiples: "小倍數圖",
         }.get(vtype, vtype.value)
         viz = VisualizationSpec(vtype, title=f"{metric_alias}（{_type_label}）", extra={})
         proposal = build_add_visual_proposal(page_id, vid, query, viz)

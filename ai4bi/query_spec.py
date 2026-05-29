@@ -30,6 +30,7 @@ class VisualType(str, Enum):
     table       = "table"
     pivot       = "pivot"
     map         = "map"
+    small_multiples = "small_multiples"  # Round 094: trellis / faceted grid
 
 
 class AggFunction(str, Enum):
