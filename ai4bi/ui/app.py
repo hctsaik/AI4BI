@@ -1674,6 +1674,45 @@ def _render_grain_mismatch_warning(page) -> None:
     )
 
 
+def _render_drillthrough_controls(report: ExecutableReportSpec, page_id: str, contracts: dict) -> None:
+    """Round 093: cross-page drill-through driven by the active cross-filter.
+
+    On a normal page, an active cross-filter (a clicked dimension value) offers a
+    button to open a focused detail page for that value. On a detail page, a
+    button navigates back to the main page.
+    """
+    if page_id.startswith("detail_"):
+        if st.button("← 返回主頁", key=f"back_{page_id}"):
+            mains = [p for p in report.pages if not p.startswith("detail_")]
+            st.session_state[_ACTIVE_PAGE_KEY] = mains[0] if mains else list(report.pages)[0]
+            st.rerun()
+        return
+
+    cf = _active_cross_filter_for_page(page_id)
+    if not cf:
+        return
+    block_id, column, value = cf.get("block_id"), cf.get("column_name"), cf.get("value")
+    if not block_id or not column or value is None or isinstance(value, list):
+        return
+    contract = (contracts or {}).get(block_id)
+    if contract is None:
+        return
+    if st.button(f"🔎 查看「{value}」的詳情頁", key=f"drill_{page_id}", width="stretch"):
+        from ai4bi.report.drillthrough import build_detail_page
+        from ai4bi.report.models import ReportChange, ReportProposal
+        detail = build_detail_page(contract, block_id, column, value)
+        if detail.page_id not in report.pages:
+            proposal = ReportProposal(
+                description=f"Drill-through 詳情頁：{value}",
+                changes=[ReportChange(path=f"pages/{detail.page_id}/delete",
+                                      label="新增詳情頁", before=None,
+                                      after=detail.to_dict(), affects_data=True)],
+            )
+            workspace.apply_immediately(proposal)
+        st.session_state[_ACTIVE_PAGE_KEY] = detail.page_id
+        st.rerun()
+
+
 def _render_page(
     report: ExecutableReportSpec,
     page_id: str,
@@ -1690,6 +1729,7 @@ def _render_page(
     _render_grain_mismatch_warning(page)
     visuals = page.visuals
     contracts = _load_all_contracts()
+    _render_drillthrough_controls(report, page_id, contracts)
     # Cache contracts for _apply_cross_filter_to_query semantic matching
     st.session_state["_cached_all_contracts"] = contracts
     order = page.visual_order
