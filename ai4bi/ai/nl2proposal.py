@@ -507,6 +507,11 @@ class NL2ProposalService:
             if ranked is not None:
                 return ranked
 
+        if intent == "pacing_question":  # Round 088
+            pace = self._answer_pacing(prompt, normalized, report, contracts)
+            if pace is not None:
+                return pace
+
         if intent == "explain_change":  # Round 081
             decomp = self._explain_change(prompt, normalized, report, contracts)
             if decomp is not None:
@@ -588,6 +593,13 @@ class NL2ProposalService:
             answer = self._answer_metric(prompt, normalized, report, semantic_model, contracts)
             if answer is not None:
                 return answer
+
+        # Round 088: "達標了嗎 / are we on track?" — read back KPI pacing. Checked
+        # before set-target (a question, not a set command).
+        if _looks_like_pacing_question(prompt, normalized):
+            pace = self._answer_pacing(prompt, normalized, report, contracts)
+            if pace is not None:
+                return pace
 
         # Round 084: set a KPI goal/target. "把營收目標設為 100 萬". Checked before
         # measure-filter since "目標" + a number is goal-setting, not a HAVING.
@@ -1671,6 +1683,107 @@ class NL2ProposalService:
         )
 
     # ------------------------------------------------------------------
+    # Round 088: "are we on track?" — read back KPI pacing
+    # ------------------------------------------------------------------
+
+    def _answer_pacing(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Answer "達標了嗎 / are we on track?" by reading each KPI's target.
+
+        Computes the KPI's current value the same way the card does (trailing
+        window when compare_period is set, else the plain aggregate) and reports
+        on-track / behind. Returns None when no executor; a guiding message when
+        no KPI has a target.
+        """
+        executor = getattr(self, "_executor", None)
+        if executor is None:
+            return None
+
+        from ai4bi.ui.components.kpi_card import _pacing_status
+
+        targets = []
+        for pid, page in report.pages.items():
+            for vid, v in page.visuals.items():
+                if v.visualization.visual_type != VisualType.kpi_card:
+                    continue
+                tgt = v.visualization.extra.get("target")
+                if tgt is None or not v.query.metrics:
+                    continue
+                targets.append((pid, vid, v, float(tgt)))
+
+        if not targets:
+            return self._unsupported(
+                "目前沒有任何 KPI 設定目標。試試「把營收目標設為 100 萬」之後再問達標進度。",
+                target_scope="report",
+            )
+
+        lines: list[str] = []
+        headline_value = None
+        for _pid, _vid, v, tgt in targets:
+            value = self._kpi_current_value(executor, v)
+            if value is None:
+                continue
+            if headline_value is None:
+                headline_value = value
+            good_if = v.visualization.extra.get("target_good_if") or _infer_target_good_if(v)
+            pacing = _pacing_status(value, tgt, good_if)
+            label = v.visualization.title or v.query.metrics[0].alias or v.query.metrics[0].metric_name
+            if pacing:
+                _frac, cap, _ok = pacing
+                lines.append(f"「{label}」：{cap}")
+        if not lines:
+            return None
+
+        sentence = "　|　".join(lines)
+        notes = ["依各 KPI 設定的目標即時計算進度（與儀表板 KPI 同源）。"]
+        answer = DirectAnswer(
+            question=prompt.strip(),
+            metric_block_id=targets[0][2].query.metrics[0].block_id,
+            metric_name=targets[0][2].query.metrics[0].metric_name,
+            metric_alias="達標進度",
+            sentence=sentence,
+            value=headline_value,
+            period="all",
+            trust_notes=notes,
+        )
+        intent = AIIntent(intent_kind="analysis_request", target_scope="report",
+                          trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=sentence, direct_answer=answer,
+                                 trust_notes=notes, risk_level="low")
+
+    def _kpi_current_value(self, executor, visual) -> float | None:
+        """Current value of a KPI visual — trailing window if compare_period set."""
+        from ai4bi.query_spec import BlockRef, VisualQuerySpec
+        metric = visual.query.metrics[0]
+        alias = metric.alias or metric.metric_name
+        extra = visual.visualization.extra or {}
+        compare_period = extra.get("compare_period")
+        date_col = extra.get("compare_date_column")
+        base = VisualQuerySpec(
+            spec_id=f"pace_{metric.metric_name}",
+            block_refs=[BlockRef(metric.block_id)],
+            metrics=[MetricRef(metric.block_id, metric.metric_name, alias)],
+            inherit_global_filter=False,
+        )
+        if compare_period and date_col:
+            from ai4bi.analysis.time_intelligence import compute_period_comparison
+            comp = compute_period_comparison(
+                executor, base, date_block_id=metric.block_id, date_column=date_col,
+                period=compare_period, metric_col=alias)
+            if comp is not None and comp.current is not None:
+                return comp.current
+        try:
+            df = executor.run(base)
+        except Exception:  # noqa: BLE001
+            return None
+        return _first_scalar(df, alias)
+
+    # ------------------------------------------------------------------
     # Round 084: set a KPI goal / target (pacing)
     # ------------------------------------------------------------------
 
@@ -1728,20 +1841,31 @@ class NL2ProposalService:
         )
         before = visual.visualization.extra.get("target")
         path = f"pages/{page_id}/visuals/{visual_id}/visualization/extra/target"
+        # Honesty fix (Round 088): also set good_if so a lower-is-better KPI
+        # (return rate / cost / churn) doesn't render an inverted progress bar.
+        good_if = _infer_target_good_if(visual)
+        good_if_before = visual.visualization.extra.get("target_good_if")
+        good_if_path = f"pages/{page_id}/visuals/{visual_id}/visualization/extra/target_good_if"
+        sense = "越低越好" if good_if == "lte" else "越高越好"
         notes = [
-            f"為「{metric_label}」設定目標 {value:,.0f}，顯示達成進度條。",
+            f"為「{metric_label}」設定目標 {value:,.0f}（{sense}），顯示達成進度條。",
             "顯示用變更，不影響查詢數字。",
         ]
+        changes = [ReportChange(path=path, label=f"KPI 目標：{metric_label}",
+                                before=before, after=value, affects_data=False)]
+        if good_if_before != good_if:
+            changes.append(ReportChange(
+                path=good_if_path, label="目標方向（越高/越低越好）",
+                before=good_if_before, after=good_if, affects_data=False))
         proposal = ReportProposal(
             description=f"Set target for '{metric_label}' = {value:,.0f}",
-            changes=[ReportChange(path=path, label=f"KPI 目標：{metric_label}",
-                                  before=before, after=value, affects_data=False)],
+            changes=changes,
             target_component_id=visual_id,
         )
         intent = AIIntent(intent_kind="analysis_request", target_scope=f"visual:{visual_id}",
                           suggested_visuals=[visual_id], trust_notes=notes, risk_level="low")
         return NL2ProposalResult(
-            intent=intent, message=f"已為「{metric_label}」設定目標 {value:,.0f}。",
+            intent=intent, message=f"已為「{metric_label}」設定目標 {value:,.0f}（{sense}）。",
             proposal=proposal, trust_notes=notes, risk_level="low",
         )
 
@@ -2729,6 +2853,41 @@ def _looks_like_set_target(prompt: str, normalized: str) -> bool:
     # not a set-target command, so require an assignment cue.
     has_set = any(v in hay for v in ("設", "設定", "設為", "訂", "定為", "set", "="))
     return has_set and re.search(r"\d", hay) is not None
+
+
+_LOWER_IS_BETTER_WORDS: tuple[str, ...] = (
+    "退貨", "退款", "退回", "成本", "費用", "流失", "churn", "cost", "return",
+    "error", "錯誤", "缺貨", "客訴", "抱怨", "complaint", "defect", "瑕疵", "延遲", "delay",
+)
+
+
+def _infer_target_good_if(visual) -> str:
+    """Infer whether higher or lower is better for a KPI's target/pacing.
+
+    Prefers an existing RAG config; otherwise reads the metric/title text for
+    lower-is-better signals (return rate, cost, churn, ...). Defaults to "gte".
+    """
+    extra = visual.visualization.extra or {}
+    rag = extra.get("rag") or {}
+    if rag.get("good_if") in ("gte", "lte"):
+        return rag["good_if"]
+    text = " ".join(filter(None, [
+        visual.visualization.title or "",
+        *(m.alias or m.metric_name for m in visual.query.metrics),
+    ])).lower()
+    return "lte" if any(w in text for w in _LOWER_IS_BETTER_WORDS) else "gte"
+
+
+_PACING_TRIGGERS: tuple[str, ...] = (
+    "達標了嗎", "達標嗎", "有沒有達標", "達成了嗎", "達成率", "進度如何", "進度怎樣",
+    "離目標", "達標進度", "on track", "on-track", "hit the target", "hit target",
+    "reach the goal", "progress to target", "進度多少",
+)
+
+
+def _looks_like_pacing_question(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    return any(t in hay for t in _PACING_TRIGGERS)
 
 
 def _extract_target_value(prompt: str, normalized: str) -> float | None:
