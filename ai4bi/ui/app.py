@@ -48,6 +48,7 @@ from ai4bi.ui.alert_panel import render_alert_manager, render_alert_banner  # Ro
 from ai4bi.ui.drilldown import (  # Round 049
     apply_drill, process_pending_drill, render_drill_controls, hierarchy_of,
 )
+from ai4bi.ui.summary_panel import render_summary_panel  # Round 050
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
 _BLOCKS_DIR = _DEMO_ROOT / "blocks"
@@ -732,6 +733,7 @@ def _render_draft_controls(
     report: ExecutableReportSpec,
     cache: QueryCache,
     store: DraftReportStore,
+    executor: "Executor | None" = None,
 ) -> dict[str, object]:
     with st.sidebar:
         st.title("AI for BI")
@@ -892,6 +894,10 @@ def _render_draft_controls(
 
         # ── Zone 3e: 提醒設定 (Round 048) ─────────────────────────────────
         render_alert_manager(_load_all_contracts())
+
+        # ── Zone 3f: 業務摘要 (Round 050) ─────────────────────────────────
+        if executor is not None:
+            render_summary_panel(_load_all_contracts(), executor)
 
         st.markdown("---")
 
@@ -1664,7 +1670,7 @@ def main() -> None:
         extra_contracts=_user_blocks_exec or None,
     )
 
-    active_filters = _render_draft_controls(report, cache, store)
+    active_filters = _render_draft_controls(report, cache, store, executor)
     report = workspace.current_report()
 
     st.title(report.title)
