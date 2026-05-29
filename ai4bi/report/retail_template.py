@@ -317,7 +317,11 @@ def build_retail_demo_report() -> ExecutableReportSpec:
             y_axis_label="營收（NT$）",
             height_px=300,
             # Round 049: click a bar to drill into the next level
-            extra={"drill_hierarchy": ["city", "store_name", "product_name"]},
+            # Round 058: show value labels on bars
+            extra={
+                "drill_hierarchy": ["city", "store_name", "product_name"],
+                "data_labels": True,
+            },
         ),
         col_span=6,
     )

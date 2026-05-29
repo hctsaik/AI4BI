@@ -43,19 +43,24 @@ logger = logging.getLogger(__name__)
 # Formatting helpers
 # ---------------------------------------------------------------------------
 
-def _fmt_number(value: float, unit: Optional[str] = None) -> str:
-    """Human-readable number with optional unit prefix/suffix."""
+def _fmt_number(value: float, unit: Optional[str] = None, decimals: int = 1) -> str:
+    """Human-readable number with optional unit and configurable decimals.
+
+    Round 058: ``decimals`` controls precision (Power BI parity). Large numbers
+    are abbreviated (K/M/B) at the same precision.
+    """
     if pd.isna(value):
         return "—"
+    d = max(0, int(decimals))
     abs_val = abs(value)
     if abs_val >= 1_000_000_000:
-        s = f"{value / 1_000_000_000:.1f}B"
+        s = f"{value / 1_000_000_000:.{d}f}B"
     elif abs_val >= 1_000_000:
-        s = f"{value / 1_000_000:.1f}M"
+        s = f"{value / 1_000_000:.{d}f}M"
     elif abs_val >= 1_000:
-        s = f"{value / 1_000:.1f}K"
+        s = f"{value / 1_000:.{d}f}K"
     else:
-        s = f"{value:,.1f}"
+        s = f"{value:,.{d}f}"
     return f"{s} {unit}" if unit else s
 
 
@@ -234,7 +239,7 @@ def render_kpi_card(
     # Attempt to find unit from block metric definition — not available here,
     # so we accept it as an extra hint in style.extra["unit"]
     unit = style.extra.get("unit")
-    formatted_value = _fmt_number(primary_value, unit)
+    formatted_value = _fmt_number(primary_value, unit, decimals=style.extra.get("decimals", 1))
 
     with st.container(border=True):
         if style.subtitle:

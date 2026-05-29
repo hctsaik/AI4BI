@@ -179,6 +179,16 @@ def _build_figure(
     )
     fig.update_xaxes(showgrid=True, gridcolor="rgba(128,128,128,0.15)")
     fig.update_yaxes(showgrid=True, gridcolor="rgba(128,128,128,0.15)")
+
+    # Round 058: optional data labels on bars (Power BI parity)
+    if style.extra.get("data_labels"):
+        fmt = style.extra.get("number_format", ",.0f")
+        axis = "x" if orientation == "horizontal" else "y"
+        fig.update_traces(
+            texttemplate="%{" + axis + ":" + fmt + "}",
+            textposition="outside",
+            cliponaxis=False,
+        )
     return fig
 
 
