@@ -500,6 +500,14 @@ class NL2ProposalService:
         semantic_model: dict[str, Any] | None,
         contracts: dict[str, Any] | None,
     ) -> NL2ProposalResult:
+        # Round 065: "add a pie/bar/line chart" creates a NEW visual (keyword mode).
+        # Checked before chart_type_change; the add-verb vs change-verb split keeps
+        # them disjoint.
+        if _looks_like_add_visual(prompt, normalized):
+            return self._add_visual_keyword(
+                prompt, normalized, report, selected_component_id, semantic_model, contracts
+            )
+
         # Chart-type change is checked before style: both include "bar"/"line" keywords,
         # but chart-type requires a change verb + chart noun (more specific pattern).
         if _looks_like_chart_type_change(prompt, normalized):
@@ -632,6 +640,119 @@ class NL2ProposalService:
     # ------------------------------------------------------------------
     # Round 036: period_comparison — create two KPI cards for current vs prev period
     # ------------------------------------------------------------------
+
+    def _add_visual_keyword(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        selected_component_id: str | None,
+        semantic_model: dict[str, Any] | None,
+        contracts: dict[str, Any] | None,
+    ) -> NL2ProposalResult:
+        """Round 065: add a new chart of the requested type (keyword mode).
+
+        Picks a sensible metric (from the selected/first visual) and dimension
+        (date for line, a low-cardinality category for bar/pie) so it works even
+        when the user only says "add a pie chart".
+        """
+        from ai4bi.report.builder import build_add_visual_proposal
+        from ai4bi.query_spec import (
+            BlockRef, DimensionRef, SortDirection, SortSpec, VisualQuerySpec, VisualizationSpec,
+        )
+
+        vtype = _extract_chart_type(prompt, normalized) or VisualType.bar_chart
+
+        # Source metric + block: prefer the selected visual, else the first visual
+        # in the report that has a metric.
+        found = _find_visual(report, selected_component_id)
+        page_id, metric, block_id = "main", None, None
+        if found and found[2].query.metrics:
+            page_id, _vid, v = found
+            metric, block_id = v.query.metrics[0], v.query.metrics[0].block_id
+        else:
+            for pid, page in report.pages.items():
+                for v in page.visuals.values():
+                    if v.query.metrics:
+                        page_id, metric, block_id = pid, v.query.metrics[0], v.query.metrics[0].block_id
+                        break
+                if metric:
+                    break
+        if metric is None or block_id is None:
+            return self._unsupported("找不到可用的指標來建立圖表。", target_scope="canvas")
+
+        metric_alias = metric.alias or metric.metric_name
+
+        # Pick a dimension from the block's contract.
+        date_col, cat_col = None, None
+        contract = (contracts or {}).get(block_id)
+        if contract is not None:
+            pk = set(getattr(contract, "primary_keys", []) or [])
+            for col in contract.columns:
+                nm, dt = col.name, col.data_type
+                low = nm.lower()
+                if date_col is None and (dt in ("date", "timestamp")
+                                         or any(t in low for t in ("date", "time", "_dt", "day"))):
+                    date_col = nm
+                if (cat_col is None and dt in ("string", "str", "object")
+                        and nm not in pk and not (low == "id" or low.endswith(("_id", "_code", "_sku")))):
+                    cat_col = nm
+
+        dimensions, sort = [], []
+        truncate = None
+        if vtype == VisualType.kpi_card:
+            pass  # no dimension
+        elif vtype == VisualType.line_chart and date_col:
+            dimensions = [DimensionRef(block_id, date_col, date_col, truncate_date_to="week")]
+            sort = [SortSpec(date_col, SortDirection.asc)]
+            truncate = "week"
+        elif cat_col:
+            dimensions = [DimensionRef(block_id, cat_col, cat_col)]
+            sort = [SortSpec(metric_alias, SortDirection.desc)]
+        elif date_col:  # fall back to date if no categorical column
+            dimensions = [DimensionRef(block_id, date_col, date_col)]
+
+        # Unique visual id
+        base_vid = f"{vtype.value}_{metric.metric_name}"
+        existing = {vid for p in report.pages.values() for vid in p.visuals}
+        vid, c = base_vid, 1
+        while vid in existing:
+            vid = f"{base_vid}_{c}"; c += 1
+
+        query = VisualQuerySpec(
+            spec_id=vid,
+            block_refs=[BlockRef(block_id)],
+            metrics=[MetricRef(block_id, metric.metric_name, metric_alias)],
+            dimensions=dimensions,
+            sort=sort,
+            inherit_global_filter=True,
+        )
+        _type_label = {
+            VisualType.pie_chart: "圓餅圖", VisualType.bar_chart: "長條圖",
+            VisualType.line_chart: "折線圖", VisualType.scatter: "散點圖",
+            VisualType.kpi_card: "KPI", VisualType.table: "表格",
+        }.get(vtype, vtype.value)
+        viz = VisualizationSpec(vtype, title=f"{metric_alias}（{_type_label}）", extra={})
+        proposal = build_add_visual_proposal(page_id, vid, query, viz)
+
+        notes = [
+            f"新增一個{_type_label}，指標：{metric_alias}（來源：{block_id}）。",
+        ]
+        if dimensions:
+            notes.append(f"維度：{dimensions[0].column_name}" + ("（依週彙總）" if truncate else ""))
+        intent = AIIntent(
+            intent_kind="add_visual",
+            target_scope=f"page:{page_id}",
+            trust_notes=notes,
+            risk_level="low",
+        )
+        return NL2ProposalResult(
+            intent=intent,
+            message=f"已準備新增一個{_type_label}：{metric_alias}。",
+            proposal=proposal,
+            trust_notes=notes,
+            risk_level="low",
+        )
 
     def _period_comparison(
         self,
@@ -1398,6 +1519,8 @@ class NL2ProposalService:
             "bar_chart": VisualType.bar_chart, "bar": VisualType.bar_chart,
             "table": VisualType.table,
             "kpi_card": VisualType.kpi_card, "kpi": VisualType.kpi_card,
+            "pie_chart": VisualType.pie_chart, "pie": VisualType.pie_chart,
+            "scatter": VisualType.scatter, "scatter_chart": VisualType.scatter,
         }
         vtype = _vtype_map.get(visual_type_str, VisualType.bar_chart)
 
@@ -1811,6 +1934,26 @@ def _extract_chart_type(prompt: str, normalized: str) -> VisualType | None:
         if keyword in normalized or keyword in prompt:
             return vtype
     return None
+
+
+_ADD_VISUAL_VERBS = (
+    "add", "create", "新增", "加一", "加個", "加上", "加 ", "建立", "做一", "做個", "畫一", "畫個", "畫個",
+)
+
+
+def _looks_like_add_visual(prompt: str, normalized: str) -> bool:
+    """Detect a request to ADD a NEW chart (vs change an existing one).
+
+    Requires an add-verb plus a chart-type keyword; the change-verb path
+    (_looks_like_chart_type_change) handles 'change to pie' separately.
+    """
+    has_chart = any(k in normalized or k in prompt for k in _CHART_TYPE_KEYWORDS)
+    if not has_chart:
+        return False
+    has_add = any(v in normalized or v in prompt for v in _ADD_VISUAL_VERBS)
+    has_change = any(k in normalized or k in prompt
+                     for k in ("change", "convert", "switch", "改成", "換成", "轉成", "改為", "換為"))
+    return has_add and not has_change
 
 
 def _looks_like_dimension_change(prompt: str, normalized: str) -> bool:
