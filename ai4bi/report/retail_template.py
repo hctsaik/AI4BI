@@ -198,10 +198,19 @@ def build_retail_demo_report() -> ExecutableReportSpec:
         )
 
     # ── KPI row ──────────────────────────────────────────────────────────────
+    # Round 047: revenue KPI shows trailing-30-day value with MoM delta
     kpi_revenue = ReportVisualSpec(
         "kpi_revenue",
-        _q("kpi_revenue", [MetricRef(_BLOCK_ID, "revenue", "總營收")]),
-        VisualizationSpec(VisualType.kpi_card, title="總營收", extra={"unit": "NT$"}),
+        _q("kpi_revenue", [MetricRef(_BLOCK_ID, "revenue", "營收")]),
+        VisualizationSpec(
+            VisualType.kpi_card,
+            title="營收",
+            extra={
+                "unit": "NT$",
+                "compare_period": "month",
+                "compare_date_column": "order_date",
+            },
+        ),
     )
     kpi_orders = ReportVisualSpec(
         "kpi_orders",

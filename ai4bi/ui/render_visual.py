@@ -282,6 +282,58 @@ def _dispatch(
     renderer(query_spec, df, style)
 
 
+def _render_kpi_with_comparison(
+    query_spec: VisualQuerySpec,
+    style: VisualizationSpec,
+    executor: ExecutorProtocol,
+) -> bool:
+    """Round 047: render a KPI card as a period-over-period comparison.
+
+    Driven by ``style.extra["compare_period"]`` ("week"|"month"|"quarter"|"year")
+    and ``style.extra["compare_date_column"]``. The headline shows the current
+    trailing-window value and a delta vs the previous window.
+
+    Returns True if it rendered a comparison card, False if it could not
+    (caller should then fall back to the normal all-period KPI).
+    """
+    from dataclasses import replace as _replace
+
+    from ai4bi.analysis.time_intelligence import compute_period_comparison
+
+    period = style.extra.get("compare_period")
+    date_column = style.extra.get("compare_date_column")
+    if not period or not date_column or not query_spec.metrics:
+        return False
+
+    primary = query_spec.metrics[0]
+    metric_col = primary.alias or primary.metric_name
+    comp = compute_period_comparison(
+        executor,
+        query_spec,
+        date_block_id=query_spec.primary_block_id,
+        date_column=date_column,
+        period=period,
+        metric_col=metric_col,
+    )
+    if comp is None or comp.current is None:
+        return False
+
+    cur_df = pd.DataFrame({metric_col: [comp.current]})
+    delta_df = (
+        pd.DataFrame({metric_col: [comp.previous]})
+        if comp.previous is not None else None
+    )
+    base_title = style.title or metric_col
+    style2 = _replace(
+        style,
+        title=f"{base_title}（{comp.current_label}）",
+        subtitle=(style.subtitle or f"對比 {comp.previous_label}"),
+        delta_metric=primary.metric_name,
+    )
+    render_kpi_card(query_spec, cur_df, style2, delta_df=delta_df)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -406,4 +458,9 @@ def render_visual(
     # ------------------------------------------------------------------
     # Happy path — dispatch to component
     # ------------------------------------------------------------------
+    # Round 047: period-over-period KPI (trailing-window delta). Falls back
+    # to the plain all-period KPI if comparison data is unavailable.
+    if style.visual_type == VisualType.kpi_card and style.extra.get("compare_period"):
+        if _render_kpi_with_comparison(query_spec, style, executor):
+            return
     _dispatch(style.visual_type, query_spec, df, style)
