@@ -1782,20 +1782,29 @@ def main() -> None:
     if workspace.message():
         st.info(workspace.message())
 
-    # Round 056: one-click Excel export of the whole report (one sheet per visual)
+    # Round 056/075: Excel + PDF export — generated lazily on click (the PDF
+    # render is heavy, so we don't rebuild it on every rerun).
     if not readonly:
-        try:
-            from ai4bi.analysis.excel_export import build_report_excel
-            _xlsx = build_report_excel(report, executor, active_filters)
-            st.download_button(
-                "⬇ 下載整份報表 (Excel)",
-                data=_xlsx,
-                file_name=f"{report.audit.report_id}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="report_xlsx_dl",
-            )
-        except Exception:  # noqa: BLE001 — export must never break the page
-            pass
+        if st.button("📤 準備匯出檔案 (Excel / PDF)", key="prep_exports"):
+            try:
+                from ai4bi.analysis.excel_export import build_report_excel
+                from ai4bi.analysis.pdf_export import build_report_pdf
+                st.session_state["_export_xlsx"] = build_report_excel(report, executor, active_filters)
+                st.session_state["_export_pdf"] = build_report_pdf(report, executor, active_filters)
+            except Exception as _exc:  # noqa: BLE001 — export must never break the page
+                st.warning(f"匯出產生失敗：{_exc}")
+        _xlsx, _pdf = st.session_state.get("_export_xlsx"), st.session_state.get("_export_pdf")
+        if _xlsx or _pdf:
+            _ecols = st.columns(2)
+            if _xlsx:
+                _ecols[0].download_button(
+                    "⬇ 下載 Excel", data=_xlsx, file_name=f"{report.audit.report_id}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="report_xlsx_dl")
+            if _pdf:
+                _ecols[1].download_button(
+                    "⬇ 下載 PDF 報告", data=_pdf, file_name=f"{report.audit.report_id}.pdf",
+                    mime="application/pdf", key="report_pdf_dl")
 
     _trusted_markdown = (
         "- 示範資料：合成數據，非真實業務資料。\n"
