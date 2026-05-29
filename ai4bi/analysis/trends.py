@@ -1,0 +1,93 @@
+"""Trend-streak analysis — Round 085.
+
+"Which products are declining 3 months in a row?" — pure-pandas consecutive
+run detection per entity, bypassing the executor's no-window/no-lag limit.
+
+For each entity we bucket the date to a period (month/week), sum the value per
+period, order chronologically, and measure the length of the *current* monotone
+run ending at the latest period. Entities whose current declining run is at
+least ``min_streak`` are returned worst-first — a ready-made "at-risk SKU" list.
+"""
+
+from __future__ import annotations
+
+import pandas as pd
+
+_PERIOD_FREQ = {"month": "MS", "week": "W", "quarter": "QS", "day": "D"}
+
+
+def _current_streak(values: list[float]) -> tuple[int, str]:
+    """Length + direction of the monotone run ending at the last value.
+
+    Returns (run_length, "down"|"up"|"flat"). run_length counts the number of
+    consecutive period-over-period moves in one direction at the tail.
+    """
+    if len(values) < 2:
+        return 0, "flat"
+    direction = "flat"
+    run = 0
+    for i in range(len(values) - 1, 0, -1):
+        diff = values[i] - values[i - 1]
+        step = "down" if diff < 0 else ("up" if diff > 0 else "flat")
+        if step == "flat":
+            break
+        if direction == "flat":
+            direction = step
+            run = 1
+        elif step == direction:
+            run += 1
+        else:
+            break
+    return run, direction
+
+
+def declining_streaks(
+    df: pd.DataFrame,
+    entity_col: str,
+    date_col: str,
+    value_col: str,
+    period: str = "month",
+    min_streak: int = 3,
+    direction: str = "down",
+) -> pd.DataFrame:
+    """Return entities with a current monotone run of length >= ``min_streak``.
+
+    Columns: [entity_col, 連續期數, 趨勢, 最新值, 前一期, 變化%].
+    Empty DataFrame when columns are missing or no entity qualifies.
+    """
+    needed = [entity_col, date_col, value_col]
+    if any(c not in df.columns for c in needed):
+        return pd.DataFrame()
+    work = df[needed].copy()
+    work[date_col] = pd.to_datetime(work[date_col], errors="coerce")
+    work = work.dropna(subset=[entity_col, date_col])
+    if work.empty:
+        return pd.DataFrame()
+
+    freq = _PERIOD_FREQ.get(period, "MS")
+    work["_period"] = work[date_col].dt.to_period(freq[0] if freq != "MS" else "M").dt.to_timestamp()
+    agg = (work.groupby([entity_col, "_period"])[value_col].sum()
+           .reset_index().sort_values([entity_col, "_period"]))
+
+    label = {"down": "連續下滑", "up": "連續成長"}.get(direction, "連續")
+    rows = []
+    for entity, g in agg.groupby(entity_col):
+        vals = g[value_col].tolist()
+        run, dir_ = _current_streak(vals)
+        if dir_ != direction or run < min_streak:
+            continue
+        latest, prev = vals[-1], vals[-2]
+        pct = ((latest - prev) / abs(prev) * 100.0) if prev else float("nan")
+        rows.append({
+            entity_col: entity,
+            "連續期數": run,
+            "趨勢": label,
+            "最新值": round(latest, 2),
+            "前一期": round(prev, 2),
+            "變化%": round(pct, 1),
+        })
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows).sort_values(["連續期數", "變化%"],
+                                         ascending=[False, True])
+    return out.reset_index(drop=True)

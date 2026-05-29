@@ -59,6 +59,7 @@ from ai4bi.ui.cohort_panel import render_cohort_panel  # Round 062
 from ai4bi.ui.change_panel import render_change_panel  # Round 071
 from ai4bi.ui.basket_panel import render_basket_panel  # Round 077
 from ai4bi.ui.rfm_panel import render_rfm_panel  # Round 082
+from ai4bi.ui.trend_streak_panel import render_trend_streak_panel  # Round 085
 from ai4bi.report.share_auth import hash_password, verify_password  # Round 064
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
@@ -962,6 +963,9 @@ def _render_draft_controls(
 
         # ── Zone 3d9: 客戶流失風險 / RFM (Round 082) ──────────────────────
         render_rfm_panel()
+
+        # ── Zone 3d10: 連續下滑偵測 (Round 085) ───────────────────────────
+        render_trend_streak_panel()
 
         # ── Zone 3d7: 變化分解 (Round 071) ────────────────────────────────
         if executor is not None:

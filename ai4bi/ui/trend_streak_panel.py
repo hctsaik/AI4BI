@@ -1,0 +1,85 @@
+"""Trend-streak panel — Round 085.
+
+"哪些商品連續 N 期下滑？" — flags entities (SKU / 門市 / 品類) whose metric has
+declined (or grown) for several consecutive periods in a row. Reads rows from
+the content store (R051); pure pandas, so it works where the single-GROUP-BY
+executor cannot.
+"""
+
+from __future__ import annotations
+
+import streamlit as st
+
+from ai4bi.analysis.trends import declining_streaks
+from ai4bi.blocks.contracts import BlockType, DataBlockContract
+from ai4bi.blocks.datastore import materialize_dataframe
+from ai4bi.ui.upload import _USER_BLOCKS_KEY, _USER_BLOCK_META_KEY
+
+_ENTITY_HINTS = ("product", "sku", "item", "store", "category", "商品", "品項", "門市", "品類", "客戶")
+_DATE_HINTS = ("date", "_at", "time", "日期", "時間")
+_VALUE_HINTS = ("revenue", "amount", "sales", "qty", "quantity", "count", "營收", "金額", "銷售", "數量")
+_PERIODS = {"month": "每月", "week": "每週", "quarter": "每季"}
+
+
+def _fact_blocks() -> dict[str, DataBlockContract]:
+    blocks: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
+    return {b: c for b, c in blocks.items() if c.block_type == BlockType.fact}
+
+
+def _guess(cols: list[str], hints: tuple[str, ...], default: int = 0) -> int:
+    for i, c in enumerate(cols):
+        if any(h in c.lower() for h in hints):
+            return i
+    return default
+
+
+def render_trend_streak_panel() -> None:
+    facts = _fact_blocks()
+    if not facts:
+        return
+    with st.expander("📉 連續下滑偵測（誰在持續走弱）", expanded=False):
+        st.caption("找出指標連續多期下滑的商品 / 門市 / 品類，提早介入。")
+        bid = st.selectbox(
+            "資料集", list(facts.keys()),
+            format_func=lambda b: st.session_state.get(_USER_BLOCK_META_KEY, {})
+                .get(b, {}).get("display_name", b),
+            key="streak_block",
+        )
+        contract = facts[bid]
+        cols = [c.name for c in contract.columns]
+        if len(cols) < 3:
+            st.info("此資料集欄位不足以偵測趨勢。")
+            return
+
+        c1, c2 = st.columns(2)
+        with c1:
+            entity_col = st.selectbox("對象", cols, index=_guess(cols, _ENTITY_HINTS), key="streak_entity")
+            date_col = st.selectbox("日期欄位", cols, index=_guess(cols, _DATE_HINTS), key="streak_date")
+        with c2:
+            value_col = st.selectbox("指標", cols, index=_guess(cols, _VALUE_HINTS), key="streak_value")
+            period = st.selectbox("期間", list(_PERIODS), format_func=lambda p: _PERIODS[p], key="streak_period")
+        min_streak = st.slider("連續期數門檻", 2, 6, 3, key="streak_min")
+        direction = st.radio("方向", ["down", "up"],
+                             format_func=lambda d: "連續下滑" if d == "down" else "連續成長",
+                             horizontal=True, key="streak_dir")
+
+        if st.button("🔍 偵測", key="streak_run", type="primary"):
+            try:
+                df = materialize_dataframe(contract)
+                st.session_state["_streak_result"] = declining_streaks(
+                    df, entity_col, date_col, value_col,
+                    period=period, min_streak=min_streak, direction=direction,
+                )
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"無法計算：{exc}")
+
+        res = st.session_state.get("_streak_result")
+        if res is not None:
+            if res.empty:
+                st.info("沒有符合條件的連續趨勢。")
+            else:
+                st.markdown(f"**{len(res)} 個對象符合條件**")
+                st.dataframe(res, width="stretch", hide_index=True)
+                csv = res.to_csv(index=False).encode("utf-8-sig")
+                st.download_button("⬇ 下載名單 CSV", data=csv,
+                                   file_name="trend_streaks.csv", key="streak_csv")
