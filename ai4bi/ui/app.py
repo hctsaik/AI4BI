@@ -55,6 +55,7 @@ from ai4bi.ui.calc_metric_panel import render_calc_metric_panel  # Round 052
 from ai4bi.ui.cross_fact_panel import render_cross_fact_panel  # Round 055
 from ai4bi.ui.what_if_panel import render_what_if_panel, get_parameters  # Round 060
 from ai4bi.ui.bookmark_panel import render_bookmark_panel  # Round 061
+from ai4bi.ui.cohort_panel import render_cohort_panel  # Round 062
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
 _BLOCKS_DIR = _DEMO_ROOT / "blocks"
@@ -906,6 +907,9 @@ def _render_draft_controls(
 
         # ── Zone 3d4: What-If 參數 (Round 060) ────────────────────────────
         render_what_if_panel()
+
+        # ── Zone 3d6: 客戶留存分析 (Round 062) ────────────────────────────
+        render_cohort_panel()
 
         # ── Zone 3d5: 書籤 / 儲存檢視 (Round 061) ──────────────────────────
         render_bookmark_panel(cache)

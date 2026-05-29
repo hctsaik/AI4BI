@@ -86,11 +86,15 @@ def _generate_records() -> list[dict]:
                     continue
                 weekend_boost = 1.35 if is_weekend else 1.0
                 qty = max(1, int(rng.gauss(3, 1.2) * mult * weekend_boost))
+                # Round 062: customer_id from a recurring pool so cohort/retention
+                # analysis has repeat customers across months (deterministic).
+                customer_id = f"C{rng.randint(1, 80):03d}"
                 records.append({
                     "order_date": date_str,
                     "store_id": store_id,
                     "store_name": store_name,
                     "city": city,
+                    "customer_id": customer_id,
                     "product_sku": sku,
                     "product_name": prod_name,
                     "category": category,
@@ -125,6 +129,7 @@ def build_retail_sales_block() -> DataBlockContract:
             ColumnSchema(name="store_id",      data_type="string"),
             ColumnSchema(name="store_name",    data_type="string"),
             ColumnSchema(name="city",          data_type="string"),
+            ColumnSchema(name="customer_id",   data_type="string"),
             ColumnSchema(name="product_sku",   data_type="string"),
             ColumnSchema(name="product_name",  data_type="string"),
             ColumnSchema(name="category",      data_type="string"),
