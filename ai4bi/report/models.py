@@ -541,6 +541,7 @@ _ALLOWLISTED_VISUAL_EXTRA_KEYS = {
     "data_labels",         # show value labels on bars (Round 058)
     "number_format",       # display number format (Round 058)
     "hole", "show_percent",  # pie/donut presentation
+    "target", "target_good_if",  # KPI goal / pacing (Round 084)
 }
 
 

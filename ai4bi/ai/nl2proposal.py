@@ -564,6 +564,13 @@ class NL2ProposalService:
             if answer is not None:
                 return answer
 
+        # Round 084: set a KPI goal/target. "把營收目標設為 100 萬". Checked before
+        # measure-filter since "目標" + a number is goal-setting, not a HAVING.
+        if _looks_like_set_target(prompt, normalized):
+            st_res = self._set_target(prompt, normalized, report, selected_component_id)
+            if st_res is not None:
+                return st_res
+
         # Round 080: measure (post-aggregate) filter → HAVING. "買超過 3 次的客戶",
         # "營收低於 500 的商品". Checked before categorical/value filters since it
         # carries a comparison word + a number against a projected metric.
@@ -1504,6 +1511,81 @@ class NL2ProposalService:
         )
 
     # ------------------------------------------------------------------
+    # Round 084: set a KPI goal / target (pacing)
+    # ------------------------------------------------------------------
+
+    def _set_target(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        selected_component_id: str | None,
+    ) -> "NL2ProposalResult | None":
+        """"把營收目標設為 100 萬" → set a KPI card's target for pacing.
+
+        Resolves a KPI-card visual (the selected one, or the KPI whose metric
+        keyword appears in the prompt, else the first KPI) and stages a
+        display-only change to visualization.extra["target"].
+        """
+        value = _extract_target_value(prompt, normalized)
+        if value is None:
+            return None
+
+        # Resolve the target KPI visual.
+        found = _find_visual(report, selected_component_id)
+        target_tuple = None
+        if found is not None and found[2].visualization.visual_type == VisualType.kpi_card:
+            target_tuple = found
+        if target_tuple is None:
+            hay = f"{prompt.lower()} {normalized}"
+            first_kpi = None
+            for pid, page in report.pages.items():
+                for vid, v in page.visuals.items():
+                    if v.visualization.visual_type != VisualType.kpi_card or not v.query.metrics:
+                        continue
+                    if first_kpi is None:
+                        first_kpi = (pid, vid, v)
+                    m = v.query.metrics[0]
+                    for kw in {m.metric_name.lower(), (m.alias or "").lower()}:
+                        if kw and kw in hay:
+                            target_tuple = (pid, vid, v)
+                            break
+                    if target_tuple:
+                        break
+                if target_tuple:
+                    break
+            if target_tuple is None:
+                target_tuple = first_kpi
+        if target_tuple is None:
+            return self._unsupported(
+                "找不到可設定目標的 KPI 卡。請先選擇一張 KPI 卡。",
+                target_scope=_target_scope(selected_component_id),
+            )
+
+        page_id, visual_id, visual = target_tuple
+        metric_label = visual.visualization.title or (
+            visual.query.metrics[0].alias or visual.query.metrics[0].metric_name
+        )
+        before = visual.visualization.extra.get("target")
+        path = f"pages/{page_id}/visuals/{visual_id}/visualization/extra/target"
+        notes = [
+            f"為「{metric_label}」設定目標 {value:,.0f}，顯示達成進度條。",
+            "顯示用變更，不影響查詢數字。",
+        ]
+        proposal = ReportProposal(
+            description=f"Set target for '{metric_label}' = {value:,.0f}",
+            changes=[ReportChange(path=path, label=f"KPI 目標：{metric_label}",
+                                  before=before, after=value, affects_data=False)],
+            target_component_id=visual_id,
+        )
+        intent = AIIntent(intent_kind="analysis_request", target_scope=f"visual:{visual_id}",
+                          suggested_visuals=[visual_id], trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(
+            intent=intent, message=f"已為「{metric_label}」設定目標 {value:,.0f}。",
+            proposal=proposal, trust_notes=notes, risk_level="low",
+        )
+
+    # ------------------------------------------------------------------
     # Round 020: date_filter_change intent (global_filters/date_range)
     # ------------------------------------------------------------------
 
@@ -2319,6 +2401,38 @@ def _format_metric_value(value: float | None, unit: str) -> str:
     if abs(value - round(value)) < 1e-9:
         return f"{value:,.0f}"
     return f"{value:,.2f}"
+
+
+# --- Round 084: KPI target / pacing parsing ----------------------------------
+
+_TARGET_MARKERS: tuple[str, ...] = ("目標", "達標", "target", "goal", "objective")
+
+
+def _looks_like_set_target(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    if not any(t in hay for t in _TARGET_MARKERS):
+        return False
+    # Needs a number and a "set" verb (設/設定/set/=) — "達標了嗎" is a question,
+    # not a set-target command, so require an assignment cue.
+    has_set = any(v in hay for v in ("設", "設定", "設為", "訂", "定為", "set", "="))
+    return has_set and re.search(r"\d", hay) is not None
+
+
+def _extract_target_value(prompt: str, normalized: str) -> float | None:
+    """Parse a target number, honouring 萬/億/k/m/百萬 multipliers."""
+    hay = f"{prompt} {normalized}"
+    m = re.search(r"(\d[\d,]*\.?\d*)\s*(億|百萬|萬|千|k|m|b)?", hay, re.IGNORECASE)
+    if m is None:
+        return None
+    try:
+        val = float(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    mult = {"億": 1e8, "百萬": 1e6, "萬": 1e4, "千": 1e3,
+            "k": 1e3, "m": 1e6, "b": 1e9}.get((m.group(2) or "").lower())
+    if mult:
+        val *= mult
+    return val
 
 
 # --- Round 081: explain-change (decomposition) parsing -----------------------
