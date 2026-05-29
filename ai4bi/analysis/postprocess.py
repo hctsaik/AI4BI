@@ -58,6 +58,26 @@ def add_top_n(df: pd.DataFrame, value_col: str, n: int = 10) -> pd.DataFrame:
     return pd.concat([top, pd.DataFrame([other])], ignore_index=True)
 
 
+def top_n_per_group(
+    df: pd.DataFrame,
+    group_col: str,
+    value_col: str,
+    n: int = 3,
+    ascending: bool = False,
+) -> pd.DataFrame:
+    """Keep the top ``n`` rows of ``value_col`` *within each* ``group_col``.
+
+    Round 090: emulates ROW_NUMBER() OVER (PARTITION BY group ORDER BY value) —
+    "top 3 products within each store" — as a pandas post-pass on a two-dimension
+    grouped result, since the executor has no window functions.
+    """
+    if group_col not in df.columns or value_col not in df.columns or df.empty:
+        return df
+    ordered = df.sort_values([group_col, value_col], ascending=[True, ascending])
+    out = ordered.groupby(group_col, group_keys=False, sort=False).head(n)
+    return out.reset_index(drop=True)
+
+
 def add_pareto(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
     """Sort by value desc and add cumulative-% + ABC class (80/95 cutoffs)."""
     out = df.sort_values(value_col, ascending=False).reset_index(drop=True)

@@ -502,6 +502,11 @@ class NL2ProposalService:
             if panel is not None:
                 return panel
 
+        if intent == "grouped_topn":  # Round 090
+            gt = self._answer_grouped_topn(prompt, normalized, report, contracts)
+            if gt is not None:
+                return gt
+
         if intent == "ranking":  # Round 087
             ranked = self._answer_ranking(prompt, normalized, report, contracts)
             if ranked is not None:
@@ -573,6 +578,13 @@ class NL2ProposalService:
             panel = self._run_panel_analysis(prompt, normalized, contracts)
             if panel is not None:
                 return panel
+
+        # Round 090: "每個門市最暢銷的 3 個商品" → per-group Top-N. Checked before
+        # plain ranking since it is the more specific (two-dimension) pattern.
+        if _looks_like_grouped_topn(prompt, normalized):
+            gt = self._answer_grouped_topn(prompt, normalized, report, contracts)
+            if gt is not None:
+                return gt
 
         # Round 087: "我最賺的 5 個商品" / "賣最差的品類" → ranked table. Checked
         # before the plain-answer engine; falls through if no dimension resolves.
@@ -1012,6 +1024,72 @@ class NL2ProposalService:
             trust_notes=notes,
             risk_level="low",
         )
+
+    def _answer_grouped_topn(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 090: "每個門市最暢銷的 3 個商品" / "top 3 products per store".
+
+        Runs a two-dimension grouped query (outer group × inner entity) and keeps
+        the top-N inner rows within each outer group — emulating a partitioned
+        window function as a pandas post-pass. Returns None to fall through.
+        """
+        executor = getattr(self, "_executor", None)
+        if executor is None or not contracts:
+            return None
+
+        idx = SchemaIndex.build(contracts)
+        metric = idx.best_metric_match(prompt, normalized)
+        if metric is None:
+            return None
+        block_id, metric_name, alias = metric.block_id, metric.metric_name, metric.alias
+
+        outer_col, inner_col = _resolve_two_dims(idx, prompt, normalized, contracts, block_id)
+        if outer_col is None or inner_col is None or outer_col == inner_col:
+            return None
+
+        n = _extract_rank_n(prompt, normalized, default=3)
+        ascending = _ranking_is_ascending(prompt, normalized)
+
+        from ai4bi.analysis.postprocess import top_n_per_group
+        from ai4bi.query_spec import BlockRef, DimensionRef, VisualQuerySpec
+
+        spec = VisualQuerySpec(
+            spec_id=f"grouptopn_{metric_name}",
+            block_refs=[BlockRef(block_id)],
+            metrics=[MetricRef(block_id, metric_name, alias)],
+            dimensions=[DimensionRef(block_id, outer_col, outer_col),
+                        DimensionRef(block_id, inner_col, inner_col)],
+            inherit_global_filter=False,
+        )
+        try:
+            df = executor.run(spec)
+        except Exception:  # noqa: BLE001
+            return None
+        if df is None or df.empty or alias not in df.columns:
+            return None
+
+        table = top_n_per_group(df, outer_col, alias, n=n, ascending=ascending)
+        if table is None or table.empty:
+            return None
+
+        superlative = "最低" if ascending else "最高"
+        n_groups = table[outer_col].nunique()
+        sentence = (f"每個「{outer_col}」中{alias}{superlative}的前 {n} 個「{inner_col}」"
+                    f"（共 {n_groups} 組）。")
+        notes = [
+            f"先依「{outer_col}」「{inner_col}」分組彙總，再於每組內取前 {n}"
+            f"（分區 Top-N，pandas 後處理；治理查詢路徑）。",
+            f"來源：{block_id}。",
+        ]
+        intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                          trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=sentence, result_table=table,
+                                 trust_notes=notes, risk_level="low")
 
     def _answer_ranking(
         self,
@@ -2734,6 +2812,72 @@ def _extract_rank_n(prompt: str, normalized: str, default: int = 5) -> int:
         except ValueError:
             pass
     return default
+
+
+# --- Round 090: per-group Top-N parsing --------------------------------------
+
+_PER_GROUP_MARKERS: tuple[str, ...] = (
+    "每個", "每一個", "每家", "每間", "每位", "各個", "各家", "各",
+    "per ", "each ", "within each", "by each", "for each",
+)
+
+
+def _looks_like_grouped_topn(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    if not any(m in hay for m in _PER_GROUP_MARKERS):
+        return False
+    # Needs a ranking cue too (最/暢銷/賺/top/best/前N) — otherwise it's a plain
+    # "show each store's revenue", not a per-group ranking.
+    return (any(t in hay for t in _RANK_TRIGGERS)
+            or any(w in hay for w in ("暢銷", "熱賣", "賺", "賣最"))
+            or bool(re.search(r"(前\s*\d+|top\s*\d+)", hay)))
+
+
+def _is_categorical_col(contracts, block_id: str, col: str) -> bool:
+    contract = (contracts or {}).get(block_id)
+    for c in getattr(contract, "columns", None) or []:
+        if c.name == col:
+            return getattr(c, "data_type", "") in ("string", "str", "object", "text", "varchar")
+    return False
+
+
+def _resolve_two_dims(idx, prompt: str, normalized: str, contracts, block_id: str):
+    """Resolve (outer_group_col, inner_entity_col) for a per-group Top-N.
+
+    Outer = the dimension after a per/each marker; inner = the best other
+    categorical dimension keyword. Both must be categorical columns on
+    ``block_id``. Returns (None, None) when they can't be resolved.
+    """
+    hay = f"{prompt.lower()} {normalized}"
+    outer = None
+    for marker in _PER_GROUP_MARKERS:
+        i = hay.find(marker)
+        if i < 0:
+            continue
+        # Chinese has no word spaces, so match the longest dimension keyword the
+        # text right after the marker *starts with* (handles "每個地區營收..." and
+        # the spaced English "per store").
+        tail = hay[i + len(marker):].lstrip(" 的")
+        cand, clen = None, 0
+        for kw, e in idx._dims.items():
+            if (e.block_id == block_id and tail.startswith(kw) and len(kw) > clen
+                    and _is_categorical_col(contracts, block_id, e.column_name)):
+                cand, clen = e.column_name, len(kw)
+        if cand:
+            outer = cand
+            break
+    if outer is None:
+        return None, None
+
+    inner = None
+    best_len = 0
+    for kw, e in idx._dims.items():
+        if (e.block_id == block_id and e.column_name != outer
+                and _is_categorical_col(contracts, block_id, e.column_name)
+                and kw in hay and len(kw) > best_len):
+            inner = e.column_name
+            best_len = len(kw)
+    return outer, inner
 
 
 # --- Round 089: location-column detection for map visuals --------------------
