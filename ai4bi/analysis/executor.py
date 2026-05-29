@@ -93,6 +93,7 @@ _FORMULA_ALLOWED_WORDS = frozenset({
 
 _FORMULA_TOKEN_RE = re.compile(
     r"'[^']*'"                        # single-quoted string literal
+    r"|@[A-Za-z_][A-Za-z0-9_]*"       # what-if parameter reference (Round 060)
     r"|\d+\.?\d*"                     # numeric literal
     r"|[A-Za-z_][A-Za-z0-9_]*"        # identifier / keyword
     r"|<=|>=|<>|!=|[-+*/%(),.<>=]"    # operators / punctuation
@@ -105,12 +106,17 @@ def _build_derived_formula_expr(
     formula: str,
     primary_block_id: str,
     column_names: set[str],
+    parameters: dict[str, float] | None = None,
 ) -> str:
     """Validate a derived-metric formula and return a safely-qualified expression.
 
-    Raises QueryPlanningError if the formula references an unknown identifier or
-    contains a disallowed sequence.
+    Round 060: ``@name`` tokens are what-if parameters; each is replaced by its
+    current numeric value (a literal), so parameters can never inject SQL.
+
+    Raises QueryPlanningError if the formula references an unknown identifier,
+    an undefined parameter, or contains a disallowed sequence.
     """
+    parameters = parameters or {}
     formula = (formula or "").strip()
     if not formula:
         raise QueryPlanningError("Derived metric has an empty formula.")
@@ -131,7 +137,14 @@ def _build_derived_formula_expr(
         pos = match.end()
         tok = match.group(0)
         first = tok[0]
-        if first == "'" or first.isdigit():
+        if first == "@":
+            name = tok[1:]
+            if name not in parameters:
+                raise QueryPlanningError(
+                    f"Derived formula references undefined parameter '@{name}'."
+                )
+            out.append(repr(float(parameters[name])))  # inline as numeric literal
+        elif first == "'" or first.isdigit():
             out.append(tok)                       # literal — safe as-is
         elif first.isalpha() or first == "_":
             low = tok.lower()
@@ -232,11 +245,13 @@ class Executor:
         semantic_model_path: Optional[str | Path] = None,
         registry: Optional[BlockRegistryProtocol] = None,
         extra_contracts: Optional[dict[str, "DataBlockContract"]] = None,
+        parameters: Optional[dict[str, float]] = None,
     ) -> None:
         self._registry_root = Path(registry_root) if registry_root else _DEFAULT_REGISTRY
         self._loader = loader or BlockLoader()
         self._registry = registry  # optional BlockRegistryProtocol for versioned resolution
         self._extra_contracts: dict[str, DataBlockContract] = extra_contracts or {}
+        self._parameters: dict[str, float] = parameters or {}  # Round 060 what-if params
         # Round 032: cache Arrow tables so InlineDataSource records are not
         # re-serialised on every query within the same Executor instance
         self._arrow_cache: dict[str, Any] = {}
@@ -309,6 +324,7 @@ class Executor:
         metric: MetricRef,
         contracts: dict[str, DataBlockContract],
         primary_block_id: str,
+        parameters: dict[str, float] | None = None,
     ) -> str:
         if metric.block_id != primary_block_id:
             raise QueryPlanningError("Metrics must come from the primary fact block.")
@@ -329,7 +345,8 @@ class Executor:
             if definition.disaggregation_method == DisaggregationMethod.none:
                 alias = _quote(metric.alias or metric.metric_name)
                 expr = _build_derived_formula_expr(
-                    definition.formula, primary_block_id, _column_names(contract)
+                    definition.formula, primary_block_id, _column_names(contract),
+                    parameters=parameters,
                 )
                 return f"{expr} AS {alias}"
             raise QueryPlanningError(
@@ -381,7 +398,7 @@ class Executor:
         select_parts = [
             *(self._build_dimension_expr(dimension, contracts) for dimension in spec.dimensions),
             *(
-                self._build_metric_expr(metric, contracts, spec.primary_block_id)
+                self._build_metric_expr(metric, contracts, spec.primary_block_id, self._parameters)
                 for metric in spec.metrics
             ),
         ]

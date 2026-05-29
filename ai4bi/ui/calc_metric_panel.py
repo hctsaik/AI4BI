@@ -23,10 +23,17 @@ def _column_names(contract) -> list[str]:
     return [c.name for c in contract.columns]
 
 
-def validate_formula(formula: str, contract) -> tuple[bool, str]:
-    """Validate a formula against the engine sandbox. Returns (ok, message)."""
+def validate_formula(formula: str, contract, parameters: dict | None = None) -> tuple[bool, str]:
+    """Validate a formula against the engine sandbox. Returns (ok, message).
+
+    Round 060: ``parameters`` (what-if @names) are accepted so formulas that
+    reference them validate instead of being rejected as unknown identifiers.
+    """
     try:
-        _build_derived_formula_expr(formula, contract.block_id, set(_column_names(contract)))
+        _build_derived_formula_expr(
+            formula, contract.block_id, set(_column_names(contract)),
+            parameters=parameters or {},
+        )
         return True, "公式有效 ✅"
     except QueryPlanningError as exc:
         return False, str(exc)
@@ -73,9 +80,12 @@ def render_calc_metric_panel() -> None:
         with col2:
             desc = st.text_input("說明（選填）", key="calc_desc")
 
+        from ai4bi.ui.what_if_panel import get_parameters
+        _params = get_parameters()
+
         # Live validation
         if formula.strip():
-            ok, msg = validate_formula(formula, contract)
+            ok, msg = validate_formula(formula, contract, _params)
             (st.success if ok else st.error)(msg)
         else:
             ok = False
@@ -89,7 +99,7 @@ def render_calc_metric_panel() -> None:
             if metric_name in existing_names:
                 st.error(f"指標名稱「{metric_name}」已存在。")
             else:
-                ok, msg = validate_formula(formula, contract)
+                ok, msg = validate_formula(formula, contract, _params)
                 if not ok:
                     st.error(f"公式無效：{msg}")
                 else:
