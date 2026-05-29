@@ -499,6 +499,11 @@ class NL2ProposalService:
             if answer is not None:
                 return answer
 
+        if intent == "measure_filter":  # Round 080
+            mf = self._measure_filter_change(prompt, normalized, report, selected_component_id)
+            if mf is not None:
+                return mf
+
         if intent == "queue_analysis":
             return self._queue_time_plan(prompt, report, selected_component_id, semantic_model, contracts)
 
@@ -542,6 +547,14 @@ class NL2ProposalService:
             answer = self._answer_metric(prompt, normalized, report, semantic_model, contracts)
             if answer is not None:
                 return answer
+
+        # Round 080: measure (post-aggregate) filter → HAVING. "買超過 3 次的客戶",
+        # "營收低於 500 的商品". Checked before categorical/value filters since it
+        # carries a comparison word + a number against a projected metric.
+        if _looks_like_measure_filter(prompt, normalized):
+            mf = self._measure_filter_change(prompt, normalized, report, selected_component_id)
+            if mf is not None:
+                return mf
 
         # Round 066: "add a trend line / 趨勢線" overlay (keyword mode). Checked
         # before add_visual since it is a more specific phrase.
@@ -1297,6 +1310,88 @@ class NL2ProposalService:
         )
         intent = AIIntent(intent_kind="analysis_request", target_scope=f"visual:{visual_id}", suggested_visuals=[visual_id], trust_notes=notes, risk_level="medium")
         return NL2ProposalResult(intent=intent, message=f"Value filter proposal: {column_name} IN {values}.", proposal=proposal, trust_notes=notes, risk_level="medium")
+
+    # ------------------------------------------------------------------
+    # Round 080: measure (post-aggregate) filter → HAVING
+    # ------------------------------------------------------------------
+
+    def _measure_filter_change(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        selected_component_id: str | None,
+    ) -> "NL2ProposalResult | None":
+        """Turn "customers who bought more than 3 times" into a HAVING predicate.
+
+        Adds a post-aggregate measure filter to a target visual. The measure
+        must already be projected by the visual (visual-level measure filter),
+        which the executor enforces — so we resolve the threshold against the
+        visual's own metrics. Returns None to fall through when no target/metric
+        can be resolved.
+        """
+        found = _find_visual(report, selected_component_id)
+        if found is None:
+            # Fall back to the first visual that both groups and aggregates —
+            # HAVING is only meaningful on a grouped, aggregated visual.
+            for pid, page in report.pages.items():
+                for vid, v in page.visuals.items():
+                    if v.query.metrics and v.query.dimensions:
+                        found = (pid, vid, v)
+                        break
+                if found:
+                    break
+        if found is None:
+            return None
+        page_id, visual_id, visual = found
+        if not visual.query.metrics:
+            return None
+
+        parsed = _extract_measure_filter(prompt, normalized, visual)
+        if parsed is None:
+            return None
+        metric, operator, value = parsed
+
+        before = [
+            {"block_id": h.block_id, "metric_name": h.metric_name,
+             "operator": h.operator.value, "value": h.value}
+            for h in visual.query.having
+        ]
+        # Replace any existing predicate on the same metric+operator, then append.
+        after = [
+            h for h in before
+            if not (h["metric_name"] == metric.metric_name and h["operator"] == operator.value)
+        ]
+        after.append({
+            "block_id": metric.block_id,
+            "metric_name": metric.metric_name,
+            "operator": operator.value,
+            "value": value,
+        })
+        label_name = metric.alias or metric.metric_name
+        op_sym = {"gt": ">", "gte": "≥", "lt": "<", "lte": "≤", "eq": "=", "neq": "≠"}.get(operator.value, operator.value)
+        notes = [
+            f"在彙總後篩選「{label_name}」{op_sym} {value}（HAVING，逐組篩選）。",
+            "僅篩選此圖已投影的指標，仍走認證語意層；套用後重新查詢。",
+        ]
+        path = f"pages/{page_id}/visuals/{visual_id}/query/having"
+        proposal = ReportProposal(
+            description=f"Measure filter: {label_name} {op_sym} {value}",
+            changes=[ReportChange(
+                path=path, label=f"HAVING: {label_name} {op_sym} {value}",
+                before=before, after=after, affects_data=True,
+            )],
+            target_component_id=visual_id,
+        )
+        intent = AIIntent(
+            intent_kind="analysis_request", target_scope=f"visual:{visual_id}",
+            suggested_visuals=[visual_id], trust_notes=notes, risk_level="medium",
+        )
+        return NL2ProposalResult(
+            intent=intent,
+            message=f"已建立彙總後篩選：{label_name} {op_sym} {value}。",
+            proposal=proposal, trust_notes=notes, risk_level="medium",
+        )
 
     # ------------------------------------------------------------------
     # Round 020: date_filter_change intent (global_filters/date_range)
@@ -2114,6 +2209,104 @@ def _format_metric_value(value: float | None, unit: str) -> str:
     if abs(value - round(value)) < 1e-9:
         return f"{value:,.0f}"
     return f"{value:,.2f}"
+
+
+# --- Round 080: measure-filter (HAVING) parsing -----------------------------
+
+# Comparison phrase → FilterOperator. Longer/more-specific phrases first so
+# "至少" wins over "少" and "no less than" isn't read as "less than".
+_MEASURE_OP_PHRASES: tuple[tuple[str, str], ...] = (
+    ("at least", "gte"), ("no less than", "gte"), ("不少於", "gte"), ("至少", "gte"),
+    ("at most", "lte"), ("no more than", "lte"), ("不超過", "lte"), ("不多於", "lte"), ("至多", "lte"),
+    ("greater than or equal", "gte"), ("less than or equal", "lte"),
+    ("more than", "gt"), ("greater than", "gt"), ("over", "gt"), ("above", "gt"),
+    ("超過", "gt"), ("大於", "gt"), ("多於", "gt"), ("高於", "gt"),
+    ("less than", "lt"), ("fewer than", "lt"), ("below", "lt"), ("under", "lt"),
+    ("低於", "lt"), ("少於", "lt"), ("小於", "lt"), ("不到", "lt"),
+    (">=", "gte"), ("<=", "lte"), (">", "gt"), ("<", "lt"),
+)
+
+
+def _looks_like_measure_filter(prompt: str, normalized: str) -> bool:
+    """True when the prompt is a post-aggregate threshold on a measure."""
+    hay = f"{prompt.lower()} {normalized}"
+    if not any(phrase in hay for phrase, _ in _MEASURE_OP_PHRASES):
+        return False
+    return re.search(r"\d", hay) is not None
+
+
+def _measure_operator(hay: str):
+    from ai4bi.query_spec import FilterOperator
+    for phrase, opname in _MEASURE_OP_PHRASES:
+        if phrase in hay:
+            return getattr(FilterOperator, opname if opname != "in" else "in_")
+    return None
+
+
+def _extract_measure_filter(prompt: str, normalized: str, visual):
+    """Resolve (MetricRef, operator, numeric_value) against a visual's metrics.
+
+    Returns None when no operator, number, or projected metric can be found.
+    The metric must be one the visual already projects (the executor requires a
+    HAVING to reference a projected measure).
+    """
+    hay = f"{prompt.lower()} {normalized}"
+    operator = _measure_operator(hay)
+    if operator is None:
+        return None
+
+    num_match = re.search(r"(\d[\d,]*\.?\d*)", hay)
+    if num_match is None:
+        return None
+    raw = num_match.group(1).replace(",", "")
+    try:
+        value: float = float(raw)
+        if value.is_integer():
+            value = int(value)
+    except ValueError:
+        return None
+
+    metrics = visual.query.metrics
+    if not metrics:
+        return None
+
+    # Match the threshold to one of the visual's projected metrics by keyword.
+    def _metric_keywords(m) -> list[str]:
+        kws = {m.metric_name.lower(), (m.alias or "").lower()}
+        for tok in re.split(r"[_\s]+", m.metric_name.lower()):
+            if tok:
+                kws.add(tok)
+                for zh in _METRIC_SYNONYMS.get(tok, []):
+                    kws.add(zh)
+        return [k for k in kws if k]
+
+    chosen = None
+    best_len = 0
+    for m in metrics:
+        for kw in _metric_keywords(m):
+            if kw and kw in hay and len(kw) > best_len:
+                chosen = m
+                best_len = len(kw)
+    if chosen is None:
+        # No explicit metric word — default to the sole/first projected metric.
+        chosen = metrics[0]
+
+    return chosen, operator, value
+
+
+# Light ZH/EN synonyms for matching a metric word in a measure-filter prompt.
+_METRIC_SYNONYMS: dict[str, list[str]] = {
+    "revenue": ["營收", "收入", "業績", "銷售額"],
+    "sales": ["銷售", "業績"],
+    "orders": ["訂單", "次", "次數", "筆數", "購買"],
+    "order": ["訂單", "次"],
+    "count": ["次數", "筆數", "數量"],
+    "quantity": ["數量", "件數"],
+    "amount": ["金額"],
+    "profit": ["利潤", "獲利"],
+    "margin": ["毛利", "利潤率"],
+    "headcount": ["員工", "人數"],
+}
 
 
 def _compose_answer_sentence(

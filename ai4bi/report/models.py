@@ -17,6 +17,7 @@ from ai4bi.query_spec import (
     DimensionRef,
     FilterOperator,
     FilterSpec,
+    HavingSpec,
     MetricRef,
     SortDirection,
     SortSpec,
@@ -158,6 +159,15 @@ def query_to_dict(query: VisualQuerySpec) -> dict[str, Any]:
             }
             for filter_spec in query.filters
         ],
+        "having": [
+            {
+                "block_id": h.block_id,
+                "metric_name": h.metric_name,
+                "operator": h.operator.value,
+                "value": copy.deepcopy(h.value),
+            }
+            for h in query.having
+        ],
         "sort": [
             {"column_name": sort.column_name, "direction": sort.direction.value}
             for sort in query.sort
@@ -211,6 +221,15 @@ def query_from_dict(payload: dict[str, Any]) -> VisualQuerySpec:
                 inherit_global_filter=filter_spec.get("inherit_global_filter", False),
             )
             for filter_spec in payload.get("filters", [])
+        ],
+        having=[
+            HavingSpec(
+                block_id=h["block_id"],
+                metric_name=h["metric_name"],
+                operator=FilterOperator(h["operator"]),
+                value=copy.deepcopy(h.get("value")),
+            )
+            for h in payload.get("having", [])
         ],
         sort=[
             SortSpec(sort["column_name"], SortDirection(sort.get("direction", "desc")))
@@ -584,6 +603,16 @@ def _get_path(report: ExecutableReportSpec, path: str) -> Any:
                 }
                 for f in visual.query.filters
             ]
+        if parts[4:] == ["query", "having"]:
+            return [
+                {
+                    "block_id": h.block_id,
+                    "metric_name": h.metric_name,
+                    "operator": h.operator.value,
+                    "value": copy.deepcopy(h.value),
+                }
+                for h in visual.query.having
+            ]
     if len(parts) == 8 and parts[0] == "pages" and parts[2] == "visuals" and parts[4] == "query" and parts[5] == "block_refs" and parts[7] == "pinned_version":
         visual = report.pages[parts[1]].visuals[parts[3]]
         block_id = parts[6]
@@ -683,6 +712,17 @@ def _set_path(report: ExecutableReportSpec, path: str, value: Any) -> None:
                     inherit_global_filter=f.get("inherit_global_filter", False),
                 )
                 for f in value
+            ]
+            return
+        if parts[4:] == ["query", "having"]:
+            visual.query.having = [
+                HavingSpec(
+                    block_id=h["block_id"],
+                    metric_name=h["metric_name"],
+                    operator=FilterOperator(h["operator"]),
+                    value=copy.deepcopy(h.get("value")),
+                )
+                for h in value
             ]
             return
     if len(parts) == 8 and parts[0] == "pages" and parts[2] == "visuals" and parts[4] == "query" and parts[5] == "block_refs" and parts[7] == "pinned_version":
