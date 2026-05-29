@@ -49,6 +49,7 @@ from ai4bi.ui.drilldown import (  # Round 049
     apply_drill, process_pending_drill, render_drill_controls, hierarchy_of,
 )
 from ai4bi.ui.summary_panel import render_summary_panel  # Round 050
+from ai4bi.ui.calc_metric_panel import render_calc_metric_panel  # Round 052
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
 _BLOCKS_DIR = _DEMO_ROOT / "blocks"
@@ -891,6 +892,9 @@ def _render_draft_controls(
 
         # ── Zone 3d: 資料模型 (Round 038) ─────────────────────────────────
         render_data_model_view()
+
+        # ── Zone 3d2: 計算欄位 (Round 052) ────────────────────────────────
+        render_calc_metric_panel()
 
         # ── Zone 3e: 提醒設定 (Round 048) ─────────────────────────────────
         render_alert_manager(_load_all_contracts())
