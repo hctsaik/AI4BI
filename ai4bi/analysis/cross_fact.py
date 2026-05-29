@@ -31,6 +31,16 @@ def shared_columns(a: DataBlockContract, b: DataBlockContract) -> list[str]:
     return [c.name for c in a.columns if c.name in bcols]
 
 
+def combine(a: pd.Series, b: pd.Series, op: str) -> pd.Series:
+    """Combine two aggregated columns. op ∈ {ratio, diff, margin_pct}."""
+    if op == "diff":
+        return (a - b)
+    if op == "margin_pct":
+        return ((a - b) / a.replace(0, pd.NA) * 100.0)
+    # default ratio
+    return a / b.replace(0, pd.NA)
+
+
 def compose_two_facts(
     contracts: dict[str, DataBlockContract],
     *,
@@ -38,8 +48,14 @@ def compose_two_facts(
     block_b: str, agg_b: str, col_b: str, alias_b: str,
     join_key: str,
     ratio_alias: Optional[str] = None,
+    op: str = "ratio",
 ) -> pd.DataFrame:
-    """Aggregate two facts to ``join_key`` and join; optionally add a ratio column.
+    """Aggregate two facts to ``join_key`` and join; optionally add a combined column.
+
+    ``op`` selects how the two aggregates combine into ``ratio_alias``:
+      - "ratio":      A / B
+      - "diff":       A − B
+      - "margin_pct": (A − B) / A * 100   (e.g. contribution margin %)
 
     Returns a DataFrame: [join_key, alias_a, alias_b, (ratio_alias)].
     Raises CompositionPlanningError if the plan violates safety rules.
@@ -70,6 +86,5 @@ def compose_two_facts(
         con.close()
 
     if ratio_alias and alias_a in df.columns and alias_b in df.columns:
-        denom = df[alias_b].replace(0, pd.NA)
-        df[ratio_alias] = (df[alias_a] / denom).astype(float).round(2)
+        df[ratio_alias] = combine(df[alias_a], df[alias_b], op).astype(float).round(2)
     return df

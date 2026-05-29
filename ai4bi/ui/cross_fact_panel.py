@@ -74,7 +74,14 @@ def render_cross_fact_panel() -> None:
             st.warning("這兩張表沒有共同欄位可對應，無法跨表計算。")
             return
         join_key = st.selectbox("對應欄位（join）", keys, key="xf_join")
-        ratio_name = st.text_input("結果名稱", value="人均營收", key="xf_ratio_name")
+        op = st.selectbox(
+            "計算方式", ["ratio", "diff", "margin_pct"],
+            format_func=lambda o: {"ratio": "A ÷ B（比率）", "diff": "A − B（差額）",
+                                   "margin_pct": "(A − B) ÷ A ×100（毛利率%）"}[o],
+            key="xf_op",
+        )
+        _default_name = {"ratio": "人均營收", "diff": "差額", "margin_pct": "毛利率%"}[op]
+        ratio_name = st.text_input("結果名稱", value=_default_name, key="xf_ratio_name")
 
         if st.button("📊 計算", key="xf_run", type="primary"):
             try:
@@ -82,7 +89,7 @@ def render_cross_fact_panel() -> None:
                     facts,
                     block_a=block_a, agg_a=agg_a, col_a=col_a, alias_a=f"A_{col_a}",
                     block_b=block_b, agg_b=agg_b, col_b=col_b, alias_b=f"B_{col_b}",
-                    join_key=join_key, ratio_alias=ratio_name or "比率",
+                    join_key=join_key, ratio_alias=ratio_name or "結果", op=op,
                 )
                 st.session_state["_xf_result"] = df
             except CompositionPlanningError as exc:

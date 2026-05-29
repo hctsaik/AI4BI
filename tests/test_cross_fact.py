@@ -40,6 +40,53 @@ def test_revenue_per_employee_composition():
     assert row["emp"] == 14
 
 
+def test_diff_op_subtracts():
+    from ai4bi.analysis.cross_fact import combine
+    import pandas as pd
+    out = combine(pd.Series([100.0, 50.0]), pd.Series([60.0, 20.0]), "diff")
+    assert list(out) == [40.0, 30.0]
+
+
+def test_margin_pct_op():
+    from ai4bi.analysis.cross_fact import combine
+    import pandas as pd
+    out = combine(pd.Series([100.0, 200.0]), pd.Series([60.0, 50.0]), "margin_pct")
+    # (100-60)/100*100 = 40 ; (200-50)/200*100 = 75
+    assert list(out) == [40.0, 75.0]
+
+
+def test_compose_margin_pct_end_to_end():
+    """Contribution-margin %: revenue (A) vs cost (B) per product."""
+    import pandas as pd
+    from ai4bi.blocks.contracts import (
+        BlockType, ColumnSchema, DataBlockContract, DataClassification,
+        DisaggregationMethod, InlineDataSource, MetricDefinition, PolicySpec,
+    )
+
+    def _blk(bid, col, vals):
+        return DataBlockContract(
+            block_id=bid, block_type=BlockType.fact, grain="row", version="1.0.0",
+            description=bid, primary_keys=[],
+            columns=[ColumnSchema(name="product", data_type="string"),
+                     ColumnSchema(name=col, data_type="float")],
+            metrics=[MetricDefinition(name=col, formula=f"SUM({col})",
+                                      disaggregation_method=DisaggregationMethod.sum)],
+            data_source=InlineDataSource(records=[
+                {"product": "A", col: vals[0]}, {"product": "B", col: vals[1]}]),
+            policy=PolicySpec(data_classification=DataClassification.internal),
+        )
+    contracts = {"rev": _blk("rev", "revenue", [100.0, 200.0]),
+                 "cost": _blk("cost", "cost", [60.0, 50.0])}
+    df = compose_two_facts(
+        contracts,
+        block_a="rev", agg_a="SUM", col_a="revenue", alias_a="rev",
+        block_b="cost", agg_b="SUM", col_b="cost", alias_b="cost",
+        join_key="product", ratio_alias="margin", op="margin_pct",
+    ).set_index("product")
+    assert df.loc["A", "margin"] == pytest.approx(40.0)
+    assert df.loc["B", "margin"] == pytest.approx(75.0)
+
+
 def test_composition_rejects_three_facts_via_validate():
     # compose_two_facts only ever builds 2 steps; ensure a bad join key is caught
     c = _contracts()
