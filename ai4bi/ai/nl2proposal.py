@@ -557,12 +557,20 @@ class NL2ProposalService:
             return self._add_trend_line(params, report, selected_component_id)
 
         if intent == "unsupported":
-            reason = params.get("reason", "No supported governed BI intent was detected.")
+            # Round 095: critical reachability fix. The LLM's intent enum does not
+            # include the R078-091 answer-engine intents, so a metric question
+            # ("上個月營收多少？") is classified "unsupported". Rather than refuse,
+            # fall through to the deterministic keyword router — which DOES handle
+            # the answer engine and every edit intent. Only short-circuit with a
+            # refusal when the LLM supplied a clarifying disambiguation to show.
             disam = getattr(classification, "disambiguation", None)
-            return self._unsupported(
-                reason, target_scope=_target_scope(selected_component_id),
-                disambiguation=disam,
-            )
+            if disam:
+                reason = params.get("reason", "No supported governed BI intent was detected.")
+                return self._unsupported(
+                    reason, target_scope=_target_scope(selected_component_id),
+                    disambiguation=disam,
+                )
+            return None  # fall through to keyword routing (answer engine + edits)
 
         return None  # Unknown intent → fall through to keyword routing
 
