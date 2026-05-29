@@ -1485,6 +1485,52 @@ def _render_visual_cell(
     _render_explanation_panel(component_id, visual)
 
 
+_GRAIN_LABELS = {
+    "day": "日", "week": "週", "month": "月", "quarter": "季", "year": "年",
+}
+
+
+def _detect_grain_mismatch(page) -> dict[str, list[str]]:
+    """Return {date_grain: [visual titles]} for time-bucketed visuals on a page.
+
+    Pure helper (no Streamlit calls) so it can be unit-tested. A result with
+    more than one key means the page mixes date grains.
+    """
+    grains: dict[str, list[str]] = {}
+    for vid, visual in page.visuals.items():
+        query = getattr(visual, "query", None)
+        if query is None:
+            continue
+        for dim in query.dimensions:
+            grain = getattr(dim, "truncate_date_to", None)
+            if grain:
+                title = getattr(visual.visualization, "title", None) or vid
+                grains.setdefault(grain.lower(), []).append(title)
+    return grains
+
+
+def _render_grain_mismatch_warning(page) -> None:
+    """Round 046: warn when visuals on the same page use different date grains.
+
+    Mixing e.g. a weekly trend with a monthly trend on one page is the most
+    dangerous *silent* data error (per the gap analysis): the numbers look
+    comparable but are aggregated over different time buckets. We surface an
+    orange warning rather than silently letting users mis-compare.
+    """
+    grains = _detect_grain_mismatch(page)
+    if len(grains) <= 1:
+        return
+    parts = [
+        f"「{_GRAIN_LABELS.get(g, g)}」（{'、'.join(titles)}）"
+        for g, titles in grains.items()
+    ]
+    st.warning(
+        "⚠️ 這個頁面有圖表使用不同的時間粒度："
+        + "；".join(parts)
+        + "。不同粒度的數字不可直接比較，請確認這是你要的。"
+    )
+
+
 def _render_page(
     report: ExecutableReportSpec,
     page_id: str,
@@ -1494,6 +1540,7 @@ def _render_page(
 ) -> None:
     """Render all visuals for a single page using a 12-column grid layout."""
     page = report.pages[page_id]
+    _render_grain_mismatch_warning(page)
     visuals = page.visuals
     contracts = _load_all_contracts()
     # Cache contracts for _apply_cross_filter_to_query semantic matching
