@@ -38,7 +38,9 @@ from ai4bi.blocks.contracts import LifecycleStatus
 from ai4bi.ui.upload import render_upload_panel, _USER_BLOCKS_KEY, _USER_BLOCK_META_KEY, _PENDING_NEW_BLOCK_KEY
 from ai4bi.report.user_report import build_report_from_block
 from ai4bi.ai.suggestions import generate_suggestions, detect_anomalies, AnomalyObservation, ChartSuggestion
-from ai4bi.report.retail_template import build_retail_demo_report, build_retail_sales_block
+from ai4bi.report.retail_template import (
+    build_retail_demo_report, build_retail_sales_block, build_store_staffing_block,
+)
 from ai4bi.ui.data_model import render_join_builder, render_data_model_view, get_user_semantic_model
 from ai4bi.ui.workspace_manager import render_workspace_panel  # Round 039
 from ai4bi.ui.audit_trail import render_audit_trail, record_change  # Round 040
@@ -50,6 +52,7 @@ from ai4bi.ui.drilldown import (  # Round 049
 )
 from ai4bi.ui.summary_panel import render_summary_panel  # Round 050
 from ai4bi.ui.calc_metric_panel import render_calc_metric_panel  # Round 052
+from ai4bi.ui.cross_fact_panel import render_cross_fact_panel  # Round 055
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
 _BLOCKS_DIR = _DEMO_ROOT / "blocks"
@@ -896,6 +899,9 @@ def _render_draft_controls(
         # ── Zone 3d2: 計算欄位 (Round 052) ────────────────────────────────
         render_calc_metric_panel()
 
+        # ── Zone 3d3: 跨資料表計算 (Round 055) ────────────────────────────
+        render_cross_fact_panel()
+
         # ── Zone 3e: 提醒設定 (Round 048) ─────────────────────────────────
         render_alert_manager(_load_all_contracts())
 
@@ -1627,6 +1633,9 @@ def main() -> None:
         st.session_state[_USER_BLOCKS_KEY] = {}
     if "retail_sales" not in st.session_state[_USER_BLOCKS_KEY]:
         st.session_state[_USER_BLOCKS_KEY]["retail_sales"] = build_retail_sales_block()
+    # Round 055: second retail fact for cross-fact composition demo (revenue per employee)
+    if "store_staffing" not in st.session_state[_USER_BLOCKS_KEY]:
+        st.session_state[_USER_BLOCKS_KEY]["store_staffing"] = build_store_staffing_block()
 
     # Round 033: auto-build report when user just imported a new block
     _pending_block = st.session_state.pop(_PENDING_NEW_BLOCK_KEY, None)

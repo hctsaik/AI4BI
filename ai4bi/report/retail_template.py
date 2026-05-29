@@ -177,6 +177,54 @@ def build_retail_sales_block() -> DataBlockContract:
     return block
 
 
+_STAFFING_BLOCK_ID = "store_staffing"
+_CACHED_STAFFING: "DataBlockContract | None" = None
+
+
+def build_store_staffing_block() -> DataBlockContract:
+    """A second retail fact (one row per store) to demo cross-fact composition.
+
+    Round 055: enables "revenue per employee" — sales (retail_sales) ÷ headcount
+    (this block), joined on store_name — which single-fact GROUP BY cannot do.
+    """
+    global _CACHED_STAFFING
+    if _CACHED_STAFFING is not None:
+        return _CACHED_STAFFING
+    # store_name must match retail_sales for the join key
+    rows = [
+        {"store_id": "TPE-01", "store_name": "台北信義店", "headcount": 14, "labor_hours": 2240},
+        {"store_id": "TPE-02", "store_name": "台北西門店", "headcount": 11, "labor_hours": 1760},
+        {"store_id": "TCH-01", "store_name": "台中中港店", "headcount": 9,  "labor_hours": 1440},
+        {"store_id": "KHH-01", "store_name": "高雄三多店", "headcount": 8,  "labor_hours": 1280},
+        {"store_id": "TNN-01", "store_name": "台南成功店", "headcount": 6,  "labor_hours": 960},
+    ]
+    block = DataBlockContract(
+        block_id=_STAFFING_BLOCK_ID,
+        block_type=BlockType.fact,
+        grain="one row per store",
+        version="1.0.0",
+        description="門市人力配置（員工數、工時）",
+        block_lifecycle=LifecycleStatus.draft,
+        primary_keys=["store_id"],
+        columns=[
+            ColumnSchema(name="store_id",    data_type="string"),
+            ColumnSchema(name="store_name",  data_type="string"),
+            ColumnSchema(name="headcount",   data_type="integer"),
+            ColumnSchema(name="labor_hours", data_type="integer"),
+        ],
+        metrics=[
+            MetricDefinition(name="headcount", formula="SUM(headcount)",
+                             disaggregation_method=DisaggregationMethod.sum, description="員工數"),
+            MetricDefinition(name="labor_hours", formula="SUM(labor_hours)",
+                             disaggregation_method=DisaggregationMethod.sum, description="工時"),
+        ],
+        data_source=InlineDataSource(records=rows),
+        policy=PolicySpec(data_classification=DataClassification.internal),
+    )
+    _CACHED_STAFFING = block
+    return block
+
+
 # ---------------------------------------------------------------------------
 # Report template
 # ---------------------------------------------------------------------------
