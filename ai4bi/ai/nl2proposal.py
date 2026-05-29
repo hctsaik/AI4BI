@@ -104,6 +104,12 @@ _ADD_VISUAL_TYPE_KEYWORDS: dict[str, VisualType] = {
     "資料表": VisualType.table,
     "表格": VisualType.table,
     "明細表": VisualType.table,
+    "pivot": VisualType.pivot,
+    "matrix": VisualType.pivot,
+    "樞紐": VisualType.pivot,
+    "樞紐表": VisualType.pivot,
+    "交叉表": VisualType.pivot,
+    "矩陣": VisualType.pivot,
 }
 
 # ---------------------------------------------------------------------------
@@ -709,8 +715,8 @@ class NL2ProposalService:
 
         metric_alias = metric.alias or metric.metric_name
 
-        # Pick a dimension from the block's contract.
-        date_col, cat_col = None, None
+        # Pick dimensions from the block's contract.
+        date_col, cat_cols = None, []
         contract = (contracts or {}).get(block_id)
         if contract is not None:
             pk = set(getattr(contract, "primary_keys", []) or [])
@@ -720,13 +726,18 @@ class NL2ProposalService:
                 if date_col is None and (dt in ("date", "timestamp")
                                          or any(t in low for t in ("date", "time", "_dt", "day"))):
                     date_col = nm
-                if (cat_col is None and dt in ("string", "str", "object")
-                        and nm not in pk and not (low == "id" or low.endswith(("_id", "_code", "_sku")))):
-                    cat_col = nm
+                if (dt in ("string", "str", "object") and nm not in pk
+                        and not (low == "id" or low.endswith(("_id", "_code", "_sku")))
+                        and len(cat_cols) < 2):
+                    cat_cols.append(nm)
+        cat_col = cat_cols[0] if cat_cols else None
 
         dimensions, sort = [], []
         truncate = None
-        if vtype == VisualType.kpi_card:
+        if vtype == VisualType.pivot and len(cat_cols) >= 2:
+            dimensions = [DimensionRef(block_id, cat_cols[0], cat_cols[0]),
+                          DimensionRef(block_id, cat_cols[1], cat_cols[1])]
+        elif vtype == VisualType.kpi_card:
             pass  # no dimension
         elif vtype == VisualType.line_chart and date_col:
             dimensions = [DimensionRef(block_id, date_col, date_col, truncate_date_to="week")]
@@ -757,6 +768,7 @@ class NL2ProposalService:
             VisualType.pie_chart: "圓餅圖", VisualType.bar_chart: "長條圖",
             VisualType.line_chart: "折線圖", VisualType.scatter: "散點圖",
             VisualType.kpi_card: "KPI", VisualType.table: "表格",
+            VisualType.pivot: "樞紐表",
         }.get(vtype, vtype.value)
         viz = VisualizationSpec(vtype, title=f"{metric_alias}（{_type_label}）", extra={})
         proposal = build_add_visual_proposal(page_id, vid, query, viz)

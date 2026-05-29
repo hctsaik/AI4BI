@@ -414,6 +414,22 @@ def build_retail_demo_report() -> ExecutableReportSpec:
         col_span=6,
     )
 
+    # ── Store × Category pivot/matrix (Round 072) ─────────────────────────────
+    pivot_store_cat = ReportVisualSpec(
+        "pivot_store_category",
+        _q(
+            "pivot_store_category",
+            metrics=[MetricRef(_BLOCK_ID, "revenue", "營收")],
+            dimensions=[DimensionRef(_BLOCK_ID, "store_name", "門市"),
+                        DimensionRef(_BLOCK_ID, "category", "品類")],
+        ),
+        VisualizationSpec(
+            VisualType.pivot, title="門市 × 品類 營收矩陣", height_px=300,
+            extra={"show_totals": True},
+        ),
+        col_span=12,
+    )
+
     visuals = {
         "kpi_revenue":           kpi_revenue,
         "kpi_orders":            kpi_orders,
@@ -425,6 +441,7 @@ def build_retail_demo_report() -> ExecutableReportSpec:
         "hist_revenue":          hist_revenue,
         "table_top_products":    table_products,
         "table_product_abc":     table_abc,
+        "pivot_store_category":  pivot_store_cat,
     }
     visual_order = list(visuals.keys())
 

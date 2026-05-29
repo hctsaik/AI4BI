@@ -47,6 +47,7 @@ from ai4bi.ui.components.data_table import render_data_table
 from ai4bi.ui.components.kpi_card import render_kpi_card
 from ai4bi.ui.components.line_chart import render_line_chart
 from ai4bi.ui.components.pie_chart import render_pie_chart
+from ai4bi.ui.components.pivot_table import render_pivot
 from ai4bi.ui.components.scatter_chart import render_scatter_chart
 
 if TYPE_CHECKING:
@@ -262,6 +263,7 @@ _COMPONENT_REGISTRY: dict[VisualType, Callable] = {
     VisualType.pie_chart:  render_pie_chart,   # Round 029
     VisualType.scatter:    render_scatter_chart,  # Round 029
     VisualType.table:      render_data_table,
+    VisualType.pivot:      render_pivot,          # Round 072
 }
 
 
