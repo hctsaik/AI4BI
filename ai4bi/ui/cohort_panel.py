@@ -68,6 +68,9 @@ def render_cohort_panel() -> None:
                 result = cohort_retention(df, cust, date_col, period)
                 st.session_state["_cohort_result"] = result.retention
                 st.session_state["_cohort_sizes"] = result.cohort_sizes
+                # Round 063: also compute a repeat-purchase funnel on the same customer
+                from ai4bi.analysis.funnel import purchase_frequency_funnel
+                st.session_state["_funnel_result"] = purchase_frequency_funnel(df, cust)
             except Exception as exc:  # noqa: BLE001
                 st.error(f"無法計算：{exc}")
 
@@ -80,3 +83,16 @@ def render_cohort_panel() -> None:
                 st.caption(
                     "各 cohort 人數：" + "、".join(f"{k}={int(v)}" for k, v in sizes.items())
                 )
+
+        # Round 063: repeat-purchase funnel
+        funnel = st.session_state.get("_funnel_result")
+        if funnel is not None and not funnel.empty:
+            st.markdown("---")
+            st.caption("回購漏斗：購買達 N 次的客戶數")
+            try:
+                import plotly.express as px
+                fig = px.funnel(funnel, x="customers", y="stage", template="plotly_white")
+                fig.update_layout(height=260, margin=dict(l=40, r=20, t=20, b=20))
+                st.plotly_chart(fig, width="stretch", key="cohort_funnel_chart")
+            except Exception:  # noqa: BLE001
+                st.dataframe(funnel, width="stretch", hide_index=True)
