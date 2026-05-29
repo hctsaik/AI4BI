@@ -23,6 +23,7 @@ from ai4bi.query_spec import (
     DimensionRef,
     FilterOperator,
     FilterSpec,
+    HavingSpec,
     MetricRef,
     VisualQuerySpec,
 )
@@ -361,6 +362,61 @@ class Executor:
         alias = _quote(metric.alias or metric.metric_name)
         return f"{approved.value}({_qualified(metric.block_id, metric.metric_name)}) AS {alias}"
 
+    # Comparison operators valid on an aggregated measure (Round 079).
+    _HAVING_SIMPLE_OPS = {
+        FilterOperator.eq: "=",
+        FilterOperator.neq: "!=",
+        FilterOperator.gt: ">",
+        FilterOperator.gte: ">=",
+        FilterOperator.lt: "<",
+        FilterOperator.lte: "<=",
+    }
+
+    def _build_having_clause(
+        self,
+        having: "HavingSpec",
+        contracts: dict[str, DataBlockContract],
+        spec: VisualQuerySpec,
+        params: list[Any],
+    ) -> str:
+        """Build one HAVING predicate against a projected metric's aggregate.
+
+        The metric must already be in ``spec.metrics`` (a visual-level measure
+        filter), so we reuse its validated aggregate expression rather than
+        accepting an arbitrary expression — keeping the governed contract intact.
+        """
+        ref = next(
+            (m for m in spec.metrics
+             if m.metric_name == having.metric_name and m.block_id == having.block_id),
+            None,
+        )
+        if ref is None:
+            raise QueryPlanningError(
+                f"HAVING references metric '{having.metric_name}' which is not projected "
+                f"by this visual; add it as a metric first."
+            )
+        # Reuse the exact aggregate expression from SELECT, minus its alias suffix.
+        expr_with_alias = self._build_metric_expr(
+            ref, contracts, spec.primary_block_id, self._parameters
+        )
+        alias_suffix = f" AS {_quote(ref.alias or ref.metric_name)}"
+        expr = (
+            expr_with_alias[: -len(alias_suffix)]
+            if expr_with_alias.endswith(alias_suffix)
+            else expr_with_alias
+        )
+
+        op = having.operator
+        if op in self._HAVING_SIMPLE_OPS:
+            params.append(having.value)
+            return f"({expr}) {self._HAVING_SIMPLE_OPS[op]} ?"
+        if op == FilterOperator.between:
+            params.extend([having.value[0], having.value[1]])
+            return f"({expr}) BETWEEN ? AND ?"
+        raise QueryPlanningError(
+            f"Operator '{op}' is not supported in HAVING; use a numeric comparison."
+        )
+
     @staticmethod
     def _build_dimension_expr(
         dimension: DimensionRef,
@@ -425,6 +481,15 @@ class Executor:
             # the same column name exists in both the fact table and a joined dim table.
             dim_positions = ", ".join(str(i + 1) for i in range(len(spec.dimensions)))
             sql_parts.append(f"GROUP BY {dim_positions}")
+        # Round 079: HAVING — post-aggregate predicates on projected metrics.
+        if spec.having:
+            having_parts = [
+                self._build_having_clause(h, contracts, spec, params)
+                for h in spec.having
+                if h.value is not None
+            ]
+            if having_parts:
+                sql_parts.append("HAVING\n    " + "\n    AND ".join(having_parts))
         if spec.sort:
             sql_parts.append(
                 "ORDER BY " + ", ".join(

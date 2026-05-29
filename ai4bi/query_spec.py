@@ -152,6 +152,23 @@ class FilterSpec:
 
 
 @dataclass
+class HavingSpec:
+    """A post-aggregation predicate on a projected metric (Round 079).
+
+    Unlike FilterSpec (which filters raw rows *before* GROUP BY), HavingSpec
+    filters aggregated groups *after* GROUP BY — the SQL HAVING clause. This is
+    what makes "customers who bought more than 3 times", "products selling below
+    NT$500", and churn/VIP/slow-mover lists expressible. The referenced metric
+    must already be projected in the spec's ``metrics`` (visual-level measure
+    filter), keeping execution on the certified semantic layer.
+    """
+    block_id: str
+    metric_name: str
+    operator: FilterOperator
+    value: Any = None                          # scalar, or [lo, hi] for between
+
+
+@dataclass
 class SortSpec:
     column_name: str
     direction: SortDirection = SortDirection.desc
@@ -232,6 +249,7 @@ class VisualQuerySpec:
     metrics: list[MetricRef] = field(default_factory=list)
     dimensions: list[DimensionRef] = field(default_factory=list)
     filters: list[FilterSpec] = field(default_factory=list)
+    having: list[HavingSpec] = field(default_factory=list)  # Round 079: post-agg predicates
     sort: list[SortSpec] = field(default_factory=list)
     limit: Optional[int] = None
     data_version: str = "v1"
@@ -290,6 +308,11 @@ class VisualQuerySpec:
                  "operator": f.operator, "value": f.value,
                  "inherit_global_filter": f.inherit_global_filter}
                 for f in self.filters
+            ],
+            "having": [
+                {"block_id": h.block_id, "metric_name": h.metric_name,
+                 "operator": h.operator, "value": h.value}
+                for h in self.having
             ],
             "sort": [{"column_name": s.column_name, "direction": s.direction}
                      for s in self.sort],
