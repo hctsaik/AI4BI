@@ -69,6 +69,39 @@ def _fmt_delta(current: float, reference: float) -> tuple[float, str]:
     return delta, ("+" if delta > 0 else "") + f"{delta:,.0f}"
 
 
+def _rag_status(value: float, rag: dict) -> Optional[tuple[str, str]]:
+    """Round 053: compute a RAG status (emoji, label) for a KPI value.
+
+    rag = {"good_if": "gte"|"lte", "target": float, "warn": float (optional)}
+    - good_if="gte": higher is better (revenue) → green ≥ target, amber ≥ warn, else red
+    - good_if="lte": lower is better (return rate) → green ≤ target, amber ≤ warn, else red
+    """
+    target = rag.get("target")
+    if target is None or pd.isna(value):
+        return None
+
+    def _thr(x: float) -> str:
+        # ratio/percentage thresholds (<1) need decimals; large values don't
+        if x != 0 and abs(x) < 1:
+            return f"{x:.2g}"
+        return f"{x:,.0f}"
+
+    good_if = rag.get("good_if", "gte")
+    warn = rag.get("warn")
+    if good_if == "lte":
+        if value <= target:
+            return "🟢", f"達標（≤ {_thr(target)}）"
+        if warn is not None and value <= warn:
+            return "🟡", f"注意（≤ {_thr(warn)}）"
+        return "🔴", f"超標（目標 ≤ {_thr(target)}）"
+    # default: higher is better
+    if value >= target:
+        return "🟢", f"達標（≥ {_thr(target)}）"
+    if warn is not None and value >= warn:
+        return "🟡", f"注意（≥ {_thr(warn)}）"
+    return "🔴", f"低於目標 {_thr(target)}"
+
+
 def _extract_primary_value(
     df: pd.DataFrame,
     metric: MetricRef,
@@ -213,6 +246,14 @@ def render_kpi_card(
             delta=delta_str,
             delta_color=delta_color,
         )
+
+        # Round 053: RAG status line (red/amber/green vs a target)
+        rag = style.extra.get("rag")
+        if rag:
+            status = _rag_status(primary_value, rag)
+            if status:
+                emoji, label = status
+                st.caption(f"{emoji} {label}")
 
         # ------------------------------------------------------------------ #
         # Sparkline (optional — only when df has multiple rows and a time index)

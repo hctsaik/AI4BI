@@ -220,7 +220,11 @@ def build_retail_demo_report() -> ExecutableReportSpec:
     kpi_return = ReportVisualSpec(
         "kpi_return_rate",
         _q("kpi_return_rate", [MetricRef(_BLOCK_ID, "return_rate", "平均退貨率", AggFunction.avg)]),
-        VisualizationSpec(VisualType.kpi_card, title="平均退貨率", extra={"unit": "%"}),
+        # Round 053: RAG — return rate is "lower is better"
+        VisualizationSpec(
+            VisualType.kpi_card, title="平均退貨率",
+            extra={"unit": "%", "rag": {"good_if": "lte", "target": 0.06, "warn": 0.10}},
+        ),
     )
     # Round 045: derived metric KPI — average order value (AOV)
     kpi_aov = ReportVisualSpec(
@@ -304,7 +308,14 @@ def build_retail_demo_report() -> ExecutableReportSpec:
             sort=[SortSpec("營收", SortDirection.desc)],
             limit=10,
         ),
-        VisualizationSpec(VisualType.table, title="商品銷售明細（Top 10）", height_px=320),
+        VisualizationSpec(
+            VisualType.table, title="商品銷售明細（Top 10）", height_px=320,
+            # Round 053: flag products whose return rate exceeds 8%
+            extra={"conditional_formats": [
+                {"column": "退貨率", "method": "threshold", "operator": "gt",
+                 "value": 0.08, "color": "#FF4444"},
+            ]},
+        ),
         col_span=12,
     )
 

@@ -217,9 +217,21 @@ def render_data_table(
                     num_cols = [c for c in display_df.columns if pd.api.types.is_numeric_dtype(display_df[c])]
                 for nc in num_cols:
                     s = display_df[nc].dropna()
-                    if len(s) < 4:
+                    if method == "threshold":
+                        # Round 053: user RAG rule — colour cells crossing a value
+                        thr = fmt.get("value", 0)
+                        op = fmt.get("operator", "lt")
+                        series = display_df[nc]
+                        mask = {
+                            "lt": series < thr,
+                            "lte": series <= thr,
+                            "gt": series > thr,
+                            "gte": series >= thr,
+                            "eq": series == thr,
+                        }.get(op, series < thr)
+                    elif len(s) < 4:
                         continue
-                    if method == "zscore":
+                    elif method == "zscore":
                         mean, std = s.mean(), s.std()
                         mask = (display_df[nc] - mean).abs() > 2.5 * std
                     else:  # iqr
