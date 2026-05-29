@@ -502,6 +502,11 @@ class NL2ProposalService:
             if panel is not None:
                 return panel
 
+        if intent == "segment_count":  # Round 091
+            seg = self._answer_segment_count(prompt, normalized, report, contracts)
+            if seg is not None:
+                return seg
+
         if intent == "grouped_topn":  # Round 090
             gt = self._answer_grouped_topn(prompt, normalized, report, contracts)
             if gt is not None:
@@ -620,9 +625,17 @@ class NL2ProposalService:
             if st_res is not None:
                 return st_res
 
-        # Round 080: measure (post-aggregate) filter → HAVING. "買超過 3 次的客戶",
-        # "營收低於 500 的商品". Checked before categorical/value filters since it
-        # carries a comparison word + a number against a projected metric.
+        # Round 091: cold-start grouped measure filter — "買超過 3 次的客戶" builds
+        # the entity×count grouped HAVING query from scratch (no existing visual
+        # needed). Checked before the on-visual measure filter.
+        if _looks_like_segment_count(prompt, normalized):
+            seg = self._answer_segment_count(prompt, normalized, report, contracts)
+            if seg is not None:
+                return seg
+
+        # Round 080: measure (post-aggregate) filter → HAVING. "把營收超過 500 的列出",
+        # edits an *existing* grouped visual's HAVING. Carries a comparison + number
+        # against a projected metric.
         if _looks_like_measure_filter(prompt, normalized):
             mf = self._measure_filter_change(prompt, normalized, report, selected_component_id)
             if mf is not None:
@@ -1024,6 +1037,89 @@ class NL2ProposalService:
             trust_notes=notes,
             risk_level="low",
         )
+
+    def _answer_segment_count(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 091: cold-start grouped measure filter.
+
+        "買超過 3 次的客戶" / "customers who bought more than 3 times" — builds a
+        grouped query (entity × count-metric) with a HAVING from scratch, even
+        when no such visual exists, and returns the qualifying list. Returns None
+        to fall through (e.g. to the on-visual measure filter).
+        """
+        executor = getattr(self, "_executor", None)
+        if executor is None or not contracts:
+            return None
+
+        operator = _measure_operator(f"{prompt.lower()} {normalized}")
+        if operator is None:
+            return None
+        num = re.search(r"(\d[\d,]*\.?\d*)", f"{prompt} {normalized}")
+        if num is None:
+            return None
+        try:
+            threshold = float(num.group(1).replace(",", ""))
+            if threshold.is_integer():
+                threshold = int(threshold)
+        except ValueError:
+            return None
+
+        idx = SchemaIndex.build(contracts)
+        entity_col, block_id = _resolve_entity_dimension(idx, prompt, normalized, contracts)
+        if entity_col is None or block_id is None:
+            return None
+
+        # Resolve the count/measure metric on this block: an explicit metric word
+        # wins; otherwise a count-like metric (購買次數 / orders) is the default.
+        metric_match = idx.best_metric_match(prompt, normalized)
+        metric = None
+        if metric_match is not None and metric_match.block_id == block_id:
+            metric = (metric_match.metric_name, metric_match.alias)
+        if metric is None:
+            metric = _default_count_metric(contracts, block_id)
+        if metric is None:
+            return None
+        metric_name, alias = metric
+
+        from ai4bi.query_spec import (
+            BlockRef, DimensionRef, HavingSpec, SortDirection, SortSpec, VisualQuerySpec,
+        )
+
+        spec = VisualQuerySpec(
+            spec_id=f"segcount_{metric_name}",
+            block_refs=[BlockRef(block_id)],
+            metrics=[MetricRef(block_id, metric_name, alias)],
+            dimensions=[DimensionRef(block_id, entity_col, entity_col)],
+            having=[HavingSpec(block_id, metric_name, operator, threshold)],
+            sort=[SortSpec(alias, SortDirection.desc)],
+            inherit_global_filter=False,
+        )
+        try:
+            df = executor.run(spec)
+        except Exception:  # noqa: BLE001
+            return None
+        if df is None:
+            return None
+
+        op_sym = {"gt": ">", "gte": "≥", "lt": "<", "lte": "≤", "eq": "=", "neq": "≠"}.get(
+            operator.value, operator.value)
+        sentence = (f"「{entity_col}」中，{alias} {op_sym} {threshold} 的共 {len(df)} 筆。"
+                    if not df.empty else
+                    f"沒有「{entity_col}」符合 {alias} {op_sym} {threshold}。")
+        notes = [
+            f"分組：{entity_col}；指標：{alias}；彙總後篩選 {alias} {op_sym} {threshold}（HAVING）。",
+            f"治理查詢路徑（認證語意層），來源：{block_id}。",
+        ]
+        intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                          trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=sentence,
+                                 result_table=df if not df.empty else None,
+                                 direct_answer=None, trust_notes=notes, risk_level="low")
 
     def _answer_grouped_topn(
         self,
@@ -2812,6 +2908,52 @@ def _extract_rank_n(prompt: str, normalized: str, default: int = 5) -> int:
         except ValueError:
             pass
     return default
+
+
+# --- Round 091: cold-start grouped measure filter ("buyers with > N orders") -
+
+_ENTITY_CUE_HINTS: tuple[str, ...] = (
+    "客戶", "顧客", "會員", "customer", "member", "buyer", "client",
+    "商品", "產品", "品項", "product", "item", "sku", "門市", "store",
+)
+_COUNT_CUE_HINTS: tuple[str, ...] = (
+    "次", "筆", "訂單", "下單", "購買", "買", "回購", "單",
+    "times", "orders", "order", "purchase", "bought", "transactions",
+)
+
+
+def _looks_like_segment_count(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    if _measure_operator(hay) is None or re.search(r"\d", hay) is None:
+        return False
+    return (any(h in hay for h in _ENTITY_CUE_HINTS)
+            and any(h in hay for h in _COUNT_CUE_HINTS))
+
+
+def _resolve_entity_dimension(idx, prompt: str, normalized: str, contracts):
+    """Pick the categorical entity dimension to group by (customer / product …)."""
+    hay = f"{prompt.lower()} {normalized}"
+    best, best_block, best_len = None, None, 0
+    for kw, e in idx._dims.items():
+        if (kw in hay and _is_categorical_col(contracts, e.block_id, e.column_name)
+                and len(kw) > best_len):
+            best, best_block, best_len = e.column_name, e.block_id, len(kw)
+    return best, best_block
+
+
+def _default_count_metric(contracts, block_id: str):
+    """A count-like metric on the block (orders/count), else the first SUM metric."""
+    contract = (contracts or {}).get(block_id)
+    metrics = getattr(contract, "metrics", None) or []
+    for m in metrics:
+        nm = m.name.lower()
+        meth = getattr(getattr(m, "disaggregation_method", None), "value", "")
+        if meth == "count" or any(t in nm for t in ("count", "order", "orders", "qty", "quantity", "次", "筆")):
+            return m.name, m.name.replace("_", " ").title()
+    for m in metrics:
+        if getattr(getattr(m, "disaggregation_method", None), "value", "") == "sum":
+            return m.name, m.name.replace("_", " ").title()
+    return None
 
 
 # --- Round 090: per-group Top-N parsing --------------------------------------
