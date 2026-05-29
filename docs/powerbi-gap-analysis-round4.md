@@ -36,6 +36,14 @@
 | 7 | **anomaly 支援外部 DB 連接器** | 連接器路徑的主動洞察 | 4 | 2 | detect_anomalies 改走 executor 小型 aggregate 而非 materialize |
 | 8 | **目標/實際 pacing（gauge/進度條）** | 「達標了嗎」 | 4 | 2 | what-if target + kpi_card 進度條 |
 
+## UI/UX 後續討論清單（非功能缺口，但影響可用性）
+
+> 此區收集使用者實際操作中回報的 UI/UX 摩擦，留待專門的 UI/UX 輪次集中處理（避免散在功能輪中分心）。
+
+1. **左側 NL 輸入框太小（2026-05-30 使用者回報）** — `app.py:_render_visual_assistant` 的「② 告訴我你想做什麼」是單行 `st.text_input`，打較長的自然語言指令時可視區域太窄、看不到全文；但使用者**不希望它常態性佔據大量側欄高度**。
+   - 候選做法（待討論）：(a) 改 `st.text_area` 但 `height` 設小（~68px）並可手動拖拉；(b) 維持單行，聚焦時才展開（需自訂 component / CSS，Streamlit 原生不支援 focus-grow）；(c) 把 NL 助理從側欄移到主畫面頂部的寬輸入列（更接近 Power BI Copilot 的位置），側欄只留快捷；(d) 增加「展開輸入」小按鈕切換 text_input↔text_area。
+   - 傾向：(c) 長期最對標 Power BI；(a) 最低成本可先上。
+
 ## 實作佇列（依 ROI，每輪 test+commit+push）
 **R078 NL 直接回答引擎** · R079 executor HAVING · R080 NL 路由到進階分析 · R081 RFM/churn 模組 · R082 anomaly 支援連接器 · R083 目標 pacing · R084 map/geo · (之後) window functions 重架 · 主題/行動版 · scheduled email backend · 真 RLS。
 
