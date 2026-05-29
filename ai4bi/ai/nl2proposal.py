@@ -111,6 +111,9 @@ _ADD_VISUAL_TYPE_KEYWORDS: dict[str, VisualType] = {
     "樞紐表": VisualType.pivot,
     "交叉表": VisualType.pivot,
     "矩陣": VisualType.pivot,
+    "map": VisualType.map,           # Round 083
+    "地圖": VisualType.map,
+    "地圖視覺": VisualType.map,
 }
 
 # ---------------------------------------------------------------------------
