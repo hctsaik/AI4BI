@@ -43,6 +43,21 @@ def add_moving_average(df: pd.DataFrame, value_col: str, window: int = 3) -> pd.
     return out
 
 
+def add_top_n(df: pd.DataFrame, value_col: str, n: int = 10) -> pd.DataFrame:
+    """Keep the top ``n`` rows by ``value_col`` and roll the rest into an '其他' row.
+
+    So a ranked chart still reconciles to the grand total (Power BI 'Top N + Others').
+    """
+    if value_col not in df.columns or len(df) <= n:
+        return df
+    ranked = df.sort_values(value_col, ascending=False).reset_index(drop=True)
+    top, rest = ranked.iloc[:n].copy(), ranked.iloc[n:]
+    if rest.empty:
+        return top
+    other = {c: ("其他" if c != value_col else float(rest[value_col].sum())) for c in df.columns}
+    return pd.concat([top, pd.DataFrame([other])], ignore_index=True)
+
+
 def add_pareto(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
     """Sort by value desc and add cumulative-% + ABC class (80/95 cutoffs)."""
     out = df.sort_values(value_col, ascending=False).reset_index(drop=True)
@@ -79,6 +94,8 @@ def apply_postprocess(df: pd.DataFrame, query_spec, style) -> pd.DataFrame:
             return add_moving_average(df, value_col, window)
         if mode == "pareto":
             return add_pareto(df, value_col)
+        if mode == "top_n":
+            return add_top_n(df, value_col, int(style.extra.get("top_n_count", 10)))
     except Exception:  # noqa: BLE001 — never break a chart over post-processing
         return df
     return df

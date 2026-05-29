@@ -42,6 +42,32 @@ def test_pareto_cumulative_and_abc():
     assert list(out["ABC"]) == ["A", "B", "C", "C"]
 
 
+def test_top_n_rolls_remainder_into_others():
+    from ai4bi.analysis.postprocess import add_top_n
+    df = pd.DataFrame({"item": list("ABCDE"), "v": [50.0, 40.0, 30.0, 20.0, 10.0]})
+    out = add_top_n(df, "v", n=3)
+    # 3 top rows + 1 "其他" row
+    assert len(out) == 4
+    assert out.iloc[-1]["item"] == "其他"
+    assert out.iloc[-1]["v"] == pytest.approx(30.0)  # 20 + 10
+    # grand total preserved
+    assert out["v"].sum() == pytest.approx(150.0)
+
+
+def test_top_n_noop_when_within_limit():
+    from ai4bi.analysis.postprocess import add_top_n
+    df = pd.DataFrame({"item": ["A", "B"], "v": [1.0, 2.0]})
+    assert add_top_n(df, "v", n=5).equals(df)
+
+
+def test_apply_postprocess_top_n_via_extra():
+    df = pd.DataFrame({"商品": list("ABCDEFG"), "營收": [7.0, 6, 5, 4, 3, 2, 1]})
+    out = apply_postprocess(df, _spec(), _viz(postprocess="top_n", postprocess_column="營收",
+                                              top_n_count=3))
+    assert "其他" in list(out["商品"])
+    assert out["營收"].sum() == pytest.approx(28.0)
+
+
 def test_apply_postprocess_pareto_via_extra():
     df = pd.DataFrame({"商品": ["a", "b"], "營收": [70.0, 30.0]})
     out = apply_postprocess(df, _spec(), _viz(postprocess="pareto", postprocess_column="營收"))
