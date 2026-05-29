@@ -390,6 +390,25 @@ def build_retail_demo_report() -> ExecutableReportSpec:
         col_span=12,
     )
 
+    # ── Transaction-size distribution (Round 059 histogram) ───────────────────
+    hist_revenue = ReportVisualSpec(
+        "hist_revenue",
+        _q(
+            "hist_revenue",
+            metrics=[],
+            dimensions=[DimensionRef(_BLOCK_ID, "revenue", "revenue")],
+        ),
+        VisualizationSpec(
+            VisualType.bar_chart,           # intercepted by render_visual as histogram
+            title="單筆銷售金額分布",
+            x_axis_label="單筆金額（NT$）",
+            y_axis_label="筆數",
+            height_px=300,
+            extra={"chart_mode": "histogram", "bins": 25},
+        ),
+        col_span=6,
+    )
+
     visuals = {
         "kpi_revenue":           kpi_revenue,
         "kpi_orders":            kpi_orders,
@@ -398,6 +417,7 @@ def build_retail_demo_report() -> ExecutableReportSpec:
         "line_revenue_trend":    line_trend,
         "bar_revenue_by_store":  bar_store,
         "pie_revenue_by_category": pie_category,
+        "hist_revenue":          hist_revenue,
         "table_top_products":    table_products,
         "table_product_abc":     table_abc,
     }

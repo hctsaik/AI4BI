@@ -458,6 +458,11 @@ def render_visual(
     # ------------------------------------------------------------------
     # Happy path — dispatch to component
     # ------------------------------------------------------------------
+    # Round 059: distribution histogram (raw values → binned), intercepted here
+    if (style.extra or {}).get("chart_mode") == "histogram":
+        from ai4bi.ui.components.histogram import render_histogram
+        render_histogram(query_spec, df, style)
+        return
     # Round 054: result post-processing (running total / moving avg / Pareto)
     if (style.extra or {}).get("postprocess"):
         from ai4bi.analysis.postprocess import apply_postprocess
