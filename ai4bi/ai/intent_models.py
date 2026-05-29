@@ -51,6 +51,32 @@ class AnalysisPlan:
 
 
 @dataclass(frozen=True)
+class DirectAnswer:
+    """A computed, sourced answer to a natural-language metric question (Round 078).
+
+    Unlike AnalysisPlan (which describes *what would be done*), DirectAnswer
+    carries the actual number computed through the governed executor — turning
+    AI4BI from a report *builder* into an *answer engine*. It is still SQL-free
+    from the user's perspective: the value comes from a VisualQuerySpec run on
+    the certified semantic layer, with full metric/period/source lineage.
+    """
+
+    question: str
+    metric_block_id: str
+    metric_name: str
+    metric_alias: str
+    sentence: str                       # human-readable answer, ready to show
+    value: float | None
+    period: str = "all"                 # "all" | "week" | "month" | "quarter" | "year"
+    previous: float | None = None
+    delta_pct: float | None = None
+    current_label: str = ""
+    previous_label: str = ""
+    unit: str = ""
+    trust_notes: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class GovernanceRefusal:
     """Structured refusal for requests that bypass governed BI contracts."""
 
@@ -69,6 +95,7 @@ class NL2ProposalResult:
     message: str
     proposal: ReportProposal | None = None
     analysis_plan: AnalysisPlan | None = None
+    direct_answer: "DirectAnswer | None" = None  # Round 078: computed NL answer
     refusal: GovernanceRefusal | None = None
     trust_notes: list[str] = field(default_factory=list)
     risk_level: RiskLevel = "low"

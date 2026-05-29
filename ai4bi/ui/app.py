@@ -68,6 +68,7 @@ _REGISTRY_DIR = _DEMO_ROOT / "registry"
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 _ASSISTANT_PLAN_KEY = "visual_assistant_analysis_plan"
 _ASSISTANT_TRUST_KEY = "visual_assistant_trust_notes"
+_ASSISTANT_ANSWER_KEY = "visual_assistant_direct_answer"  # Round 078
 _CHAT_HISTORY_KEY = "chat_history"
 
 
@@ -77,7 +78,7 @@ def _record_chat(prompt: str, visual_id: str, result) -> None:
     if _CHAT_HISTORY_KEY not in st.session_state:
         st.session_state[_CHAT_HISTORY_KEY] = []
     icon_map = {
-        "style": "🎨", "analysis": "📊", "plan": "🔍",
+        "style": "🎨", "analysis": "📊", "plan": "🔍", "answer": "💡",
         "refused": "🚫", "mixed": "⚡", "unknown": "💬",
     }
     kind = getattr(result, "intent_kind", "unknown")
@@ -88,7 +89,8 @@ def _record_chat(prompt: str, visual_id: str, result) -> None:
         "kind": kind,
         "icon": icon_map.get(kind, "💬"),
         "message": result.message[:80],
-        "ok": result.proposal is not None or getattr(result, "is_mixed", False) or result.analysis_plan is not None,
+        "ok": result.proposal is not None or getattr(result, "is_mixed", False)
+        or result.analysis_plan is not None or getattr(result, "direct_answer", None) is not None,
     })
     # Keep last 20 entries
     st.session_state[_CHAT_HISTORY_KEY] = st.session_state[_CHAT_HISTORY_KEY][-20:]
@@ -856,7 +858,7 @@ def _render_draft_controls(
         st.markdown("---")
 
         # ── Zone 2: 對這張圖說話 ─────────────────────────────────────────
-        _render_visual_assistant(report, cache)
+        _render_visual_assistant(report, cache, executor)
 
         st.markdown("---")
 
@@ -1021,18 +1023,35 @@ def _proposal_rows(proposal: ReportProposal) -> list[dict[str, str]]:
     ]
 
 
+def _format_answer_value(answer) -> str:
+    """Format a DirectAnswer value for st.metric (reuses the NL2 formatter)."""
+    from ai4bi.ai.nl2proposal import _format_metric_value
+    return _format_metric_value(answer.value, answer.unit)
+
+
 def _clear_visual_assistant_context() -> None:
     st.session_state[_ASSISTANT_PLAN_KEY] = None
     st.session_state[_ASSISTANT_TRUST_KEY] = ()
+    st.session_state[_ASSISTANT_ANSWER_KEY] = None
 
 
 def _store_visual_assistant_context(result) -> None:
     # Use getattr for robustness against Streamlit hot-reload module cache mismatches.
     st.session_state[_ASSISTANT_PLAN_KEY] = getattr(result, "analysis_plan", None)
+    st.session_state[_ASSISTANT_ANSWER_KEY] = getattr(result, "direct_answer", None)
     st.session_state[_ASSISTANT_TRUST_KEY] = tuple(getattr(result, "trust_notes", ()))
 
 
 def _render_visual_assistant_context() -> None:
+    # Round 078: a direct computed answer is shown most prominently.
+    answer = st.session_state.get(_ASSISTANT_ANSWER_KEY)
+    if answer is not None:
+        delta = None
+        if answer.delta_pct is not None:
+            delta = f"{answer.delta_pct:+.1f}% vs {answer.previous_label}"
+        st.metric(label=answer.metric_alias, value=_format_answer_value(answer), delta=delta)
+        st.success(answer.sentence, icon="💡")
+
     plan = st.session_state.get(_ASSISTANT_PLAN_KEY)
     trust_notes = tuple(st.session_state.get(_ASSISTANT_TRUST_KEY) or ())
     if plan is not None:
@@ -1303,7 +1322,7 @@ def _render_chat_history() -> None:
             st.rerun()
 
 
-def _render_visual_assistant(report: ExecutableReportSpec, cache: QueryCache) -> None:
+def _render_visual_assistant(report: ExecutableReportSpec, cache: QueryCache, executor=None) -> None:
     with st.expander("🧠 探索與設計", expanded=True):
         st.caption("用自然語言新增圖表、調整分析、改變外觀。輸入後產生草稿提案，確認後才套用。")
         display_names = {
@@ -1333,7 +1352,7 @@ def _render_visual_assistant(report: ExecutableReportSpec, cache: QueryCache) ->
             _user_sm = get_user_semantic_model()
             _sm["relationships"] = _sm.get("relationships", []) + _user_sm.get("relationships", [])
             _contracts = _load_all_contracts()
-            result = prompt_to_proposal(prompt, report, selected, semantic_model=_sm, contracts=_contracts)
+            result = prompt_to_proposal(prompt, report, selected, semantic_model=_sm, contracts=_contracts, executor=executor)
             _store_visual_assistant_context(result)
             _record_chat(prompt, selected, result)
             st.session_state["_disambiguation"] = getattr(result, "disambiguation", None)

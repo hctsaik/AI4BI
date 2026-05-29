@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ai4bi.ai import AnalysisPlan, NL2ProposalService
+from ai4bi.ai import AnalysisPlan, DirectAnswer, NL2ProposalService
 from ai4bi.report.models import (
     ExecutableReportSpec,
     ReportChange,
@@ -18,10 +18,11 @@ class ProposalResult:
     proposal: ReportProposal | None
     message: str
     analysis_plan: AnalysisPlan | None = None
+    direct_answer: DirectAnswer | None = None  # Round 078: computed NL answer
     trust_notes: tuple[str, ...] = ()
     refusal: str | None = None
     split_proposals: tuple[ReportProposal, ...] = ()
-    intent_kind: str = "unknown"    # "style"|"analysis"|"plan"|"refused"|"mixed"|"unknown"
+    intent_kind: str = "unknown"    # "style"|"analysis"|"plan"|"answer"|"refused"|"mixed"|"unknown"
     disambiguation: str | None = None  # question to show when LLM confidence is low
 
     @property
@@ -247,18 +248,23 @@ def prompt_to_proposal(
     selected_component_id: str,
     semantic_model: "dict | None" = None,
     contracts: "dict | None" = None,
+    executor: "object | None" = None,
 ) -> ProposalResult:
     """Convert a natural-language prompt to a reviewable proposal or plan.
 
     The AI service owns governed style/analysis/refusal behavior. This wrapper
     preserves the older demo control intents while returning richer plan/trust
-    metadata to the Streamlit surface.
+    metadata to the Streamlit surface. When ``executor`` is supplied, metric
+    *questions* are answered directly (Round 078) instead of producing edits.
     """
     normalized = prompt.strip().upper()
     if not normalized:
         return ProposalResult(None, "Enter a report change to create a proposal.")
 
-    ai_result = NL2ProposalService().propose(prompt, report, selected_component_id, semantic_model=semantic_model, contracts=contracts)
+    ai_result = NL2ProposalService().propose(
+        prompt, report, selected_component_id,
+        semantic_model=semantic_model, contracts=contracts, executor=executor,
+    )
     if ai_result.refusal is not None:
         return ProposalResult(
             None,
@@ -275,6 +281,16 @@ def prompt_to_proposal(
             trust_notes=tuple(ai_result.trust_notes),
             split_proposals=ai_result.split_proposals,
             intent_kind="mixed",
+        )
+    # Round 078: direct computed answer to a metric question. Carries the
+    # optional "add as KPI" proposal so the user can pin the answer in one click.
+    if ai_result.direct_answer is not None:
+        return ProposalResult(
+            ai_result.proposal,
+            ai_result.message,
+            direct_answer=ai_result.direct_answer,
+            trust_notes=tuple(ai_result.trust_notes),
+            intent_kind="answer",
         )
     if ai_result.analysis_plan is not None:
         return ProposalResult(

@@ -19,6 +19,7 @@ from typing import Any
 from ai4bi.ai.intent_models import (
     AIIntent,
     AnalysisPlan,
+    DirectAnswer,
     GovernanceRefusal,
     NL2ProposalResult,
     SemanticSelection,
@@ -305,7 +306,12 @@ class NL2ProposalService:
         selected_component_id: str | None = None,
         semantic_model: dict[str, Any] | None = None,
         contracts: dict[str, Any] | None = None,
+        executor: Any = None,
     ) -> NL2ProposalResult:
+        # Round 078: an executor lets the answer-engine compute a real number
+        # through the governed query path. Stashed on self for the duration of
+        # this call so the existing handler signatures stay untouched.
+        self._executor = executor
         normalized = _normalize(prompt)
         if not normalized:
             return self._unsupported(
@@ -488,6 +494,11 @@ class NL2ProposalService:
             augmented = period_raw if period_raw else prompt
             return self._date_filter_change(augmented, _normalize(augmented), report)
 
+        if intent == "answer_metric":  # Round 078
+            answer = self._answer_metric(prompt, normalized, report, semantic_model, contracts)
+            if answer is not None:
+                return answer
+
         if intent == "queue_analysis":
             return self._queue_time_plan(prompt, report, selected_component_id, semantic_model, contracts)
 
@@ -523,6 +534,15 @@ class NL2ProposalService:
         semantic_model: dict[str, Any] | None,
         contracts: dict[str, Any] | None,
     ) -> NL2ProposalResult:
+        # Round 078: direct-answer engine. A *question* ("上個月營收多少？",
+        # "how much revenue") asks for a number, not a canvas edit — answer it
+        # before any edit-intent routing. Gated on explicit question markers so
+        # imperative edit commands ("加一張營收圖") are never intercepted.
+        if _looks_like_metric_question(prompt, normalized):
+            answer = self._answer_metric(prompt, normalized, report, semantic_model, contracts)
+            if answer is not None:
+                return answer
+
         # Round 066: "add a trend line / 趨勢線" overlay (keyword mode). Checked
         # before add_visual since it is a more specific phrase.
         if _looks_like_add_trend_line(prompt, normalized):
@@ -912,6 +932,155 @@ class NL2ProposalService:
             trust_notes=notes,
             risk_level="low",
         )
+
+    def _answer_metric(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        semantic_model: dict[str, Any] | None,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 078: answer a metric question with a real, sourced number.
+
+        Resolves the metric from the certified schema, runs it through the
+        governed executor (whole-period total, or current-vs-previous trailing
+        window when a time phrase is present), and returns a one-sentence answer
+        plus a one-click "add as KPI" proposal. Returns None to fall through to
+        edit-intent routing when no metric resolves or no executor is wired.
+        """
+        executor = getattr(self, "_executor", None)
+        if executor is None or not contracts:
+            return None
+
+        idx = SchemaIndex.build(contracts)
+        match = idx.best_metric_match(prompt, normalized)
+        if match is None:
+            return None
+
+        block_id, metric_name, alias = match.block_id, match.metric_name, match.alias
+        unit = _metric_unit(contracts, block_id, metric_name)
+        period = _extract_answer_period(normalized, prompt)
+        date_col = _find_date_column(contracts, block_id)
+
+        from ai4bi.query_spec import BlockRef, VisualQuerySpec
+
+        base = VisualQuerySpec(
+            spec_id=f"nl_answer_{metric_name}",
+            block_refs=[BlockRef(block_id)],
+            metrics=[MetricRef(block_id, metric_name, alias)],
+            inherit_global_filter=False,
+        )
+
+        notes = [
+            f"指標「{alias}」來自認證語意層（{metric_name} @ {block_id}），未產生自由 SQL。",
+            "數字由治理查詢路徑即時計算，與儀表板 KPI 同源。",
+        ]
+
+        value: float | None = None
+        previous: float | None = None
+        delta_pct: float | None = None
+        cur_label = prev_label = ""
+
+        if period != "all" and date_col is not None:
+            from ai4bi.analysis.time_intelligence import compute_period_comparison
+
+            comp = compute_period_comparison(
+                executor, base, date_block_id=block_id, date_column=date_col,
+                period=period, metric_col=alias,
+            )
+            if comp is not None and comp.current is not None:
+                value, previous = comp.current, comp.previous
+                delta_pct = comp.delta_pct
+                cur_label, prev_label = comp.current_label, comp.previous_label
+                notes.append(f"比較窗：{cur_label} vs {prev_label}（錨定資料最新日期）。")
+            else:
+                # No usable date/anchor — degrade to whole-period total.
+                period = "all"
+
+        if value is None and period == "all":
+            try:
+                df = executor.run(base)
+            except Exception:  # noqa: BLE001
+                return None
+            value = _first_scalar(df, alias)
+
+        if value is None:
+            return None
+
+        sentence = _compose_answer_sentence(
+            alias, value, unit, period, previous, delta_pct, cur_label, prev_label
+        )
+
+        answer = DirectAnswer(
+            question=prompt.strip(),
+            metric_block_id=block_id,
+            metric_name=metric_name,
+            metric_alias=alias,
+            sentence=sentence,
+            value=value,
+            period=period,
+            previous=previous,
+            delta_pct=delta_pct,
+            current_label=cur_label,
+            previous_label=prev_label,
+            unit=unit,
+            trust_notes=notes,
+        )
+
+        # One-click "add as KPI" — reuse the governed add-visual proposal path.
+        proposal = self._build_answer_kpi_proposal(report, block_id, metric_name, alias, period, date_col)
+
+        intent = AIIntent(
+            intent_kind="analysis_request",
+            target_scope="semantic_model",
+            selection=SemanticSelection(metric_block_id=block_id, metric_name=metric_name),
+            trust_notes=notes,
+            risk_level="low",
+        )
+        return NL2ProposalResult(
+            intent=intent,
+            message=sentence,
+            proposal=proposal,
+            direct_answer=answer,
+            trust_notes=notes,
+            risk_level="low",
+        )
+
+    def _build_answer_kpi_proposal(
+        self,
+        report: ExecutableReportSpec,
+        block_id: str,
+        metric_name: str,
+        alias: str,
+        period: str,
+        date_col: str | None,
+    ) -> "ReportProposal | None":
+        """Build an optional 'add this answer as a KPI card' proposal."""
+        try:
+            from ai4bi.report.builder import build_add_visual_proposal
+            from ai4bi.query_spec import BlockRef, VisualQuerySpec, VisualizationSpec
+
+            page_id = "main" if "main" in report.pages else next(iter(report.pages), None)
+            if page_id is None:
+                return None
+            existing = set(report.pages[page_id].visuals.keys())
+            vid = f"kpi_answer_{metric_name}"
+            c = 1
+            while vid in existing:
+                vid = f"kpi_answer_{metric_name}_{c}"; c += 1
+
+            q = VisualQuerySpec(
+                spec_id=vid,
+                block_refs=[BlockRef(block_id)],
+                metrics=[MetricRef(block_id, metric_name, alias)],
+                inherit_global_filter=False,
+            )
+            title = f"{alias}" if period == "all" else f"{alias}（{_PERIOD_TITLE.get(period, period)}）"
+            v = VisualizationSpec(VisualType.kpi_card, title=title, extra={})
+            return build_add_visual_proposal(page_id, vid, q, v)
+        except Exception:  # noqa: BLE001 — the answer itself must not depend on this
+            return None
 
     def _queue_time_plan(
         self,
@@ -1853,6 +2022,119 @@ class NL2ProposalService:
 
 def _normalize(prompt: str) -> str:
     return " ".join(prompt.strip().lower().split())
+
+
+# ---------------------------------------------------------------------------
+# Round 078: direct-answer engine helpers
+# ---------------------------------------------------------------------------
+
+# Explicit question markers. An imperative edit ("加一張營收圖") has none of these,
+# so gating on them keeps the answer engine from stealing edit commands.
+_QUESTION_MARKERS: tuple[str, ...] = (
+    "多少", "幾", "是多少", "有多少", "總共", "共有", "平均是", "占比", "佔比",
+    "為何", "為什麼", "?", "？",
+    "how much", "how many", "what is", "what's", "what was", "what are",
+    "tell me", "show me the", "total of", "average of", "sum of",
+)
+
+_PERIOD_TITLE: dict[str, str] = {
+    "week": "最近 7 天", "month": "最近 30 天", "quarter": "最近 90 天", "year": "最近 12 個月",
+}
+
+
+def _looks_like_metric_question(prompt: str, normalized: str) -> bool:
+    """True when the prompt reads as a question asking for a metric value."""
+    hay = f"{prompt.lower()} {normalized}"
+    return any(marker in hay for marker in _QUESTION_MARKERS)
+
+
+def _extract_answer_period(normalized: str, prompt: str) -> str:
+    """Map a time phrase to a trailing-window period, else 'all' (whole period)."""
+    hay = f"{prompt.lower()} {normalized}"
+    if any(t in hay for t in ("本週", "這週", "上週", "這周", "上周", "this week", "last week", "wow", "最近 7", "最近7", "近 7", "近7", "7 天", "7天")):
+        return "week"
+    if any(t in hay for t in ("本月", "這個月", "上個月", "當月", "this month", "last month", "mom", "最近 30", "最近30", "近 30", "近30", "30 天", "30天")):
+        return "month"
+    if any(t in hay for t in ("本季", "這季", "上季", "季度", "this quarter", "last quarter", "qtd", "qoq", "90 天", "90天")):
+        return "quarter"
+    if any(t in hay for t in ("今年", "去年", "全年", "年度", "this year", "last year", "yoy", "ytd", "12 個月", "12個月")):
+        return "year"
+    return "all"
+
+
+def _find_date_column(contracts: dict[str, Any] | None, block_id: str) -> str | None:
+    """Find the best date column on a block's contract for period filtering."""
+    if not contracts or block_id not in contracts:
+        return None
+    contract = contracts[block_id]
+    cols = getattr(contract, "columns", None) or []
+    for col in cols:
+        if getattr(col, "data_type", None) in ("date", "timestamp", "datetime"):
+            return col.name
+    for col in cols:
+        name = col.name.lower()
+        if any(t in name for t in ("date", "_at", "time", "_dt", "_ts", "day")):
+            return col.name
+    return None
+
+
+def _metric_unit(contracts: dict[str, Any] | None, block_id: str, metric_name: str) -> str:
+    """Return the metric's declared unit (e.g. 'NT$', '%') for formatting."""
+    if not contracts or block_id not in contracts:
+        return ""
+    for m in getattr(contracts[block_id], "metrics", None) or []:
+        if getattr(m, "name", None) == metric_name:
+            return getattr(m, "unit", "") or ""
+    return ""
+
+
+def _first_scalar(df, col: str) -> float | None:
+    """Pull the single aggregate value out of a one-row result frame."""
+    if df is None or getattr(df, "empty", True):
+        return None
+    use = col if col in df.columns else (df.columns[-1] if len(df.columns) else None)
+    if use is None:
+        return None
+    try:
+        import pandas as pd  # local import keeps module import light
+        val = df[use].iloc[0]
+        return None if pd.isna(val) else float(val)
+    except (ValueError, TypeError, IndexError):
+        return None
+
+
+def _format_metric_value(value: float | None, unit: str) -> str:
+    if value is None:
+        return "—"
+    if unit == "%":
+        return f"{value:,.1f}%"
+    if unit in ("NT$", "$", "USD", "TWD"):
+        prefix = "NT$" if unit in ("NT$", "TWD") else "$"
+        return f"{prefix}{value:,.0f}"
+    if abs(value - round(value)) < 1e-9:
+        return f"{value:,.0f}"
+    return f"{value:,.2f}"
+
+
+def _compose_answer_sentence(
+    alias: str,
+    value: float | None,
+    unit: str,
+    period: str,
+    previous: float | None,
+    delta_pct: float | None,
+    cur_label: str,
+    prev_label: str,
+) -> str:
+    """Build the human-readable answer sentence (with delta when available)."""
+    vtxt = _format_metric_value(value, unit)
+    scope = _PERIOD_TITLE.get(period, "全期間")
+    base = f"{scope}「{alias}」為 {vtxt}。"
+    if delta_pct is not None and previous is not None:
+        arrow = "↑" if delta_pct >= 0 else "↓"
+        ptxt = _format_metric_value(previous, unit)
+        base += f"　較{prev_label} {ptxt} {arrow}{abs(delta_pct):.1f}%。"
+    return base
 
 
 def _target_scope(selected_component_id: str | None) -> str:
