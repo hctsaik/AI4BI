@@ -374,6 +374,8 @@ class ExecutableReportSpec:
     read_only: bool = False
     saved_at: str | None = None
     global_filters: dict[str, Any] = field(default_factory=dict)
+    # Round 064: optional password gate for read-only shares (sha256 hash; None = open)
+    share_password_hash: str | None = None
 
     # ------------------------------------------------------------------
     # Backward-compat properties so existing code using report.report_id
@@ -453,6 +455,7 @@ class ExecutableReportSpec:
             "read_only": self.read_only,
             "saved_at": self.saved_at,
             "global_filters": copy.deepcopy(self.global_filters),
+            "share_password_hash": self.share_password_hash,
         }
 
     @classmethod
@@ -483,6 +486,7 @@ class ExecutableReportSpec:
             read_only=bool(payload.get("read_only", False)),
             saved_at=payload.get("saved_at"),
             global_filters=copy.deepcopy(payload.get("global_filters", {})),
+            share_password_hash=payload.get("share_password_hash"),
         )
         report.validate()
         return report

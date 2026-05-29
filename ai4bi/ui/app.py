@@ -56,6 +56,7 @@ from ai4bi.ui.cross_fact_panel import render_cross_fact_panel  # Round 055
 from ai4bi.ui.what_if_panel import render_what_if_panel, get_parameters  # Round 060
 from ai4bi.ui.bookmark_panel import render_bookmark_panel  # Round 061
 from ai4bi.ui.cohort_panel import render_cohort_panel  # Round 062
+from ai4bi.report.share_auth import hash_password, verify_password  # Round 064
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
 _BLOCKS_DIR = _DEMO_ROOT / "blocks"
@@ -223,6 +224,27 @@ def _load_all_contracts() -> dict[str, DataBlockContract]:
     return contracts
 
 
+def _share_password_ok(report: ExecutableReportSpec) -> bool:
+    """Round 064: gate a protected read-only share behind a password.
+
+    Returns True once the viewer has entered the correct password (remembered
+    per session). Renders a centred prompt and returns False until then.
+    """
+    authed_key = f"_share_authed_{report.audit.report_id}"
+    if st.session_state.get(authed_key):
+        return True
+    st.title("🔒 受保護的報表")
+    st.caption("這份分享報表需要密碼才能檢視。")
+    pw = st.text_input("請輸入分享密碼", type="password", key="_share_pw_input")
+    if st.button("開啟報表", key="_share_pw_submit", type="primary"):
+        if verify_password(pw, report.share_password_hash):
+            st.session_state[authed_key] = True
+            st.rerun()
+        else:
+            st.error("密碼錯誤，請再試一次。")
+    return False
+
+
 def _gate_check_icon(check: GateCheckResult) -> str:
     if check.passed:
         return "✅"
@@ -291,6 +313,25 @@ def _render_publication_readiness(report: ExecutableReportSpec) -> None:
             label = check.check_name.replace("_", " ").title()
             st.markdown(f"{icon} **{label}**")
             st.caption(check.message)
+
+        # Round 064: optional password gate for the read-only share
+        st.markdown("---")
+        st.markdown("**🔒 分享密碼（選填）**")
+        if report.share_password_hash:
+            st.caption("✅ 已設定密碼 — 開啟分享連結需輸入密碼。")
+        else:
+            st.caption("目前未設密碼 — 任何人拿到連結即可檢視。")
+        _pw = st.text_input("設定分享密碼", type="password", key="set_share_pw")
+        pc1, pc2 = st.columns(2)
+        with pc1:
+            if st.button("設定密碼", key="set_share_pw_btn", disabled=not _pw):
+                workspace.replace_with_loaded(replace(report, share_password_hash=hash_password(_pw)))
+                st.rerun()
+        with pc2:
+            if st.button("清除密碼", key="clear_share_pw_btn", disabled=not report.share_password_hash):
+                workspace.replace_with_loaded(replace(report, share_password_hash=None))
+                st.rerun()
+        st.markdown("---")
 
         if gate.can_publish:
             if st.button("Publish & Share", type="primary", key="publish_share_btn"):
@@ -1682,6 +1723,12 @@ def main() -> None:
         report = replace(report, read_only=True)
         workspace.replace_with_loaded(report)
         report = workspace.current_report()
+
+    # Round 064: password gate for protected read-only shares — block render
+    # until the correct password is entered.
+    if readonly and getattr(report, "share_password_hash", None):
+        if not _share_password_ok(report):
+            return
 
     force_sync = st.session_state.pop("_sync_widgets_from_report", False)
     _sync_widget_values(report, force=force_sync)
