@@ -827,7 +827,14 @@ class NL2ProposalService:
 
         dimensions, sort = [], []
         truncate = None
-        if vtype == VisualType.pivot and len(cat_cols) >= 2:
+        if vtype == VisualType.map:
+            # Round 089: a map needs a *location* dimension — prefer a geo column
+            # (city / 縣市 / region / store) over an arbitrary categorical.
+            loc_col = _find_location_col(contract) or cat_col
+            if loc_col:
+                dimensions = [DimensionRef(block_id, loc_col, loc_col)]
+                sort = [SortSpec(metric_alias, SortDirection.desc)]
+        elif vtype == VisualType.pivot and len(cat_cols) >= 2:
             dimensions = [DimensionRef(block_id, cat_cols[0], cat_cols[0]),
                           DimensionRef(block_id, cat_cols[1], cat_cols[1])]
         elif vtype == VisualType.kpi_card:
@@ -861,7 +868,7 @@ class NL2ProposalService:
             VisualType.pie_chart: "圓餅圖", VisualType.bar_chart: "長條圖",
             VisualType.line_chart: "折線圖", VisualType.scatter: "散點圖",
             VisualType.kpi_card: "KPI", VisualType.table: "表格",
-            VisualType.pivot: "樞紐表",
+            VisualType.pivot: "樞紐表", VisualType.map: "地圖",
         }.get(vtype, vtype.value)
         viz = VisualizationSpec(vtype, title=f"{metric_alias}（{_type_label}）", extra={})
         proposal = build_add_visual_proposal(page_id, vid, query, viz)
@@ -2299,6 +2306,8 @@ class NL2ProposalService:
             "kpi_card": VisualType.kpi_card, "kpi": VisualType.kpi_card,
             "pie_chart": VisualType.pie_chart, "pie": VisualType.pie_chart,
             "scatter": VisualType.scatter, "scatter_chart": VisualType.scatter,
+            "pivot": VisualType.pivot, "matrix": VisualType.pivot,
+            "map": VisualType.map, "geo": VisualType.map,  # Round 089
         }
         vtype = _vtype_map.get(visual_type_str, VisualType.bar_chart)
 
@@ -2725,6 +2734,40 @@ def _extract_rank_n(prompt: str, normalized: str, default: int = 5) -> int:
         except ValueError:
             pass
     return default
+
+
+# --- Round 089: location-column detection for map visuals --------------------
+
+# Strong hints resolve to coordinates (city/region/縣市); weak hints (store/門市)
+# are usually too granular for the geo lookup, so they're only a fallback.
+_STRONG_LOCATION_HINTS: tuple[str, ...] = (
+    "city", "region", "country", "state", "province", "county",
+    "市", "縣", "省", "城市", "縣市", "地區", "國家", "geo",
+)
+_WEAK_LOCATION_HINTS: tuple[str, ...] = (
+    "store", "branch", "location", "area", "district", "門市", "分店",
+    "據點", "地點", "區",
+)
+
+
+def _find_location_col(contract) -> str | None:
+    """Return the best string column that looks like a geographic location.
+
+    Prefers coordinate-resolvable levels (city/region/縣市) over store-level
+    names, since the map's geo lookup keys on administrative names.
+    """
+    if contract is None:
+        return None
+    cols = [
+        c.name for c in (getattr(contract, "columns", []) or [])
+        if getattr(c, "data_type", "") in ("string", "str", "object", "text", "varchar")
+        and not c.name.lower().endswith(("_id", "_code"))
+    ]
+    for hints in (_STRONG_LOCATION_HINTS, _WEAK_LOCATION_HINTS):
+        for name in cols:
+            if any(h in name.lower() for h in hints):
+                return name
+    return None
 
 
 # --- Round 086: NL routing to pandas analytics engines -----------------------
