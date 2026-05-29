@@ -452,13 +452,15 @@ class Executor:
             for ref in spec.block_refs:
                 contract = self._resolve_block_contract(ref, version_snapshot=version_snapshot)
                 contracts[ref.block_id] = contract
-                # Round 032: reuse cached Arrow table for InlineDataSource blocks
+                # Round 032/051: reuse cached Arrow table for in-process sources
+                from ai4bi.blocks.contracts import CachedDataSource as _Cached
                 from ai4bi.blocks.contracts import InlineDataSource as _Inline
-                if isinstance(contract.data_source, _Inline) and ref.block_id in self._arrow_cache:
+                _materializable = (_Inline, _Cached)
+                if isinstance(contract.data_source, _materializable) and ref.block_id in self._arrow_cache:
                     conn.register(ref.block_id, self._arrow_cache[ref.block_id])
                 else:
                     self._loader.register_to_duckdb(contract, ref.block_id, conn)
-                    if isinstance(contract.data_source, _Inline):
+                    if isinstance(contract.data_source, _materializable):
                         # Cache the Arrow table for subsequent queries in this session
                         self._arrow_cache[ref.block_id] = self._loader.to_arrow(contract)
 

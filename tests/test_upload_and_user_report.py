@@ -32,8 +32,12 @@ def test_infer_block_basic():
     assert contract.block_id == "sales"
     assert contract.block_type == BlockType.fact
     assert contract.block_lifecycle == LifecycleStatus.draft
-    assert isinstance(contract.data_source, InlineDataSource)
-    assert len(contract.data_source.records) == 5
+    # Round 051: uploads use the content-addressed store, not embedded records
+    from ai4bi.blocks.contracts import CachedDataSource
+    from ai4bi.blocks.datastore import materialize_dataframe
+    assert isinstance(contract.data_source, CachedDataSource)
+    assert contract.data_source.row_count == 5
+    assert len(materialize_dataframe(contract)) == 5
 
 
 def test_infer_block_detects_metrics():

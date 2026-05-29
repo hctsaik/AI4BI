@@ -276,7 +276,7 @@ class TestBlockLoader:
         contract = DataBlockContract.model_validate(payload)
         loader = BlockLoader()
 
-        with pytest.raises(TypeError, match="InlineDataSource"):
+        with pytest.raises(TypeError, match="ExternalDataSource"):
             loader.to_arrow(contract)
 
     # -----------------------------------------------------------------------

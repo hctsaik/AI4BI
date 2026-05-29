@@ -144,6 +144,19 @@ class InlineDataSource(BaseModel):
     )
 
 
+class CachedDataSource(BaseModel):
+    """References rows held in the process-global content-addressed store.
+
+    Round 051: lets a contract carry only a content hash + lightweight stats
+    instead of embedding 10K+ rows, so large uploads no longer bloat
+    st.session_state. Resolve via ai4bi.blocks.datastore.materialize_dataframe.
+    """
+
+    source_type: Literal["cached"] = "cached"
+    content_hash: str = Field(..., description="Key into the content-addressed DataFrame store")
+    row_count: int = Field(0, description="Number of rows (for display / metadata)")
+
+
 class ExternalDataSource(BaseModel):
     """References a production query or file-based data source."""
 
@@ -167,7 +180,7 @@ class ExternalDataSource(BaseModel):
 
 # Discriminated union — Pydantic dispatches on the literal 'source_type' field
 DataSource = Annotated[
-    Union[InlineDataSource, ExternalDataSource],
+    Union[InlineDataSource, CachedDataSource, ExternalDataSource],
     Field(discriminator="source_type"),
 ]
 

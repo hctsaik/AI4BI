@@ -18,7 +18,7 @@ import pyarrow as pa
 import pyarrow.lib  # noqa: F401 — ensures pa.Table is importable
 import duckdb
 
-from ai4bi.blocks.contracts import DataBlockContract, InlineDataSource
+from ai4bi.blocks.contracts import CachedDataSource, DataBlockContract, InlineDataSource
 
 
 # ---------------------------------------------------------------------------
@@ -122,12 +122,18 @@ class BlockLoader:
         TypeError
             If the contract's data_source is not an InlineDataSource.
         """
-        if not isinstance(contract.data_source, InlineDataSource):
-            raise TypeError(
-                f"to_arrow() requires an InlineDataSource, "
-                f"got {type(contract.data_source).__name__} for block '{contract.block_id}'"
+        if isinstance(contract.data_source, InlineDataSource):
+            return _records_to_arrow(contract.data_source.records)
+        if isinstance(contract.data_source, CachedDataSource):
+            # Round 051: rows live in the content-addressed store, not the contract
+            from ai4bi.blocks.datastore import get_dataframe
+            return pa.Table.from_pandas(
+                get_dataframe(contract.data_source.content_hash), preserve_index=False
             )
-        return _records_to_arrow(contract.data_source.records)
+        raise TypeError(
+            f"to_arrow() requires an in-process data source (inline/cached), "
+            f"got {type(contract.data_source).__name__} for block '{contract.block_id}'"
+        )
 
     # ------------------------------------------------------------------
     # DuckDB registration

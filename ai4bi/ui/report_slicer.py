@@ -59,13 +59,16 @@ def _discover_slicers(
     for block_id, contract in contracts.items():
         if not hasattr(contract, "data_source"):
             continue
-        from ai4bi.blocks.contracts import InlineDataSource
-        if not isinstance(contract.data_source, InlineDataSource):
+        from ai4bi.blocks.contracts import CachedDataSource, InlineDataSource
+        if not isinstance(contract.data_source, (InlineDataSource, CachedDataSource)):
             continue
-        records = contract.data_source.records
-        if not records:
+        from ai4bi.blocks.datastore import materialize_dataframe
+        try:
+            df = materialize_dataframe(contract)
+        except (KeyError, TypeError):
             continue
-        df = pd.DataFrame(records)
+        if df is None or df.empty:
+            continue
 
         pk_set = set(contract.primary_keys)
 

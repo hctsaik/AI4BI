@@ -192,14 +192,16 @@ def detect_anomalies(
             BlockType.fact, BlockType.snapshot_fact, BlockType.target_fact
         ):
             continue
-        from ai4bi.blocks.contracts import InlineDataSource
-        if not isinstance(contract.data_source, InlineDataSource):
+        from ai4bi.blocks.contracts import CachedDataSource, InlineDataSource
+        if not isinstance(contract.data_source, (InlineDataSource, CachedDataSource)):
             continue
-        records = contract.data_source.records
-        if not records or len(records) < 5:
+        from ai4bi.blocks.datastore import materialize_dataframe
+        try:
+            df = materialize_dataframe(contract)
+        except (KeyError, TypeError):
             continue
-
-        df = pd.DataFrame(records)
+        if df is None or len(df) < 5:
+            continue
 
         # Find sum-metrics and ratio-metrics from contract
         sum_metrics = [

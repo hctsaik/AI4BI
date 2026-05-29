@@ -199,7 +199,13 @@ def infer_block(
     for col in df_serial.select_dtypes(include="datetime64").columns:
         df_serial[col] = df_serial[col].dt.strftime("%Y-%m-%d")
 
-    records = df_serial.where(pd.notna(df_serial), None).to_dict(orient="records")
+    df_clean = df_serial.where(pd.notna(df_serial), None)
+
+    # Round 051: store rows in the content-addressed DataFrame store and keep
+    # only a hash in the contract, so large uploads don't bloat st.session_state.
+    from ai4bi.blocks.contracts import CachedDataSource
+    from ai4bi.blocks.datastore import put_dataframe
+    content_hash = put_dataframe(df_clean)
 
     contract = DataBlockContract(
         block_id=block_id,
@@ -211,7 +217,7 @@ def infer_block(
         primary_keys=primary_keys[:1],
         columns=columns,
         metrics=metrics,
-        data_source=InlineDataSource(records=records),
+        data_source=CachedDataSource(content_hash=content_hash, row_count=len(df_clean)),
         policy=PolicySpec(data_classification=DataClassification.internal),
     )
     return contract, metric_names, dim_names
