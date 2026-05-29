@@ -502,6 +502,11 @@ class NL2ProposalService:
             if panel is not None:
                 return panel
 
+        if intent == "ranking":  # Round 087
+            ranked = self._answer_ranking(prompt, normalized, report, contracts)
+            if ranked is not None:
+                return ranked
+
         if intent == "explain_change":  # Round 081
             decomp = self._explain_change(prompt, normalized, report, contracts)
             if decomp is not None:
@@ -563,6 +568,13 @@ class NL2ProposalService:
             panel = self._run_panel_analysis(prompt, normalized, contracts)
             if panel is not None:
                 return panel
+
+        # Round 087: "我最賺的 5 個商品" / "賣最差的品類" → ranked table. Checked
+        # before the plain-answer engine; falls through if no dimension resolves.
+        if _looks_like_ranking(prompt, normalized):
+            ranked = self._answer_ranking(prompt, normalized, report, contracts)
+            if ranked is not None:
+                return ranked
 
         # Round 081: "why did <metric> change? decompose by <dim>" — checked
         # before the plain-answer engine so a "why" question decomposes instead
@@ -980,6 +992,72 @@ class NL2ProposalService:
             proposal=merged,
             trust_notes=notes,
             risk_level="low",
+        )
+
+    def _answer_ranking(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 087: "我最賺的 5 個商品" / "賣最差的品類" → ranked table answer.
+
+        Resolves a metric + a categorical dimension, runs a grouped query with
+        the executor's existing sort+limit, and returns the ranked rows. Returns
+        None to fall through when metric/dimension/executor can't be resolved.
+        """
+        executor = getattr(self, "_executor", None)
+        if executor is None or not contracts:
+            return None
+
+        idx = SchemaIndex.build(contracts)
+        metric = idx.best_metric_match(prompt, normalized)
+        if metric is None:
+            return None
+        block_id, metric_name, alias = metric.block_id, metric.metric_name, metric.alias
+
+        dim_col = _resolve_decomp_dimension(idx, prompt, normalized, contracts, block_id)
+        if dim_col is None:
+            return None
+
+        n = _extract_rank_n(prompt, normalized)
+        ascending = _ranking_is_ascending(prompt, normalized)
+        unit = _metric_unit(contracts, block_id, metric_name)
+
+        from ai4bi.query_spec import BlockRef, DimensionRef, SortDirection, SortSpec, VisualQuerySpec
+
+        spec = VisualQuerySpec(
+            spec_id=f"rank_{metric_name}",
+            block_refs=[BlockRef(block_id)],
+            metrics=[MetricRef(block_id, metric_name, alias)],
+            dimensions=[DimensionRef(block_id, dim_col, dim_col)],
+            sort=[SortSpec(alias, SortDirection.asc if ascending else SortDirection.desc)],
+            limit=n,
+            inherit_global_filter=False,
+        )
+        try:
+            df = executor.run(spec)
+        except Exception:  # noqa: BLE001
+            return None
+        if df is None or df.empty:
+            return None
+
+        superlative = "最低" if ascending else "最高"
+        top = df.iloc[0]
+        top_val = _format_metric_value(float(top[alias]) if alias in df.columns else None, unit) \
+            if alias in df.columns else ""
+        sentence = (f"{alias}{superlative}的前 {len(df)} 個「{dim_col}」。"
+                    f"第一名：{top[dim_col]}（{top_val}）。")
+        notes = [
+            f"依「{alias}」對「{dim_col}」排序取前 {n}（治理查詢 sort+limit，認證語意層）。",
+            f"來源：{block_id}。",
+        ]
+        intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                          trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(
+            intent=intent, message=sentence, result_table=df,
+            trust_notes=notes, risk_level="low",
         )
 
     def _run_panel_analysis(
@@ -2483,6 +2561,46 @@ def _format_metric_value(value: float | None, unit: str) -> str:
     if abs(value - round(value)) < 1e-9:
         return f"{value:,.0f}"
     return f"{value:,.2f}"
+
+
+# --- Round 087: Top-N ranking ("best / worst") parsing -----------------------
+
+_RANK_TRIGGERS: tuple[str, ...] = (
+    "最高", "最低", "最多", "最少", "最賺", "最好", "最差", "最大", "最小",
+    "賣最", "排名", "排行", "前幾", "前十", "前五", "前三",
+    "top ", "bottom ", "best ", "worst ", "highest", "lowest", "ranking", "rank ",
+)
+_RANK_ASC_WORDS: tuple[str, ...] = (
+    "最低", "最少", "最差", "最小", "賣最差", "賣最少", "最不", "墊底",
+    "bottom", "worst", "lowest", "least", "fewest",
+)
+
+
+def _looks_like_ranking(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    if any(t in hay for t in _RANK_TRIGGERS):
+        return True
+    # "前 5 名 / top 5" expressed with a number.
+    return bool(re.search(r"(前\s*\d+|top\s*\d+|bottom\s*\d+)", hay))
+
+
+def _ranking_is_ascending(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    return any(w in hay for w in _RANK_ASC_WORDS)
+
+
+def _extract_rank_n(prompt: str, normalized: str, default: int = 5) -> int:
+    hay = f"{prompt.lower()} {normalized}"
+    m = re.search(r"(?:前|top|bottom|前面|頭)\s*(\d+)", hay)
+    if m is None:
+        m = re.search(r"(\d+)\s*(?:個|名|筆|項|大|個商品|個地區)", hay)
+    if m:
+        try:
+            n = int(m.group(1))
+            return max(1, min(n, 100))
+        except ValueError:
+            pass
+    return default
 
 
 # --- Round 086: NL routing to pandas analytics engines -----------------------
