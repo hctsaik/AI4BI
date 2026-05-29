@@ -50,6 +50,7 @@ SUPPORTED_INTENTS = (
     "pacing_question",        # "are we on track to target?"
     "panel_analysis",         # churn/RFM, declining-streak, basket questions
     "measure_filter",         # filter an existing visual on an aggregate
+    "seasonality",            # busiest day-of-week / hour
     "unsupported",            # anything else
 )
 

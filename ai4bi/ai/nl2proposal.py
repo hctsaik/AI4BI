@@ -514,6 +514,11 @@ class NL2ProposalService:
             if seg is not None:
                 return seg
 
+        if intent == "seasonality":  # Round 096
+            season = self._answer_seasonality(prompt, normalized, report, contracts)
+            if season is not None:
+                return season
+
         if intent == "grouped_topn":  # Round 090
             gt = self._answer_grouped_topn(prompt, normalized, report, contracts)
             if gt is not None:
@@ -598,6 +603,13 @@ class NL2ProposalService:
             panel = self._run_panel_analysis(prompt, normalized, contracts)
             if panel is not None:
                 return panel
+
+        # Round 096: "哪幾天最忙 / busiest day of week / 哪個時段" → weekday/hour
+        # seasonality. Checked before ranking since it carries a date-bucket cue.
+        if _looks_like_seasonality(prompt, normalized):
+            season = self._answer_seasonality(prompt, normalized, report, contracts)
+            if season is not None:
+                return season
 
         # Round 090: "每個門市最暢銷的 3 個商品" → per-group Top-N. Checked before
         # plain ranking since it is the more specific (two-dimension) pattern.
@@ -1063,6 +1075,75 @@ class NL2ProposalService:
             trust_notes=notes,
             risk_level="low",
         )
+
+    def _answer_seasonality(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 096: "哪幾天最忙？" / "busiest day of week" / "哪個時段" .
+
+        Groups a metric by weekday (DAYNAME) or hour (EXTRACT) — date buckets the
+        single-GROUP-BY executor now supports — and ranks busiest-first. Surfaces
+        the day-of-week / hour seasonality that was previously un-askable.
+        Returns None to fall through.
+        """
+        executor = getattr(self, "_executor", None)
+        if executor is None or not contracts:
+            return None
+        hay = f"{prompt.lower()} {normalized}"
+        bucket = "hour" if _is_hour_seasonality(hay) else "dow"
+        label = "時段" if bucket == "hour" else "星期"
+
+        idx = SchemaIndex.build(contracts)
+        match = idx.best_metric_match(prompt, normalized)
+        block_id = metric_name = alias = None
+        if match is not None:
+            block_id, metric_name, alias = match.block_id, match.metric_name, match.alias
+        else:
+            # No metric word ("最忙") → a count-like metric on a dated fact block.
+            from ai4bi.blocks.contracts import BlockType
+            for bid, c in contracts.items():
+                if getattr(c, "block_type", None) not in (
+                    BlockType.fact, BlockType.snapshot_fact, BlockType.target_fact):
+                    continue
+                if _find_date_column(contracts, bid) and (m := _default_count_metric(contracts, bid)):
+                    block_id, (metric_name, alias) = bid, m
+                    break
+        if block_id is None:
+            return None
+        date_col = _find_date_column(contracts, block_id)
+        if date_col is None:
+            return None
+
+        from ai4bi.query_spec import (
+            BlockRef, DimensionRef, SortDirection, SortSpec, VisualQuerySpec,
+        )
+        spec = VisualQuerySpec(
+            spec_id=f"season_{metric_name}",
+            block_refs=[BlockRef(block_id)],
+            metrics=[MetricRef(block_id, metric_name, alias)],
+            dimensions=[DimensionRef(block_id, date_col, label, truncate_date_to=bucket)],
+            sort=[SortSpec(alias, SortDirection.desc)],
+            inherit_global_filter=False,
+        )
+        try:
+            df = executor.run(spec)
+        except Exception:  # noqa: BLE001
+            return None
+        if df is None or df.empty or label not in df.columns:
+            return None
+
+        top = df.iloc[0]
+        sentence = (f"依「{label}」看「{alias}」，最高的是 {top[label]}"
+                    f"（最忙排前；共 {len(df)} 個{label}）。")
+        notes = [f"依 {label} 分組彙總「{alias}」並排序（治理查詢路徑），來源：{block_id}。"]
+        intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                          trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=sentence, result_table=df,
+                                 trust_notes=notes, risk_level="low")
 
     def _answer_segment_count(
         self,
@@ -2934,6 +3015,27 @@ def _extract_rank_n(prompt: str, normalized: str, default: int = 5) -> int:
         except ValueError:
             pass
     return default
+
+
+# --- Round 096: weekday / hour seasonality parsing ---------------------------
+
+_DOW_TRIGGERS: tuple[str, ...] = (
+    "星期幾", "週幾", "周幾", "禮拜幾", "星期", "哪一天", "哪幾天", "哪天最",
+    "day of week", "weekday", "busiest day", "which day", "by day of week",
+)
+_HOUR_TRIGGERS: tuple[str, ...] = (
+    "時段", "幾點", "哪個小時", "哪個時間", "哪個時段", "busiest hour",
+    "what hour", "time of day", "by hour", "peak hour",
+)
+
+
+def _looks_like_seasonality(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    return any(t in hay for t in _DOW_TRIGGERS) or any(t in hay for t in _HOUR_TRIGGERS)
+
+
+def _is_hour_seasonality(hay: str) -> bool:
+    return any(t in hay for t in _HOUR_TRIGGERS)
 
 
 # --- Round 091: cold-start grouped measure filter ("buyers with > N orders") -

@@ -425,8 +425,14 @@ class Executor:
         _require_column(contracts, dimension.block_id, dimension.column_name)
         col = _qualified(dimension.block_id, dimension.column_name)
         alias = _quote(dimension.alias or dimension.column_name)
-        if dimension.truncate_date_to:
-            return f"DATE_TRUNC('{dimension.truncate_date_to.lower()}', {col}::DATE) AS {alias}"
+        trunc = (dimension.truncate_date_to or "").lower()
+        if trunc:
+            # Round 096: seasonality buckets — weekday / hour — beyond DATE_TRUNC.
+            if trunc in ("dow", "weekday", "dayofweek"):
+                return f"DAYNAME({col}::DATE) AS {alias}"
+            if trunc == "hour":
+                return f"EXTRACT(hour FROM {col}::TIMESTAMP) AS {alias}"
+            return f"DATE_TRUNC('{trunc}', {col}::DATE) AS {alias}"
         return f"{col} AS {alias}"
 
     def _build_sql(
