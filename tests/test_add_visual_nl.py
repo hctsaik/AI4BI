@@ -32,6 +32,9 @@ def _added_visual_type(proposal):
     ("add a bar chart", "bar_chart"),
     ("加一個折線圖", "line_chart"),
     ("建立一個散точ圖".replace("точ", "點"), "scatter"),
+    ("加一個 KPI", "kpi_card"),
+    ("新增一個看板", "kpi_card"),
+    ("加一個表格", "table"),
 ])
 def test_add_visual_creates_requested_type(prompt, expected):
     svc, report, contracts = _ctx()

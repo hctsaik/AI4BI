@@ -89,6 +89,23 @@ _CHART_TYPE_KEYWORDS: dict[str, VisualType] = {
     "散佈圖": VisualType.scatter,
 }
 
+# Round 067: keyword → type for the *add a new visual* path (superset of
+# _CHART_TYPE_KEYWORDS; KPI/table aren't valid in-place chart-type *changes*,
+# but you can add them as new visuals). Kept separate so chart_type_change is
+# unaffected.
+_ADD_VISUAL_TYPE_KEYWORDS: dict[str, VisualType] = {
+    **_CHART_TYPE_KEYWORDS,
+    "kpi": VisualType.kpi_card,
+    "kpi card": VisualType.kpi_card,
+    "kpi 卡": VisualType.kpi_card,
+    "看板": VisualType.kpi_card,
+    "指標卡": VisualType.kpi_card,
+    "table": VisualType.table,
+    "資料表": VisualType.table,
+    "表格": VisualType.table,
+    "明細表": VisualType.table,
+}
+
 # ---------------------------------------------------------------------------
 # Round 019: Dimension-change mappings (date truncation keywords)
 # ---------------------------------------------------------------------------
@@ -666,7 +683,11 @@ class NL2ProposalService:
             BlockRef, DimensionRef, SortDirection, SortSpec, VisualQuerySpec, VisualizationSpec,
         )
 
-        vtype = _extract_chart_type(prompt, normalized) or VisualType.bar_chart
+        vtype = VisualType.bar_chart
+        for kw, vt in _ADD_VISUAL_TYPE_KEYWORDS.items():
+            if kw in normalized or kw in prompt:
+                vtype = vt
+                break
 
         # Source metric + block: prefer the selected visual, else the first visual
         # in the report that has a metric.
@@ -1969,7 +1990,7 @@ def _looks_like_add_visual(prompt: str, normalized: str) -> bool:
     Requires an add-verb plus a chart-type keyword; the change-verb path
     (_looks_like_chart_type_change) handles 'change to pie' separately.
     """
-    has_chart = any(k in normalized or k in prompt for k in _CHART_TYPE_KEYWORDS)
+    has_chart = any(k in normalized or k in prompt for k in _ADD_VISUAL_TYPE_KEYWORDS)
     if not has_chart:
         return False
     has_add = any(v in normalized or v in prompt for v in _ADD_VISUAL_VERBS)
