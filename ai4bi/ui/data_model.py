@@ -172,11 +172,15 @@ def _auto_detect_join_cols(
 # Round 037: Join Builder UI
 # ---------------------------------------------------------------------------
 
-def render_join_builder() -> None:
-    """Render the '資料關聯設定' expander — Round 037."""
+def render_join_builder(expanded: bool = False) -> None:
+    """Render the '資料關聯設定' expander — Round 037.
+
+    Round 148: ``expanded`` lets the caller open it by default when it is the
+    primary panel of the 模型 view (so the headline feature isn't one click away).
+    """
     user_blocks: dict[str, DataBlockContract] = st.session_state.get(_USER_BLOCKS_KEY, {})
 
-    with st.expander("🔗 資料關聯設定", expanded=False):
+    with st.expander("🔗 資料關聯設定（把兩份資料用共同欄位連結）", expanded=expanded):
         st.caption(
             "將兩份資料用共同欄位連結起來，就能在同一張圖表中顯示不同來源的數字。"
         )

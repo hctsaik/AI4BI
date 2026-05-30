@@ -849,10 +849,11 @@ def _render_draft_controls(
         st.markdown("---")
 
         if "探索" in mode:
-            # Ask / read the report: suggestions, metric-first entry, NL assistant.
+            # Ask / read the report: suggestions, metric-first entry, bookmarks.
+            # (The primary NL ask box now lives at the top of the canvas.)
+            st.caption("💬 用自然語言提問的對話框已移到上方畫布頂端，隨時可用。")
             _render_ai_suggestions(report, cache)
             _render_metric_first_entry(report, cache)
-            _render_visual_assistant(report, cache, executor)
             render_bookmark_panel(cache)
 
         elif "資料" in mode:
@@ -888,7 +889,7 @@ def _render_draft_controls(
             # Relationships + semantic layer — JOIN is the FIRST thing here.
             st.subheader("資料模型")
             st.caption("把多份資料用共同欄位關聯起來，並定義計算欄位（類似 Power BI 的模型檢視）。")
-            render_join_builder()
+            render_join_builder(expanded=True)
             render_data_model_view()
             render_calc_metric_panel()
             render_cross_fact_panel()
@@ -1964,6 +1965,12 @@ def main() -> None:
             st.caption("📁 你的資料 — AI 自動建立的起始報表，可用自然語言繼續探索。")
         else:
             st.caption(f"報表 ID: `{_rid}`")
+
+    # Round 148: primary NL ask box at the TOP of the canvas (Power BI Copilot
+    # placement) — the most common action lives where the user is looking, not
+    # buried in a sidebar expander. Read-only shares omit it.
+    if not readonly:
+        _render_visual_assistant(report, cache, executor)
 
     # Sandbox banner: shown whenever the report contains non-certified blocks (002-E)
     if not readonly:
