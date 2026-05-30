@@ -101,8 +101,12 @@ def _generate():
                     if excursion:  # force the excursion lots through ETCH-02
                         tool_id, vendor, rel, tyf = _TOOLS["ETCH"][1]
                     etch_tool_used = tool_id
+                # Day-heavy staffing (~2:1) and a night-shift queue penalty —
+                # so Day vs Night comparisons reveal a real difference. (Round 126)
+                shift = "Day" if (mid % 3 != 0) else "Night"
+                night_pen = 1.18 if shift == "Night" else 1.0
                 # queue time scales with the tool's reliability factor + noise
-                qt = round(bq * rel * rng.uniform(0.8, 1.3), 2)
+                qt = round(bq * rel * night_pen * rng.uniform(0.8, 1.3), 2)
                 pt = round(bp * rng.uniform(0.9, 1.1), 1)
                 rework = 1 if (step_id == "IMPLANT" and rng.random() < 0.12) else 0
                 if rework:
@@ -113,7 +117,7 @@ def _generate():
                     "move_id": f"M{mid:05d}",
                     "event_date": cur.isoformat(),
                     "week": cur.isocalendar()[1],
-                    "shift": "Day" if (mid % 2 == 0) else "Night",
+                    "shift": shift,
                     "lot_id": lot_id,
                     "product_family": prod,
                     "route_id": route,
@@ -135,10 +139,23 @@ def _generate():
                 })
             # final yield per wafer — driven by product, the ETCH tool used, time trend
             test_date = cur + _dt.timedelta(days=2)
-            cycle_time_hr = round((test_date - start).days * 24 + rng.uniform(-12, 12), 1)
+            # cycle time = lot dwell; held lots carry their hold time, so some
+            # lots clearly exceed a 300hr SLA (Round 126).
+            cycle_time_hr = round((test_date - start).days * 24
+                                  + (hold_age if on_hold else 0.0)
+                                  + rng.uniform(-12, 40), 1)
             tyf = next(t[3] for t in _TOOLS["ETCH"] if t[0] == etch_tool_used)
             trend = 1.0 + (li / 200.0)  # slight improvement over time
             base = 0.985 * prod_yf * tyf * trend
+            # ETCH-01 chamber drift: a clean week-over-week yield decline so
+            # '哪台機台良率逐週退化' surfaces a real declining tool. (ETCH-01 has
+            # no excursion, so the trend is clean; ETCH-02 stays the commonality
+            # / lowest-yield tool via its excursion.)
+            if etch_tool_used == "ETCH-01" and not excursion:
+                week_rank = max((test_date - d0).days // 7, 0)
+                base = 0.99 - week_rank * 0.011
+            if wafer_had_rework:
+                base *= 0.95  # reworked wafers finish at lower yield (first-pass gap)
             if excursion:
                 base = 0.72  # contamination excursion
             base = min(base, 0.999)

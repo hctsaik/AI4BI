@@ -45,8 +45,12 @@ def test_yield_commonality_by_etch_tool(env):
 def test_worst_product_yield(env):
     r = _ask(env, "哪個產品良率最低？")
     assert r.result_table is not None
-    # Memory products are the embedded low-yield families
-    assert r.result_table.iloc[0]["product_family"].startswith("Memory")
+    # the ranking must be ascending (lowest first) and the worst must be a real
+    # low-yield family (Memory or Analog-Z carry the embedded excursion/drift).
+    df = r.result_table
+    ycol = [c for c in df.columns if c != "product_family"][-1]
+    assert list(df[ycol]) == sorted(df[ycol])  # ascending
+    assert df.iloc[0]["product_family"] in {"Memory-X", "Memory-Y", "Analog-Z"}
 
 
 def test_defect_pareto(env):

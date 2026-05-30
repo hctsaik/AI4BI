@@ -34,6 +34,24 @@ R120 打磨：占比問句改 inline share 表（加性指標 defect_die，非 r
 matrix 點出最差格（Memory-Y×ETCH-02）、cohort 點出最高/最低組良率差、ratio 點出最高比值對象。
 評分：1:96 2:96 3:96 4:96(r=-0.599) 5:96 6:94 7:93 8:96 9:95 10:97 → 平均 95.5 通過。
 
+## Round 3 — PASS（35 → ~95.4）；探 WIP/hold/cycle/utilization/FPY/drift
+
+R126 收尾：moving-avg inline 表、entity 維度優先（hold 老化依 lot）、cycle data 加 hold_age（>300 有解）、
+新 declining_by_trend（負斜率＝tool drift）+ 觸發詞「逐週退化」、資料給 ETCH-01 乾淨週退化訊號、
+班別改 Day-heavy 2:1 + 夜班 queue penalty、返工晶圓良率 penalty（FPY 差距明顯 4.9%）。
+評分 1-10：95/95/95/95/95/96/96/95/96/96 → 95.4 通過。**三輪全部 PASS（97 / 95.5 / 95.4）。**
+
+### （以下為 Round 3 早期開發歷程，35→86.5）
+
+10/10 皆有結果。修復：R121 同表相關 + 通用 measure-filter（任何指標門檻）+ 班別比較；
+R122 資料加 hold_age_hr/hold_reason/cycle_time_hr/priority/rework_status + segment 跨 block 綁定；
+R123 best_metric_match 改「整組關鍵字計分」解 hold_count vs avg_hold_age 等消歧 + time/age→時間；
+R124 first-pass yield（有/無返工良率比較）+ entity-compare on-block 指標；R125 breakdown/measure-filter 洞見標題。
+
+剩餘到 95 的差距 = 細緻 NL 消歧（hold 老化「依 reason vs lot」）、資料門檻邊界、proposal vs inline —
+非能力缺口（單一 fact 限制、跨表、SPC、commonality、cohort、correlation、cycle/hold 老化、FPY 皆可做）。
+**根因發現（給資料團隊）：缺 event-to-event 狀態時長與設備 up/down log → 真實 utilization 與精確 cycle 需更豐富事件資料。**
+
 ### （以下為 Round 2 開發歷程）
 
 | # | 情境 | 修復輪 | 結果 |

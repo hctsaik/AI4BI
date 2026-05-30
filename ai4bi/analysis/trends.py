@@ -140,6 +140,60 @@ def dormant_products(
             .reset_index(drop=True))
 
 
+def declining_by_trend(
+    df: pd.DataFrame,
+    entity_col: str,
+    date_col: str,
+    value_col: str,
+    period: str = "week",
+    min_periods: int = 4,
+) -> pd.DataFrame:
+    """Round 126: entities whose periodic value has a NEGATIVE linear trend.
+
+    A robust "degrading over time / tool drift" detector — unlike a strict
+    consecutive-decline streak, it fits a least-squares slope to each entity's
+    per-period mean, so a noisy-but-downward series (real chamber drift) is still
+    flagged. Returns [entity_col, 斜率/期, 期數, 起始, 最新] for entities with a
+    negative slope, steepest first. Empty when nothing qualifies.
+    """
+    needed = [entity_col, date_col, value_col]
+    if any(c not in df.columns for c in needed):
+        return pd.DataFrame()
+    work = df[needed].copy()
+    work[date_col] = pd.to_datetime(work[date_col], errors="coerce")
+    work = work.dropna(subset=[entity_col, date_col])
+    if work.empty:
+        return pd.DataFrame()
+    freq = _PERIOD_FREQ.get(period, "MS")
+    work["_p"] = work[date_col].dt.to_period(freq[0] if freq != "MS" else "M")
+    agg = work.groupby([entity_col, "_p"])[value_col].mean().reset_index()
+    rows = []
+    for entity, g in agg.groupby(entity_col):
+        g = g.sort_values("_p")
+        vals = g[value_col].tolist()
+        if len(vals) < min_periods:
+            continue
+        xs = list(range(len(vals)))
+        n = len(vals)
+        mx = sum(xs) / n
+        my = sum(vals) / n
+        denom = sum((x - mx) ** 2 for x in xs)
+        if denom == 0:
+            continue
+        slope = sum((x - mx) * (y - my) for x, y in zip(xs, vals)) / denom
+        if slope < 0:
+            rows.append({
+                entity_col: entity,
+                "斜率/期": round(slope, 3),
+                "期數": n,
+                "起始": round(vals[0], 2),
+                "最新": round(vals[-1], 2),
+            })
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values("斜率/期").reset_index(drop=True)
+
+
 def declining_streaks(
     df: pd.DataFrame,
     entity_col: str,

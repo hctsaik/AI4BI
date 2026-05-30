@@ -1376,7 +1376,7 @@ class NL2ProposalService:
             if kind == "moving_avg":
                 extra = {"postprocess": "moving_avg", "postprocess_window": n or 4}
                 title = f"{alias} 趨勢 + {n or 4} 期移動平均"
-                msg = f"已準備 {alias} 的移動平均平滑趨勢。"
+                msg = f"{alias} 的 {n or 4} 期移動平均平滑趨勢（下表為各期值）。"
             else:  # forecast
                 extra = {"trend_line": {"method": "linear", "forecast_periods": n or 4}}
                 title = f"{alias} 趨勢 + 未來 {n or 4} 期預測"
@@ -1385,8 +1385,24 @@ class NL2ProposalService:
 
         proposal = build_add_visual_proposal(page_id, vid, q, viz)
         notes = [msg, f"指標：{alias}（{metric_name} @ {block_id}）；套用後重新查詢。"]
-        intent = AIIntent(intent_kind="add_visual", target_scope=f"page:{page_id}",
-                          trust_notes=notes, risk_level="low")
+        # Round 126: also compute the result INLINE (executor + postprocess) so a
+        # '走勢/移動平均/Pareto' question gets a direct table, not only a chart to
+        # apply. Forecast stays chart-only (the projection is a visual overlay).
+        executor = getattr(self, "_executor", None)
+        inline = None
+        if executor is not None and kind in ("pareto", "share", "moving_avg"):
+            try:
+                from ai4bi.analysis.postprocess import apply_postprocess
+                df = executor.run(q)
+                if df is not None and not df.empty:
+                    inline = apply_postprocess(df, q, viz)
+            except Exception:  # noqa: BLE001
+                inline = None
+        intent = AIIntent(intent_kind="analysis_request" if inline is not None else "add_visual",
+                          target_scope=f"page:{page_id}", trust_notes=notes, risk_level="low")
+        if inline is not None:
+            return NL2ProposalResult(intent=intent, message=msg, result_table=inline,
+                                     proposal=proposal, trust_notes=notes, risk_level="low")
         return NL2ProposalResult(intent=intent, message=msg, proposal=proposal,
                                  trust_notes=notes, risk_level="low")
 
@@ -4381,6 +4397,8 @@ _DORMANT_TRIGGERS = ("滯銷", "賣不動", "沒在賣", "停售", "停止銷售
 _CHURN_TRIGGERS = ("流失", "churn", "rfm", "快走", "要走", "好久沒來", "沉睡", "回購率", "誰快不來", "快不來")
 _DECLINE_TRIGGERS = ("連續下滑", "連續下跌", "一直下滑", "持續下滑", "持續下跌", "持續衰退",
                      "連續衰退", "一直在掉", "越來越差", "走弱", "連續成長", "持續成長",
+                     "逐週下滑", "逐月下滑", "逐週退化", "逐步下滑", "趨勢下滑", "退化",
+                     "drift", "degrad", "走低",
                      "keeps declining", "declining", "consecutive", "months in a row",
                      "in a row", "streak")
 _BASKET_TRIGGERS = ("一起買", "一起購買", "常買在一起", "搭配", "連帶", "商品關聯", "組合銷售",
@@ -4646,18 +4664,29 @@ def _execute_panel_analysis(kind: str, df, cols_map: dict):
         sentence = f"回頭客佔 {rep_pct}%，共 {int(table['人數'].sum())} 位客戶。"
         return table, sentence
     if kind == "decline":
-        from ai4bi.analysis.trends import declining_streaks
+        from ai4bi.analysis.trends import declining_by_trend, declining_streaks
         period = cols_map.get("period", "month")
         min_streak = cols_map.get("min_streak", 3)
         table = declining_streaks(df, cols_map["entity"], cols_map["date"], cols_map["value"],
                                   period=period, min_streak=min_streak)
-        if table is None or table.empty:
-            return table, ""
-        worst = table.iloc[0]
-        sentence = (f"{len(table)} 個對象連續下滑 ≥ {min_streak} 期。"
-                    f"最嚴重：{worst[cols_map['entity']]}（連續 {worst['連續期數']} 期，"
-                    f"最新一期 {worst['變化%']}%）。")
-        return table.head(25), sentence
+        if table is not None and not table.empty:
+            worst = table.iloc[0]
+            sentence = (f"{len(table)} 個對象連續下滑 ≥ {min_streak} 期。"
+                        f"最嚴重：{worst[cols_map['entity']]}（連續 {worst['連續期數']} 期，"
+                        f"最新一期 {worst['變化%']}%）。")
+            return table.head(25), sentence
+        # Round 126: no strict monotone streak → fall back to a NEGATIVE-TREND
+        # detector (least-squares slope) so a noisy-but-degrading entity (tool
+        # drift) is still surfaced.
+        ttable = declining_by_trend(df, cols_map["entity"], cols_map["date"], cols_map["value"],
+                                    period=period if period != "month" else "week")
+        if ttable is None or ttable.empty:
+            return ttable, ""
+        worst = ttable.iloc[0]
+        sentence = (f"{len(ttable)} 個對象呈下滑趨勢（負斜率）。最嚴重："
+                    f"{worst[cols_map['entity']]}（斜率 {worst['斜率/期']}/期，"
+                    f"{worst['起始']}→{worst['最新']}）。")
+        return ttable.head(25), sentence
     # basket
     from ai4bi.analysis.basket import basket_affinity
     table = basket_affinity(df, cols_map["product"], cols_map["basket"])
@@ -4803,11 +4832,24 @@ def _resolve_decomp_dimension(idx, prompt: str, normalized: str, contracts, bloc
     # take best_dim_match's single longest — that can be a non-categorical column
     # like a duration measure, causing the resolver to give up instead of falling
     # back to a real categorical dimension like step_name.)
-    best_col, best_len = None, 0
+    # Round 126: prefer an explicitly-named ENTITY column (lot/wafer/tool/product
+    # — *_id or known entity tokens) over a descriptive ATTRIBUTE column
+    # (reason/status/type/bin) when both match, since '依...lot 排序' names lot as
+    # the grouping entity even though 'hold' (→hold_reason) is a longer keyword.
+    def _is_entity_col(col: str) -> bool:
+        low = col.lower()
+        return (low.endswith("_id")
+                or any(t in low for t in ("lot", "wafer", "tool", "product", "customer",
+                                          "store", "item", "sku", "member")))
+
+    ent_col, ent_len, any_col, any_len = None, 0, None, 0
     for kw, entry in idx._dims.items():
-        if (kw in hay) and len(kw) > best_len and _is_categorical(entry.column_name):
-            best_col, best_len = entry.column_name, len(kw)
-    return best_col
+        if kw in hay and _is_categorical(entry.column_name):
+            if len(kw) > any_len:
+                any_col, any_len = entry.column_name, len(kw)
+            if _is_entity_col(entry.column_name) and len(kw) > ent_len:
+                ent_col, ent_len = entry.column_name, len(kw)
+    return ent_col or any_col
 
 
 def _compose_decomposition_sentence(alias, dim_col, df, total, unit, scope) -> str:
