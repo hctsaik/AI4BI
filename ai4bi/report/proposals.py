@@ -243,6 +243,33 @@ def build_page_delete_proposal(
     )
 
 
+def build_delete_visual_proposal(
+    report: ExecutableReportSpec,
+    page_id: str,
+    visual_id: str,
+) -> ReportProposal:
+    """Round 158: delete a single visual from a page. ``before`` carries the
+    visual dict so the change is reviewable/undoable."""
+    page = report.pages.get(page_id)
+    if page is None or visual_id not in page.visuals:
+        raise ReportValidationError(
+            f"Visual '{visual_id}' not found on page '{page_id}'."
+        )
+    title = page.visuals[visual_id].visualization.title or visual_id
+    change = ReportChange(
+        path=f"pages/{page_id}/visuals/{visual_id}/delete",
+        label=f"刪除圖表「{title}」",
+        before=page.visuals[visual_id].to_dict(),
+        after=None,
+        affects_data=True,
+    )
+    return ReportProposal(
+        description=f"刪除圖表「{title}」",
+        changes=[change],
+        target_component_id=visual_id,
+    )
+
+
 def prompt_to_proposal(
     prompt: str,
     report: ExecutableReportSpec,

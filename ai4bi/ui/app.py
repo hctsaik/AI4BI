@@ -25,7 +25,7 @@ from ai4bi.report.models import (
     ReportChange,
 )
 from ai4bi.blocks.registry import FilesystemBlockRegistry, BlockNotFoundError, NoCertifiedVersionError
-from ai4bi.report.proposals import build_page_delete_proposal, build_resize_visual_proposal, build_title_proposal, controls_to_proposal, pin_block_version_proposal, prompt_to_proposal, unpin_block_version_proposal
+from ai4bi.report.proposals import build_page_delete_proposal, build_delete_visual_proposal, build_resize_visual_proposal, build_title_proposal, controls_to_proposal, pin_block_version_proposal, prompt_to_proposal, unpin_block_version_proposal
 from ai4bi.report.publication import GateCheckResult, run_publication_gate
 from ai4bi.report.templates import build_semiconductor_queue_time_report
 from ai4bi.query_spec import AggFunction, BlockRef, FilterOperator, FilterSpec, MetricRef, VisualizationSpec, VisualQuerySpec, VisualType
@@ -1680,9 +1680,9 @@ def _render_visual_cell(
     title = visual.visualization.title or component_id
     is_sandbox = _is_sandbox_visual(visual, contracts)
 
-    # Header row: title | ↑ | ↓ | width selector
+    # Header row: title | ↑ | ↓ | 🗑 | width selector
     if not report.read_only:
-        h_cols = st.columns([5, 1, 1, 3])
+        h_cols = st.columns([5, 1, 1, 1, 2])
     else:
         h_cols = st.columns([8, 1, 1])
 
@@ -1706,6 +1706,16 @@ def _render_visual_cell(
                 ))
                 st.rerun()
         with h_cols[3]:
+            # Round 158: delete this visual (undoable via the 復原 ribbon button).
+            if st.button("🗑", key=f"del_{page_id}_{component_id}",
+                         help="刪除這張圖（可用上方「復原」還原）"):
+                workspace.stage_proposal(
+                    build_delete_visual_proposal(workspace.current_report(), page_id, component_id))
+                workspace.accept_pending()
+                _clear_visual_assistant_context()
+                cache.invalidate_all()
+                st.rerun()
+        with h_cols[4]:
             current_span = visual.col_span
             new_label = st.selectbox(
                 "寬度",

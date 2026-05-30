@@ -353,6 +353,16 @@ class ReportPageSpec:
         self.visuals[visual_id] = visual_spec
         self.visual_order.append(visual_id)
 
+    def remove_visual(self, visual_id: str) -> None:
+        """Remove a visual from this page (and from visual_order)."""
+        if visual_id not in self.visuals:
+            raise ReportValidationError(
+                f"Visual '{visual_id}' is not on page '{self.page_id}'."
+            )
+        del self.visuals[visual_id]
+        if visual_id in self.visual_order:
+            self.visual_order.remove(visual_id)
+
     def move_visual_up(self, visual_id: str) -> None:
         """Moves visual_id one position earlier in visual_order. No-op if already first."""
         if visual_id not in self.visual_order:
@@ -565,6 +575,11 @@ def _get_path(report: ExecutableReportSpec, path: str) -> Any:
         visual = report.pages[parts[1]].visuals[parts[3]]
         if parts[4:6] == ["visualization", "extra"] and parts[6] in _ALLOWLISTED_VISUAL_EXTRA_KEYS:
             return visual.visualization.extra.get(parts[6])
+    if len(parts) == 5 and parts[0] == "pages" and parts[2] == "visuals" and parts[4] == "delete":
+        page = report.pages.get(parts[1])
+        if page is not None and parts[3] in page.visuals:
+            return page.visuals[parts[3]].to_dict()
+        return None
     if len(parts) == 5 and parts[0] == "pages" and parts[2] == "visuals" and parts[4] == "col_span":
         return report.pages[parts[1]].visuals[parts[3]].col_span
     if len(parts) == 6 and parts[0] == "pages" and parts[2] == "visuals":
@@ -662,6 +677,9 @@ def _set_path(report: ExecutableReportSpec, path: str, value: Any) -> None:
             page.move_visual_down(visual_id)
         else:
             raise ReportValidationError(f"Invalid reorder direction '{direction}'; must be 'up' or 'down'.")
+        return
+    if len(parts) == 5 and parts[0] == "pages" and parts[2] == "visuals" and parts[4] == "delete":
+        report.pages[parts[1]].remove_visual(parts[3])
         return
     if len(parts) == 7 and parts[0] == "pages" and parts[2] == "visuals":
         visual = report.pages[parts[1]].visuals[parts[3]]
