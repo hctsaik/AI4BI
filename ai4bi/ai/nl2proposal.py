@@ -1634,11 +1634,11 @@ class NL2ProposalService:
             return None
         block_id, contract, cols_map = best
 
-        if kind in ("decline", "dormant"):
-            # Period: explicit word wins; default monthly for dormancy, weekly for
-            # streaks (more periods available).
+        if kind in ("decline", "dormant", "newproduct"):
+            # Period: explicit word wins; default monthly for dormancy/launches,
+            # weekly for streaks (more periods available).
             period = _extract_answer_period(normalized, prompt)
-            default = "month" if kind == "dormant" else "week"
+            default = "week" if kind == "decline" else "month"
             cols_map["period"] = {"all": default, "year": "month"}.get(period, period)
         if kind == "decline":
             sm = re.search(r"連續\s*(\d+)|(\d+)\s*(?:期|個月|個週|週|周|months?)", f"{prompt} {normalized}")
@@ -3509,7 +3509,11 @@ _PANEL_LABELS = {
     "basket": "商品關聯（常一起買）",
     "repeat": "回頭客 vs 一次性客",
     "dormant": "滯銷 / 停售商品",
+    "newproduct": "新品上市表現",
 }
+_NEWPRODUCT_TRIGGERS = ("新品", "新商品", "新產品", "新上市", "最近上架", "這季新", "本季新",
+                        "new product", "newly launched", "new arrival", "just launched",
+                        "上新", "新推出")
 _REPEAT_TRIGGERS = ("回頭客", "回購客", "回頭率", "一次性客", "一次性顧客", "回頭還是",
                     "多少回頭", "repeat customer", "repeat vs", "one-time", "one time customer",
                     "repeat or", "returning vs")
@@ -3535,6 +3539,8 @@ _BASKET_KEY_HINTS = ("customer", "member", "date", "_at", "store", "客戶", "�
 
 def _detect_panel_analysis(prompt: str, normalized: str) -> str | None:
     hay = f"{prompt.lower()} {normalized}"
+    if any(t in hay for t in _NEWPRODUCT_TRIGGERS):
+        return "newproduct"
     if any(t in hay for t in _DORMANT_TRIGGERS):
         return "dormant"
     if any(t in hay for t in _REPEAT_TRIGGERS):
@@ -3577,7 +3583,7 @@ def _pick_fact_for_analysis(facts: dict, kind: str):
                 "date": _guess_col(cols, _DATE_COL_HINTS),
             }
             required = ("customer", "date")
-        elif kind in ("decline", "dormant"):
+        elif kind in ("decline", "dormant", "newproduct"):
             entity = _guess_col(cols, _ENTITY_HINTS)
             date = _guess_col(cols, _DATE_COL_HINTS)
             value = _guess_col(cols, _VALUE_HINTS, exclude={entity} if entity else set())
@@ -3607,6 +3613,16 @@ def _execute_panel_analysis(kind: str, df, cols_map: dict):
         names = "、".join(str(x) for x in top[cols_map["customer"]].tolist())
         sentence = (f"共 {len(table)} 位客戶，其中 ⚠️ {at_risk} 位有流失風險。"
                     + (f"最該優先聯繫（高價值且久未回購）：{names}。" if names else ""))
+        return table.head(25), sentence
+    if kind == "newproduct":
+        from ai4bi.analysis.trends import new_products
+        table = new_products(df, cols_map["entity"], cols_map["date"], cols_map["value"],
+                             period=cols_map.get("period", "month"))
+        if table is None or table.empty:
+            return table, ""
+        best = table.iloc[0]
+        sentence = (f"{len(table)} 個新上市對象。表現最好："
+                    f"{best[cols_map['entity']]}（上市以來 {best['上市以來']}）。")
         return table.head(25), sentence
     if kind == "dormant":
         from ai4bi.analysis.trends import dormant_products

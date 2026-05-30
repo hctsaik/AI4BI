@@ -41,6 +41,48 @@ def _current_streak(values: list[float]) -> tuple[int, str]:
     return run, direction
 
 
+def new_products(
+    df: pd.DataFrame,
+    entity_col: str,
+    date_col: str,
+    value_col: str,
+    period: str = "month",
+    recent: int = 1,
+) -> pd.DataFrame:
+    """Round 107: newly-launched entities — first appeared in the recent period(s).
+
+    "Which new products launched this period, and how are they doing?" — entities
+    whose first-ever sales period is within the last ``recent`` period(s), ranked
+    by their sales since launch. Columns: [entity_col, 首次售出, 上市以來].
+    """
+    needed = [entity_col, date_col, value_col]
+    if any(c not in df.columns for c in needed):
+        return pd.DataFrame()
+    work = df[needed].copy()
+    work[date_col] = pd.to_datetime(work[date_col], errors="coerce")
+    work = work.dropna(subset=[entity_col, date_col])
+    if work.empty:
+        return pd.DataFrame()
+    freq = _PERIOD_FREQ.get(period, "MS")
+    work["_p"] = work[date_col].dt.to_period(freq[0] if freq != "MS" else "M")
+    all_periods = sorted(work["_p"].unique())
+    if len(all_periods) < 2:
+        return pd.DataFrame()
+    recent_set = set(all_periods[-recent:])
+
+    first = work.groupby(entity_col)["_p"].min()
+    totals = work.groupby(entity_col)[value_col].sum()
+    rows = []
+    for entity, fp in first.items():
+        if fp in recent_set:
+            rows.append({entity_col: entity, "首次售出": str(fp),
+                         "上市以來": round(float(totals[entity]), 2)})
+    if not rows:
+        return pd.DataFrame()
+    return (pd.DataFrame(rows).sort_values("上市以來", ascending=False)
+            .reset_index(drop=True))
+
+
 def dormant_products(
     df: pd.DataFrame,
     entity_col: str,
