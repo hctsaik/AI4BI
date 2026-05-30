@@ -43,3 +43,10 @@
 
 剩餘到 95 的三項：①原生 drag-drop fields pane（**Streamlit 無原生拖放，須自訂 React 元件＝結構天花板**）②計算指標深度（lineage/格式/公式輔助，可做）③常駐右側 Visualizations pane 映射選取視覺（可做，最便宜的下一步）。導航/手順已到位，剩深度。
 
+## 第 4 輪 — 深度增量（使用者指示：更多元件 + 做 #2、#3）
+**Round 151 更多圖表類型**：渲染層本就支援 table/pivot/map；`chart_type_change` 解除對 table（通用）與 pivot（需 ≥2 維度）的封鎖。field-well 圖表類型下拉新增「表格」與「樞紐分析（≥2 維才出現）」。實測 bar→table 套用、bar→pivot 友善擋下並提示需兩維度。
+**Round 152 計算指標深度**：guided authoring（點欄位/函式按鈕插入公式 + 清空）、lineage（「🔗 依賴欄位／指標」即時顯示）、顯示格式 preset（數字/百分比/金額/千/萬/次數→unit）。S7 友善度大升。
+**Round 153 右側 Visualizations pane**：主畫布改「畫布(左) + 🎨視覺化 pane(右)」；pane 讀 selected_component_id，內嵌 field-well（值/分組/圖表類型）編輯選取的視覺；per-visual 重複面板移除避免 key 衝突；唯讀分享維持全寬。實測選取後 pane 出現 fw_measure/fw_type/fw_dim，0 例外。
+
+非 e2e **1044 passed**，全部 commit+push。**#1 原生拖放屬 Streamlit 結構限制**（見下方分析），需自訂前端元件，待使用者決定是否引入。
+
