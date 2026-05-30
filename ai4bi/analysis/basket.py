@@ -16,6 +16,47 @@ from itertools import combinations
 import pandas as pd
 
 
+def basket_size_distribution(
+    df: pd.DataFrame,
+    basket_cols: list[str],
+    item_col: str,
+    qty_col: str | None = None,
+) -> tuple[pd.DataFrame, dict]:
+    """Round 109: basket-size distribution — "how many items per order?".
+
+    A basket = rows sharing ``basket_cols`` (e.g. customer+date+store). Size is
+    the summed quantity if ``qty_col`` is given, else the count of distinct
+    items. Returns (distribution_df[籃子大小, 籃數, 佔比%], summary) where summary
+    has avg/median/max/baskets. Empty df + {} when columns are missing.
+    """
+    needed = [*basket_cols, item_col, *([qty_col] if qty_col else [])]
+    if any(c not in df.columns for c in needed) or not basket_cols:
+        return pd.DataFrame(), {}
+    work = df[needed].dropna(subset=basket_cols)
+    if work.empty:
+        return pd.DataFrame(), {}
+    grouped = work.groupby(basket_cols)
+    size = grouped[qty_col].sum() if qty_col else grouped[item_col].nunique()
+    size = size[size > 0]
+    if size.empty:
+        return pd.DataFrame(), {}
+
+    counts = size.value_counts().sort_index()
+    total = int(counts.sum())
+    dist = pd.DataFrame({
+        "籃子大小": counts.index.astype(int),
+        "籃數": counts.values.astype(int),
+        "佔比%": (counts.values / total * 100).round(1),
+    }).reset_index(drop=True)
+    summary = {
+        "baskets": total,
+        "avg": round(float(size.mean()), 2),
+        "median": float(size.median()),
+        "max": int(size.max()),
+    }
+    return dist, summary
+
+
 def basket_affinity(
     df: pd.DataFrame,
     product_col: str,

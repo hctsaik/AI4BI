@@ -3647,7 +3647,12 @@ _PANEL_LABELS = {
     "repeat": "回頭客 vs 一次性客",
     "dormant": "滯銷 / 停售商品",
     "newproduct": "新品上市表現",
+    "basketsize": "客單品項數 / 籃子大小",
 }
+_BASKETSIZE_TRIGGERS = ("客單品項", "一單幾", "一次買幾", "平均幾件", "平均幾樣", "每單幾",
+                        "籃子大小", "購物籃大小", "平均購買數", "items per order",
+                        "items per basket", "basket size", "average basket", "每筆幾件",
+                        "每單", "一單", "每筆", "買幾樣", "買幾件", "幾樣商品", "幾件商品")
 _NEWPRODUCT_TRIGGERS = ("新品", "新商品", "新產品", "新上市", "最近上架", "這季新", "本季新",
                         "new product", "newly launched", "new arrival", "just launched",
                         "上新", "新推出")
@@ -3676,6 +3681,8 @@ _BASKET_KEY_HINTS = ("customer", "member", "date", "_at", "store", "客戶", "�
 
 def _detect_panel_analysis(prompt: str, normalized: str) -> str | None:
     hay = f"{prompt.lower()} {normalized}"
+    if any(t in hay for t in _BASKETSIZE_TRIGGERS):
+        return "basketsize"
     if any(t in hay for t in _NEWPRODUCT_TRIGGERS):
         return "newproduct"
     if any(t in hay for t in _DORMANT_TRIGGERS):
@@ -3726,6 +3733,13 @@ def _pick_fact_for_analysis(facts: dict, kind: str):
             value = _guess_col(cols, _VALUE_HINTS, exclude={entity} if entity else set())
             cmap = {"entity": entity, "date": date, "value": value}
             required = ("entity", "date", "value")
+        elif kind == "basketsize":
+            item = _guess_col(cols, _PRODUCT_HINTS)
+            keys = [c for c in cols
+                    if any(h in c.lower() for h in _BASKET_KEY_HINTS) and c != item]
+            qty = _guess_col(cols, ("qty", "quantity", "數量", "件數", "pcs"))
+            cmap = {"item": item, "basket": keys[:3], "qty": qty}
+            required = ("item", "basket")
         else:  # basket
             product = _guess_col(cols, _PRODUCT_HINTS)
             keys = [c for c in cols
@@ -3751,6 +3765,15 @@ def _execute_panel_analysis(kind: str, df, cols_map: dict):
         sentence = (f"共 {len(table)} 位客戶，其中 ⚠️ {at_risk} 位有流失風險。"
                     + (f"最該優先聯繫（高價值且久未回購）：{names}。" if names else ""))
         return table.head(25), sentence
+    if kind == "basketsize":
+        from ai4bi.analysis.basket import basket_size_distribution
+        dist, summary = basket_size_distribution(
+            df, cols_map["basket"], cols_map["item"], cols_map.get("qty"))
+        if dist is None or dist.empty:
+            return dist, ""
+        sentence = (f"平均每籃 {summary['avg']} 項（中位數 {summary['median']}，"
+                    f"最多 {summary['max']}），共 {summary['baskets']} 籃。")
+        return dist, sentence
     if kind == "newproduct":
         from ai4bi.analysis.trends import new_products
         table = new_products(df, cols_map["entity"], cols_map["date"], cols_map["value"],
