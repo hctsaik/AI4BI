@@ -219,10 +219,19 @@ class SchemaIndex:
         return best
 
     def best_metric_match(self, prompt: str, normalized: str) -> Optional[MetricEntry]:
-        """Find the longest-matching metric keyword in a prompt."""
+        """Find the longest-matching metric keyword in a prompt.
+
+        Single-character keywords (e.g. the synonym '率' for *rate*) are ignored:
+        they fuzzy-match unrelated words ('毛利率' → return_rate) and produce
+        confident WRONG answers. Requiring length >= 2 makes the engine decline
+        (return None) when the asked-for metric isn't really present, which the
+        answer handlers turn into a graceful "not found" rather than a wrong rank.
+        """
         best: Optional[MetricEntry] = None
         best_len = 0
         for kw, entry in self._metrics.items():
+            if len(kw) < 2:
+                continue
             if (kw in normalized or kw in prompt) and len(kw) > best_len:
                 best = entry
                 best_len = len(kw)
