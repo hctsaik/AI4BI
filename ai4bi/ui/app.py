@@ -1000,6 +1000,9 @@ def _render_draft_controls(
             st.markdown("---")
             _render_published_snapshot_browser(report, cache)
 
+        # ── Zone 4b2: 排程摘要寄送 (Round 111) ───────────────────────────────
+        _render_digest_scheduler(report, executor)
+
         # ── Zone 4c: 變更記錄 (Round 040) ───────────────────────────────────
         render_audit_trail()
 
@@ -1022,6 +1025,39 @@ def _render_draft_controls(
         st.caption(f"{_dot} {_status}　|　草稿模式，尚未認證發布")
 
     return report.merged_filters() if report.controls else {}
+
+
+def _render_digest_scheduler(report: ExecutableReportSpec, executor=None) -> None:
+    """Round 111: configure a scheduled digest + deliver to the local outbox.
+
+    The cron + SMTP transport is the external piece; here you set the schedule
+    and 'send now' drops the digest into a local outbox folder (FileOutbox
+    transport) that such a job would pick up — a working delivery demo.
+    """
+    if executor is None:
+        return
+    with st.expander("📧 排程摘要寄送（示範）", expanded=False):
+        st.caption("設定寄送頻率與收件人。實際的定時與 SMTP 由外部 cron 接手；"
+                   "「立即寄送」會把摘要寫入本機 outbox 資料夾（可由該排程程式撿走寄出）。")
+        cols = st.columns(2)
+        freq = cols[0].selectbox("頻率", ["daily", "weekly", "monthly"], index=1, key="_digest_freq")
+        period = cols[1].selectbox("摘要範圍", ["week", "month"], index=0, key="_digest_period")
+        recipients_raw = st.text_input("收件人（逗號分隔）", key="_digest_to",
+                                       placeholder="boss@example.com, ops@example.com")
+        if st.button("📤 立即產生並寄到 outbox", key="_digest_send"):
+            from ai4bi.report.scheduler import DigestSchedule, FileOutboxTransport, run_digest
+            recipients = [r.strip() for r in recipients_raw.split(",") if r.strip()]
+            schedule = DigestSchedule(recipients=recipients, frequency=freq, period=period)
+            transport = FileOutboxTransport(_PROJECT_ROOT / "outbox")
+            try:
+                record = run_digest(executor, _load_all_contracts(), schedule, transport)
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"產生失敗：{exc}")
+                return
+            if record.get("sent"):
+                st.success(f"已寫入 outbox：{record['ref']}（收件人：{', '.join(record['recipients'])}）")
+            else:
+                st.warning(f"未寄送：{record.get('reason')}")
 
 
 def _proposal_rows(proposal: ReportProposal) -> list[dict[str, str]]:
