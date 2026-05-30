@@ -2084,7 +2084,9 @@ class NL2ProposalService:
         if is_headroom:
             tbl = tbl.sort_values("餘裕", ascending=False).reset_index(drop=True)
             w = tbl.iloc[0]
-            msg = f"產能餘裕（依 {gk}）：最多 {w.iloc[0]}（餘裕 {w['餘裕']}，利用率 {w['利用率%']}%）。"
+            msg = (f"產能餘裕（依 {gk}）：最多 {w.iloc[0]}（餘裕 {w['餘裕']}，利用率 {w['利用率%']}%）。"
+                   f"註：餘裕＝產能−實際，反映「可吸收量」；實際接單仍需確認有需求、"
+                   f"且不會把下游或瓶頸站推爆（建議搭配瓶頸/Little's Law 一起看）。")
         else:
             w = tbl.iloc[0]
             label = "負載率" if any(t in hay for t in ("負載", "loading", "滿載")) else "利用率"
@@ -2548,6 +2550,10 @@ class NL2ProposalService:
             sig = ("統計上顯著（p<0.05，這個共同性不太可能是巧合）" if p < 0.05
                    else f"但統計上不顯著（p={p}，可能是巧合，建議多收幾批再下結論）")
             sentence += f"Fisher 精確檢定 p={p}，{sig}。"
+            # Round 144: actionable next-step so the engineer knows what to do next.
+            if p < 0.05:
+                sentence += (f"建議：優先排查 {top[entity]}（調 SPC/維護紀錄/recipe 與 chamber 狀態），"
+                             f"並比對良率正常批是否也高度經過它以排除誤判。")
         notes = [f"Commonality：先以 {measure_col} {'<' if op=='lt' else '>'} {threshold} 篩 {group_key}，"
                  f"再於 {detail_block} 找共同 {entity}；以 Fisher 精確檢定評估顯著性（失敗×經過此機台 2×2）。"]
         intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
@@ -2773,8 +2779,9 @@ class NL2ProposalService:
                                              trust_notes=notes, risk_level="low")
                 return None
             sentence = (f"「{ca}」與「{cb}」（依 {key} 對齊，n={stat['n']}）相關係數 r={stat['r']}"
-                        f"（{stat['direction']}相關，{stat['strength']}）。")
-            notes = [f"跨表分析：各自彙總到 {key} 後對齊計算 Pearson 相關（非明細 join）。"]
+                        f"（{stat['direction']}相關，{stat['strength']}）。"
+                        f"註：相關不等於因果，可能有共同潛在因素；要確認需控制其他變因或實驗驗證。")
+            notes = [f"跨表分析：各自彙總到 {key} 後對齊計算 Pearson 相關（非明細 join，相關≠因果）。"]
             intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                               trust_notes=notes, risk_level="low")
             return NL2ProposalResult(intent=intent, message=sentence, result_table=merged,
