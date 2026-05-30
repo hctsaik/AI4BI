@@ -51,6 +51,7 @@ SUPPORTED_INTENTS = (
     "panel_analysis",         # churn/RFM, declining-streak, basket questions
     "measure_filter",         # filter an existing visual on an aggregate
     "seasonality",            # busiest day-of-week / hour
+    "insights",               # weekly digest / anomaly scan
     "unsupported",            # anything else
 )
 

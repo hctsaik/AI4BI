@@ -514,6 +514,11 @@ class NL2ProposalService:
             if seg is not None:
                 return seg
 
+        if intent == "insights":  # Round 097
+            ins = self._answer_insights(prompt, normalized, report, contracts)
+            if ins is not None:
+                return ins
+
         if intent == "seasonality":  # Round 096
             season = self._answer_seasonality(prompt, normalized, report, contracts)
             if season is not None:
@@ -603,6 +608,12 @@ class NL2ProposalService:
             panel = self._run_panel_analysis(prompt, normalized, contracts)
             if panel is not None:
                 return panel
+
+        # Round 097: "給我本週摘要 / 有什麼異常嗎" → digest / anomaly engines.
+        if _looks_like_insights(prompt, normalized) is not None:
+            ins = self._answer_insights(prompt, normalized, report, contracts)
+            if ins is not None:
+                return ins
 
         # Round 096: "哪幾天最忙 / busiest day of week / 哪個時段" → weekday/hour
         # seasonality. Checked before ranking since it carries a date-bucket cue.
@@ -1075,6 +1086,66 @@ class NL2ProposalService:
             trust_notes=notes,
             risk_level="low",
         )
+
+    def _answer_insights(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 097: "給我本週摘要" / "有什麼異常嗎？".
+
+        Routes to the already-built generate_summary / detect_anomalies engines
+        (previously sidebar-only) and returns the result as a table. Returns None
+        to fall through.
+        """
+        if not contracts:
+            return None
+        kind = _looks_like_insights(prompt, normalized)
+        if kind is None:
+            return None
+        import pandas as pd
+
+        if kind == "anomaly":
+            from ai4bi.ai.suggestions import detect_anomalies
+            try:
+                obs = detect_anomalies(contracts, max_observations=5)
+            except Exception:  # noqa: BLE001
+                return None
+            if not obs:
+                notes = ["已掃描各資料集的離群與波動，未發現明顯異常。"]
+                intent = AIIntent(intent_kind="analysis_request", target_scope="report",
+                                  trust_notes=notes, risk_level="low")
+                return NL2ProposalResult(intent=intent, message="目前沒有發現明顯異常 👍",
+                                         trust_notes=notes, risk_level="low")
+            df = pd.DataFrame([{"嚴重度": {"high": "🔴 高", "medium": "🟡 中"}.get(o.severity, "ℹ️"),
+                                "重點": f"{o.icon} {o.headline}", "說明": o.detail} for o in obs])
+            sentence = f"發現 {len(obs)} 個值得注意的重點。"
+            notes = ["以離群（z-score）、波動（變異係數）等檢查掃描各資料集。"]
+            intent = AIIntent(intent_kind="analysis_request", target_scope="report",
+                              trust_notes=notes, risk_level="low")
+            return NL2ProposalResult(intent=intent, message=sentence, result_table=df,
+                                     trust_notes=notes, risk_level="low")
+
+        # kind == "digest"
+        executor = getattr(self, "_executor", None)
+        if executor is None:
+            return None
+        from ai4bi.analysis.summary import generate_summary
+        try:
+            rep = generate_summary(executor, contracts)
+        except Exception:  # noqa: BLE001
+            return None
+        rows = [{"類別": sec.heading, "重點": line} for sec in rep.sections for line in sec.lines]
+        if not rows:
+            return None
+        df = pd.DataFrame(rows)
+        notes = ["整合期間重點、Top 排名與已觸發的提醒（與側欄『業務摘要』同源）。"]
+        intent = AIIntent(intent_kind="analysis_request", target_scope="report",
+                          trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=rep.title, result_table=df,
+                                 trust_notes=notes, risk_level="low")
 
     def _answer_seasonality(
         self,
@@ -3015,6 +3086,27 @@ def _extract_rank_n(prompt: str, normalized: str, default: int = 5) -> int:
         except ValueError:
             pass
     return default
+
+
+# --- Round 097: digest / anomaly insight routing -----------------------------
+
+_DIGEST_TRIGGERS: tuple[str, ...] = (
+    "摘要", "總結", "重點", "概況", "整體狀況", "本週如何", "近況", "給我重點",
+    "summary", "digest", "overview", "tldr", "recap", "how are we doing",
+)
+_ANOMALY_TRIGGERS: tuple[str, ...] = (
+    "異常", "不對勁", "怪怪", "有什麼問題", "哪裡有問題", "可疑", "outlier",
+    "anomaly", "anomalies", "anything wrong", "what's off", "unusual",
+)
+
+
+def _looks_like_insights(prompt: str, normalized: str) -> str | None:
+    hay = f"{prompt.lower()} {normalized}"
+    if any(t in hay for t in _ANOMALY_TRIGGERS):
+        return "anomaly"
+    if any(t in hay for t in _DIGEST_TRIGGERS):
+        return "digest"
+    return None
 
 
 # --- Round 096: weekday / hour seasonality parsing ---------------------------
