@@ -921,10 +921,11 @@ def _render_draft_controls(
 
         elif "分析" in mode:
             st.subheader("進階分析")
-            render_cohort_panel()
-            render_basket_panel()
-            render_rfm_panel()
-            render_trend_streak_panel()
+            _rblocks = _report_block_contracts(report)
+            render_cohort_panel(_rblocks)
+            render_basket_panel(_rblocks)
+            render_rfm_panel(_rblocks)
+            render_trend_streak_panel(_rblocks)
             if executor is not None:
                 render_change_panel(_load_all_contracts(), executor)
                 render_summary_panel(_load_all_contracts(), executor)

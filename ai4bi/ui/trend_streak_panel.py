@@ -15,14 +15,18 @@ from ai4bi.blocks.contracts import BlockType, DataBlockContract
 from ai4bi.blocks.datastore import materialize_dataframe
 from ai4bi.ui.upload import _USER_BLOCKS_KEY, _USER_BLOCK_META_KEY
 
-_ENTITY_HINTS = ("product", "sku", "item", "store", "category", "商品", "品項", "門市", "品類", "客戶")
+# Round 156: include fab entities/metrics so decline-detection works on
+# semiconductor data too (e.g. which tool's queue time keeps rising).
+_ENTITY_HINTS = ("product", "sku", "item", "store", "category", "商品", "品項", "門市", "品類", "客戶",
+                 "tool", "機台", "設備", "area", "區", "step", "站", "vendor", "供應商", "chamber")
 _DATE_HINTS = ("date", "_at", "time", "日期", "時間")
-_VALUE_HINTS = ("revenue", "amount", "sales", "qty", "quantity", "count", "營收", "金額", "銷售", "數量")
+_VALUE_HINTS = ("revenue", "amount", "sales", "qty", "quantity", "count", "營收", "金額", "銷售", "數量",
+                "queue", "cycle", "yield", "defect", "rate", "pct", "佇列", "週期", "良率", "缺陷")
 _PERIODS = {"month": "每月", "week": "每週", "quarter": "每季"}
 
 
-def _fact_blocks() -> dict[str, DataBlockContract]:
-    blocks: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
+def _fact_blocks(blocks: dict | None = None) -> dict[str, DataBlockContract]:
+    blocks = blocks if blocks is not None else st.session_state.get(_USER_BLOCKS_KEY, {})
     return {b: c for b, c in blocks.items() if c.block_type == BlockType.fact}
 
 
@@ -33,8 +37,17 @@ def _guess(cols: list[str], hints: tuple[str, ...], default: int = 0) -> int:
     return default
 
 
-def render_trend_streak_panel() -> None:
-    facts = _fact_blocks()
+def _streak_applicable(contract) -> bool:
+    cols = [c.name.lower() for c in contract.columns]
+    return (any(any(h in c for h in _ENTITY_HINTS) for c in cols)
+            and any(any(h in c for h in _DATE_HINTS) for c in cols)
+            and any(any(h in c for h in _VALUE_HINTS) for c in cols))
+
+
+def render_trend_streak_panel(blocks: dict | None = None) -> None:
+    # Round 156: applies to any data with entity + date + metric (retail OR fab);
+    # CURRENT-report driven.
+    facts = {b: c for b, c in _fact_blocks(blocks).items() if _streak_applicable(c)}
     if not facts:
         return
     with st.expander("📉 連續下滑偵測（誰在持續走弱）", expanded=False):

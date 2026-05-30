@@ -19,8 +19,8 @@ _DATE_HINTS = ("date", "_at", "time", "日期", "時間")
 _MONEY_HINTS = ("revenue", "amount", "sales", "spend", "price", "total", "營收", "金額", "銷售", "消費")
 
 
-def _fact_blocks() -> dict[str, DataBlockContract]:
-    blocks: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
+def _fact_blocks(blocks: dict | None = None) -> dict[str, DataBlockContract]:
+    blocks = blocks if blocks is not None else st.session_state.get(_USER_BLOCKS_KEY, {})
     return {b: c for b, c in blocks.items() if c.block_type == BlockType.fact}
 
 
@@ -31,8 +31,23 @@ def _guess(cols: list[str], hints: tuple[str, ...], default: int = 0) -> int:
     return default
 
 
-def render_rfm_panel() -> None:
-    facts = _fact_blocks()
+def _has(cols: list[str], hints: tuple[str, ...]) -> bool:
+    return any(any(h in c.lower() for h in hints) for c in cols)
+
+
+# Strong customer hints (exclude bare "_id" so lot_id/tool_id don't count).
+_STRONG_CUSTOMER = ("customer", "member", "client", "user", "顧客", "會員", "客戶")
+
+
+def _rfm_applicable(contract) -> bool:
+    cols = [c.name for c in contract.columns]
+    return _has(cols, _STRONG_CUSTOMER) and _has(cols, _DATE_HINTS) and _has(cols, _MONEY_HINTS)
+
+
+def render_rfm_panel(blocks: dict | None = None) -> None:
+    # Round 156: only offer RFM on data that actually has customer + date + money
+    # columns (it's a retail/transaction analysis); driven by the CURRENT report.
+    facts = {b: c for b, c in _fact_blocks(blocks).items() if _rfm_applicable(c)}
     if not facts:
         return
     with st.expander("🎯 客戶流失風險 / RFM 分群", expanded=False):

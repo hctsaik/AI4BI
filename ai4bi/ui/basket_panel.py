@@ -19,13 +19,27 @@ _BASKET_HINTS = ("customer", "member", "date", "_at", "store", "客戶", "門市
 _ID_HINTS = ("id", "code", "sku")
 
 
-def _fact_blocks() -> dict[str, DataBlockContract]:
-    blocks: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
+def _fact_blocks(blocks: dict | None = None) -> dict[str, DataBlockContract]:
+    blocks = blocks if blocks is not None else st.session_state.get(_USER_BLOCKS_KEY, {})
     return {b: c for b, c in blocks.items() if c.block_type == BlockType.fact}
 
 
-def render_basket_panel() -> None:
-    facts = _fact_blocks()
+# A real "basket" needs a product column AND a transaction grouping (a customer/
+# order/store) — not merely a date — so fab data (product_family but no customers)
+# doesn't wrongly qualify.
+_BASKET_KEY_STRONG = ("customer", "member", "order", "訂單", "會員", "顧客", "store", "門市", "客戶")
+
+
+def _basket_applicable(contract) -> bool:
+    cols = [c.name.lower() for c in contract.columns]
+    has_product = any(any(h in c for h in _PRODUCT_HINTS) for c in cols)
+    has_basket_key = any(any(h in c for h in _BASKET_KEY_STRONG) for c in cols)
+    return has_product and has_basket_key
+
+
+def render_basket_panel(blocks: dict | None = None) -> None:
+    # Round 156: only on data with products AND a transaction grouping; CURRENT-report driven.
+    facts = {b: c for b, c in _fact_blocks(blocks).items() if _basket_applicable(c)}
     if not facts:
         return
     with st.expander("🧺 常一起購買（商品關聯）", expanded=False):

@@ -18,8 +18,8 @@ _ID_HINTS = ("customer", "member", "user", "client", "_id")
 _DATE_HINTS = ("date", "_at", "_on", "time")
 
 
-def _fact_blocks() -> dict[str, DataBlockContract]:
-    blocks: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
+def _fact_blocks(blocks: dict | None = None) -> dict[str, DataBlockContract]:
+    blocks = blocks if blocks is not None else st.session_state.get(_USER_BLOCKS_KEY, {})
     return {b: c for b, c in blocks.items() if c.block_type == BlockType.fact}
 
 
@@ -31,9 +31,22 @@ def _guess(cols: list[str], hints: tuple[str, ...]) -> int:
     return 0
 
 
-def render_cohort_panel() -> None:
-    """Render the cohort/retention sidebar panel."""
-    facts = _fact_blocks()
+# Strong customer hints (exclude bare "_id" so lot_id/tool_id don't masquerade
+# as customers on non-retail data).
+_STRONG_CUSTOMER = ("customer", "member", "user", "client", "顧客", "會員", "客戶")
+
+
+def _cohort_applicable(contract) -> bool:
+    cols = [c.name.lower() for c in contract.columns]
+    has_cust = any(any(h in c for h in _STRONG_CUSTOMER) for c in cols)
+    has_date = any(any(h in c for h in _DATE_HINTS) for c in cols)
+    return has_cust and has_date
+
+
+def render_cohort_panel(blocks: dict | None = None) -> None:
+    """Render the cohort/retention panel — only on data with customer + date
+    columns (Round 156: driven by the CURRENT report's data)."""
+    facts = {b: c for b, c in _fact_blocks(blocks).items() if _cohort_applicable(c)}
     if not facts:
         return
 
