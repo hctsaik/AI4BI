@@ -248,12 +248,14 @@ class Executor:
         registry: Optional[BlockRegistryProtocol] = None,
         extra_contracts: Optional[dict[str, "DataBlockContract"]] = None,
         parameters: Optional[dict[str, float]] = None,
+        identity: Optional[dict[str, Any]] = None,
     ) -> None:
         self._registry_root = Path(registry_root) if registry_root else _DEFAULT_REGISTRY
         self._loader = loader or BlockLoader()
         self._registry = registry  # optional BlockRegistryProtocol for versioned resolution
         self._extra_contracts: dict[str, DataBlockContract] = extra_contracts or {}
         self._parameters: dict[str, float] = parameters or {}  # Round 060 what-if params
+        self._identity: dict[str, Any] = identity or {}  # Round 103 row-level security
         # Round 032: cache Arrow tables so InlineDataSource records are not
         # re-serialised on every query within the same Executor instance
         self._arrow_cache: dict[str, Any] = {}
@@ -484,6 +486,9 @@ class Executor:
             if filter_spec.value is not None
             or filter_spec.operator in (FilterOperator.is_null, FilterOperator.is_not_null)
         ]
+        # Round 103: row-level security — inject each participating block's policy
+        # row filter as a parameterized predicate bound to the identity context.
+        where_parts.extend(self._rls_predicates(spec, contracts, params))
         if where_parts:
             sql_parts.append("WHERE\n    " + "\n    AND ".join(where_parts))
         if spec.dimensions and spec.metrics:
@@ -510,6 +515,39 @@ class Executor:
         if spec.limit:
             sql_parts.append(f"LIMIT {spec.limit}")
         return "\n".join(sql_parts)
+
+    def _rls_predicates(
+        self,
+        spec: VisualQuerySpec,
+        contracts: dict[str, DataBlockContract],
+        params: list[Any],
+    ) -> list[str]:
+        """Round 103: build parameterized row-level-security predicates.
+
+        For each block in the query whose policy declares a row_filter_column +
+        identity key, and where the identity context supplies that key, emit
+        ``<block>.<col> = ?`` bound to the identity value. Empty identity (e.g. an
+        admin/unscoped session) applies no restriction. Always parameterized and
+        column-validated, so it is injection-safe.
+        """
+        if not self._identity:
+            return []
+        out: list[str] = []
+        seen: set[str] = set()
+        for ref in spec.block_refs:
+            if ref.block_id in seen:
+                continue
+            seen.add(ref.block_id)
+            contract = contracts.get(ref.block_id)
+            policy = getattr(contract, "policy", None)
+            col = getattr(policy, "row_filter_column", None)
+            key = getattr(policy, "row_filter_identity_key", None)
+            if not col or not key or key not in self._identity:
+                continue
+            _require_column(contracts, ref.block_id, col)
+            params.append(self._identity[key])
+            out.append(f"{_qualified(ref.block_id, col)} = ?")
+        return out
 
     def run(
         self,

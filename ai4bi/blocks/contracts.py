@@ -125,6 +125,17 @@ class PolicySpec(BaseModel):
         None,
         description="SQL WHERE clause to restrict rows by role/attribute, e.g. 'region = current_user_region()'",
     )
+    # Round 103: structured (injection-safe) row-level security. The executor
+    # injects `WHERE <row_filter_column> = ?` bound to identity[row_filter_identity_key]
+    # — a parameterized predicate on a validated column, never raw SQL.
+    row_filter_column: Optional[str] = Field(
+        None,
+        description="Column to constrain for row-level security (e.g. 'city').",
+    )
+    row_filter_identity_key: Optional[str] = Field(
+        None,
+        description="Identity-context key whose value the row_filter_column must equal (e.g. 'city').",
+    )
     allowed_roles: list[str] = Field(
         default_factory=list,
         description="Roles permitted to access this block; empty list means unrestricted",

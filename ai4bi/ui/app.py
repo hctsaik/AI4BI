@@ -1867,6 +1867,7 @@ def main() -> None:
         semantic_model_path=_SEMANTIC_MODEL,
         extra_contracts=_user_blocks_exec or None,
         parameters=get_parameters(),  # Round 060: what-if parameters
+        identity=st.session_state.get("_identity") or None,  # Round 103: row-level security
     )
 
     active_filters = _render_draft_controls(report, cache, store, executor)
