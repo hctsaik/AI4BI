@@ -2332,11 +2332,18 @@ class NL2ProposalService:
         summary = bottleneck_shift_summary(res)
         unit = {"W": "週", "M": "月"}.get(freq, "期")
         vlabel = "佇列時間" if value_col == "queue_time_hr" else "移動次數"
+        # Round 145: attach the bottleneck VALUE at each period so a swap shows its
+        # magnitude (e.g. ETCH-02 5.9hr → IMP-02 6.1hr), not just the names.
+        val_at = {row["period"]: row["value"] for _, row in res.iterrows()}
         if summary["shifted"]:
             ch000 = summary["shifts"]
-            parts = "；".join(f"{s['period']} {s['from']}→{s['to']}" for s in ch000[:4])
+            parts = "；".join(
+                f"{s['period']} {s['from']}→{s['to']}（{vlabel} {val_at.get(s['period'], '?')}）"
+                for s in ch000[:4])
             msg = (f"瓶頸（依{vlabel}最高的 {group_col}）在 {summary['n_periods']} 個{unit}內"
-                   f"換過 {len(ch000)} 次：{parts}。最常居首：{summary['dominant']}。")
+                   f"換過 {len(ch000)} 次：{parts}。最常居首：{summary['dominant']}。"
+                   f"註：以{vlabel}為瓶頸代理指標；切換幅度小時可能只是週間波動，"
+                   f"建議連看 2-3 {unit}確認是否真的轉移。")
         else:
             msg = (f"瓶頸（依{vlabel}最高的 {group_col}）在 {summary['n_periods']} 個{unit}內"
                    f"沒有換站，始終是 {summary['dominant']}。")
@@ -3513,8 +3520,12 @@ class NL2ProposalService:
                 except Exception:  # noqa: BLE001
                     timing = ""
             msg = (f"{len(low)} 個 {key} 良率異常下掉（低於 μ−2σ，μ={limits['mean']}, "
-                   f"LCL={limits['lcl']}）：{names}。{timing}")
-            notes = [f"良率 excursion：以 {key} 平均 {yld} 低於 μ−2σ 為異常，並對齊 {date_col} 標示發生週。來源：{bid}。"]
+                   f"LCL={limits['lcl']}）：{names}。{timing}"
+                   f"（採 2σ 作早期預警較敏感；要更保守可改 3σ。）"
+                   f"建議：對這些批跑 commonality 找它們共同經過的機台，"
+                   f"並比對該時段的 SPC/維護紀錄以定位根因。")
+            notes = [f"良率 excursion：以 {key} 平均 {yld} 低於 μ−2σ 為異常（2σ＝較敏感的預警門檻），"
+                     f"並對齊 {date_col} 標示發生週。來源：{bid}。"]
             intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                               trust_notes=notes, risk_level="low")
             return NL2ProposalResult(intent=intent, message=msg, result_table=low,
