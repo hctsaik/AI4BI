@@ -196,4 +196,14 @@
 - T6（缺陷 commonality）目前以 ranking 命中正確答案 ETCH-02，暫可接受。新增 `tests/test_crosstab_and_multifilter.py`（4）。非 e2e **1037 passed**。
 - 下一步：對 set #3 跑 multi-agent 重打分，確認是否 ≥95。
 
+## 第 3 輪 — multi-agent 重打分（Round 138/139 後）＝ 85.8
+3 agent（良率 85.7 / IE 85.2 / 產品 86.4）。一致點名 **T6（42-45）＝唯一致命**：那是 ranking 偽裝成 commonality（答案 ETCH-02 只是剛好對）。次要：T5 小樣本無顯著性、T8 非時序、T2 無 range。
+
+**Round 140**（test+commit+push）— 攻 T6 + T5：
+- **T6 真 commonality**：`_answer_commonality_topn` — 無門檻但有「最多/最高/最差」時，取**該指標最差 ~20% 的 wafer**（wafer 級，避免 lot 級洗掉訊號）為不良群，於 tool 欄跑 lift+Fisher。實測：缺陷最多前 20 wafer 共同經過 ETCH-02（60%、lift 1.09、p=0.403）→ **誠實回報「最常見但統計不顯著」**，方法正確且不誇大。
+- **T5 顯著性 + 小樣本誠實**：subgroup compare 加 Welch t 檢定 + 小樣本提醒。實測 Hot vs Normal cycle「p=0.948，不顯著、樣本偏少，差距可能只是雜訊」。
+- **T8** 加「分布離群非時序突變」誠實註。
+- 新增 `tests/test_topn_commonality_significance.py`（2）。非 e2e **1037 passed**。
+- 下一步：set #3 重打分 + fresh set #4，續到 ≥95。
+
 

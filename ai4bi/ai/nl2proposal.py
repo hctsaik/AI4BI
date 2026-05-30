@@ -2465,7 +2465,21 @@ class NL2ProposalService:
             if col and any(t in col.lower() for t in ("yield", "pct", "rate", "defect")):
                 measure_block, measure_col = bid, col
                 break
-        if measure_block is None or threshold is None:
+        if measure_block is None:
+            return None
+        # Round 140: no explicit threshold but a superlative ("defect 最多的那幾批，
+        # 共同走過哪台 etch 機台") → qualify the top/bottom quantile of lots BY the
+        # measure, then run a TRUE commonality (lift + Fisher) on the tool column.
+        # Fixes the silent method-mismatch where this fell through to a ranking.
+        if threshold is None:
+            sup_high = any(t in hay for t in ("最多", "最高", "最大", "最嚴重", "最差"))
+            sup_low = any(t in hay for t in ("最低", "最少", "最小"))
+            if sup_high or sup_low:
+                topn = self._answer_commonality_topn(
+                    prompt, normalized, contracts, measure_block, measure_col,
+                    worst_high=sup_high or "defect" in measure_col.lower())
+                if topn is not None:
+                    return topn
             return None
         # shared group key (lot) and the detail fact + entity (tool)
         detail_block = next((b for b in facts if b != measure_block), None)
@@ -2512,6 +2526,76 @@ class NL2ProposalService:
             sentence += f"Fisher 精確檢定 p={p}，{sig}。"
         notes = [f"Commonality：先以 {measure_col} {'<' if op=='lt' else '>'} {threshold} 篩 {group_key}，"
                  f"再於 {detail_block} 找共同 {entity}；以 Fisher 精確檢定評估顯著性（失敗×經過此機台 2×2）。"]
+        intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                          trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=sentence, result_table=table,
+                                 trust_notes=notes, risk_level="low")
+
+    def _answer_commonality_topn(
+        self, prompt, normalized, contracts, measure_block, measure_col, *, worst_high,
+    ) -> "NL2ProposalResult | None":
+        """Round 140: TRUE commonality for "the worst-by-measure lots — which tool
+        did they share?". Qualify the top/bottom quantile of lots by the measure,
+        then run the lift+Fisher commonality on the tool column. The tool may be in
+        the same fact (etch_tool_id in yield) or in the detail fact (moves)."""
+        from ai4bi.analysis.crossfact import commonality
+        from ai4bi.blocks.contracts import BlockType
+        from ai4bi.blocks.datastore import materialize_dataframe
+        hay = f"{prompt.lower()} {normalized}"
+        facts = {b: c for b, c in contracts.items()
+                 if getattr(c, "block_type", None) in (
+                     BlockType.fact, BlockType.snapshot_fact, BlockType.target_fact)}
+        try:
+            mdf = materialize_dataframe(contracts[measure_block])
+        except Exception:  # noqa: BLE001
+            return None
+        # Prefer the finest grain (wafer): the measure (defect/yield) is per-wafer
+        # and at lot grain a lot has wafers on BOTH etch tools, so commonality
+        # washes out (lift→1). Use wafer_id when present.
+        key = "wafer_id" if "wafer_id" in mdf.columns else (
+            "lot_id" if "lot_id" in mdf.columns else None)
+        if key is None:
+            return None
+        # find the tool column + which fact holds it; prefer the prompt's hint
+        want_etch = "etch" in hay
+        tool_block = tool_col = None
+        for bid in ([measure_block] + [b for b in facts if b != measure_block]):
+            cols = [x.name for x in facts[bid].columns]
+            cand = (_guess_col(cols, ("etch_tool", "etch")) if want_etch else None) \
+                or _guess_col(cols, ("tool", "機台", "設備", "equipment"))
+            if cand and cand != key and (key in cols):
+                tool_block, tool_col = bid, cand
+                break
+        if tool_col is None:
+            return None
+        # qualify the worst lots by the measure (top quantile of defect, or bottom of yield)
+        per_lot = mdf.groupby(key)[measure_col].sum() if "defect" in measure_col.lower() \
+            else mdf.groupby(key)[measure_col].mean()
+        if per_lot.empty:
+            return None
+        n_lots = len(per_lot)
+        k = max(3, round(n_lots * 0.2))  # top ~20%, at least 3
+        worst = (per_lot.sort_values(ascending=not worst_high).head(k))
+        qualifying = set(worst.index)
+        try:
+            tdf = materialize_dataframe(contracts[tool_block])
+        except Exception:  # noqa: BLE001
+            return None
+        table = commonality(tdf, tool_col, key, qualifying)
+        if table is None or table.empty:
+            return None
+        top = table.iloc[0]
+        kind = "缺陷最多" if worst_high else "良率最低"
+        sentence = (f"{kind}的前 {len(qualifying)} 個 {key} 中，最常共同經過的「{tool_col}」是 "
+                    f"{top[tool_col]}（{top['涉及批數']} 批，涵蓋率 {top['涵蓋率%']}%，lift {top.get('lift','—')}）。")
+        if "p_value" in table.columns:
+            p = top["p_value"]
+            sig = ("統計上顯著（p<0.05，不太可能是巧合）" if p < 0.05
+                   else f"但統計上不顯著（p={p}，建議多收幾批）")
+            sentence += f"Fisher 精確檢定 p={p}，{sig}。"
+        notes = [f"Commonality（top-N）：依 {measure_col} 取最{'高' if worst_high else '低'} "
+                 f"~20%（{len(qualifying)} 個 {key}）為不良群，於 {tool_block} 找共同 {tool_col}，"
+                 f"lift + Fisher 檢定。"]
         intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                           trust_notes=notes, risk_level="low")
         return NL2ProposalResult(intent=intent, message=sentence, result_table=table,
@@ -3227,9 +3311,27 @@ class NL2ProposalService:
                 msg = (f"有{flag_col.replace('_flag','')} 的批「{meas_col}」為 {round(hv0,2)}{unit}、"
                        f"無的為 {round(nv0,2)}{unit}（相差 {round(abs(hv0-nv0),2)}{unit}）"
                        f"→ 有此狀況者{verdict}。")
+        # Round 140: significance + small-sample honesty. A 0.4% gap on n=3 isn't a
+        # finding; run Welch t-test and flag tiny groups so users don't over-read.
+        min_n = int(grp["count"].min())
+        try:
+            from scipy.stats import ttest_ind as _tt
+            g0 = grp.iloc[0][flag_col]
+            v0 = work[work[flag_col] == g0][meas_col].astype(float)
+            v1 = work[work[flag_col] != g0][meas_col].astype(float)
+            if len(v0) >= 2 and len(v1) >= 2:
+                p = float(_tt(v0, v1, equal_var=False).pvalue)
+                if p < 0.05:
+                    msg += f"（Welch t 檢定 p={round(p,3)}，差異統計上顯著）"
+                else:
+                    msg += (f"（Welch t 檢定 p={round(p,3)}，差異不顯著"
+                            f"{'，且樣本偏少' if min_n < 5 else ''}，這個差距可能只是雜訊）")
+        except Exception:  # noqa: BLE001
+            if min_n < 5:
+                msg += f"（注意：較小的一組僅 {min_n} 個樣本，差距未必有意義）"
         method = ("同表分組比較" if flag_block == meas_block
                   else f"以 lot 對齊跨表（{flag_block} 的 {flag_col} × {meas_block} 的 {meas_col}）")
-        notes = [f"子群比較：{method}；各組以平均彙總並列出 lot 數。"]
+        notes = [f"子群比較：{method}；各組以平均彙總並列出 lot 數，並以 Welch t 檢定評估顯著性。"]
         intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                           trust_notes=notes, risk_level="low")
         return NL2ProposalResult(intent=intent, message=msg, result_table=out,
@@ -3337,7 +3439,8 @@ class NL2ProposalService:
                                          risk_level="low")
             names = "、".join(str(x) for x in low[key].head(5).tolist())
             msg = (f"{len(low)} 個 {key} 良率異常下掉（低於 μ−2σ，μ={limits['mean']}, "
-                   f"LCL={limits['lcl']}）：{names}。")
+                   f"LCL={limits['lcl']}）：{names}。註：此為跨批分布離群判定，"
+                   f"非時序突變偵測；要看「何時」掉需逐週/逐日序列。")
             notes = [f"良率 excursion：以 {key} 平均 {yld}，低於 μ−2σ 為異常。來源：{bid}。"]
             intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                               trust_notes=notes, risk_level="low")
