@@ -152,6 +152,14 @@ def build_retail_sales_block() -> DataBlockContract:
                 disaggregation_method=DisaggregationMethod.sum,
                 description="訂單數",
             ),
+            # Round 099: distinct customer count. Name != dedupe column, so it's a
+            # derived metric — the formula sandbox already allows COUNT(DISTINCT …).
+            MetricDefinition(
+                name="unique_customers",
+                formula="COUNT(DISTINCT customer_id)",
+                disaggregation_method=DisaggregationMethod.none,
+                description="不重複客戶數",
+            ),
             MetricDefinition(
                 name="quantity",
                 formula="SUM(quantity)",

@@ -67,13 +67,14 @@ class FanoutRisk(str, Enum):
 
 
 class DisaggregationMethod(str, Enum):
-    sum         = "sum"
-    average     = "average"
-    count       = "count"
-    min         = "min"
-    max         = "max"
-    last        = "last"
-    none        = "none"
+    sum            = "sum"
+    average        = "average"
+    count          = "count"
+    count_distinct = "count_distinct"  # Round 099: COUNT(DISTINCT col)
+    min            = "min"
+    max            = "max"
+    last           = "last"
+    none           = "none"
 
 
 # ---------------------------------------------------------------------------

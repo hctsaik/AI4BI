@@ -59,6 +59,7 @@ _APPROVED_AGGREGATIONS = {
     DisaggregationMethod.sum: AggFunction.sum,
     DisaggregationMethod.average: AggFunction.avg,
     DisaggregationMethod.count: AggFunction.count,
+    DisaggregationMethod.count_distinct: AggFunction.count_distinct,
     DisaggregationMethod.min: AggFunction.min,
     DisaggregationMethod.max: AggFunction.max,
 }
@@ -360,7 +361,10 @@ class Executor:
                 f"metric '{metric.metric_name}'; use '{approved.value}'."
             )
         alias = _quote(metric.alias or metric.metric_name)
-        return f"{approved.value}({_qualified(metric.block_id, metric.metric_name)}) AS {alias}"
+        col = _qualified(metric.block_id, metric.metric_name)
+        if approved is AggFunction.count_distinct:  # Round 099
+            return f"COUNT(DISTINCT {col}) AS {alias}"
+        return f"{approved.value}({col}) AS {alias}"
 
     # Comparison operators valid on an aggregated measure (Round 079).
     _HAVING_SIMPLE_OPS = {
