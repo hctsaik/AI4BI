@@ -264,3 +264,41 @@ def test_E10_overall_plan_attainment(env):
     r = _ask(env, "計畫 vs 實際的總體達成率？")
     assert r.result_table is not None and "達成率%" in r.result_table.columns
     assert len(r.result_table) == 1
+
+
+# --- Round F: OEE losses (R131) ------------------------------------------
+def test_F1_loss_decomposition(env):
+    r = _ask(env, "OEE 的三大損失（可用率、表現、良率）各損失多少百分點？")
+    assert r.result_table is not None and "損失百分點" in r.result_table.columns
+    assert len(r.result_table) == 3
+    # availability is the biggest fab-wide loss
+    assert r.result_table.iloc[0]["因子"].startswith("可用率")
+
+
+def test_F3_performance_loss_tool(env):
+    r = _ask(env, "表現損失（速度/小停機）最大的機台？")
+    assert r.result_table is not None and "表現P" in r.result_table.columns
+    assert "表現" in r.message  # routed to OEE P, not the plain availability table
+
+
+def test_F4_quality_loss_tool(env):
+    r = _ask(env, "良率損失（重工/報廢）最大的機台？")
+    assert r.result_table is not None and "良率Q" in r.result_table.columns
+    assert "良率" in r.message
+
+
+def test_F6_loss_pareto(env):
+    r = _ask(env, "OEE 損失的 Pareto，最該優先改善哪一項？")
+    assert r.result_table is not None and "損失百分點" in r.result_table.columns
+
+
+def test_F8_availability_drag_worst(env):
+    r = _ask(env, "哪一台機台的可用率拖累最嚴重？")
+    assert r.result_table is not None
+    assert r.result_table.iloc[0]["tool_id"] == "ETCH-02"  # lowest A, not highest
+
+
+def test_F9_oee_uplift_whatif(env):
+    r = _ask(env, "若把 ETCH-02 的 OEE 拉到全廠平均，產能可多多少？")
+    assert r.result_table is not None and "增量 moves" in r.result_table.columns
+    assert r.result_table.iloc[0]["增量 moves"] > 0

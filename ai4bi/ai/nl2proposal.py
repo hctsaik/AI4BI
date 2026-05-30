@@ -1997,6 +1997,27 @@ class NL2ProposalService:
         if tbl is None or tbl.empty:
             return None
         hay = f"{prompt.lower()} {normalized}"
+        # Round 131: OEE what-if — "把 X 的 OEE 拉到全廠平均/Y%，產能可多多少".
+        if ("oee" in hay) and any(t in hay for t in ("拉到", "提升到", "改善到", "拉高到", "提高到", "升到")):
+            tool = next((t for t in tbl["tool_id"].astype(str) if t.lower() in hay), None)
+            if tool is not None:
+                cur = float(tbl[tbl["tool_id"].astype(str) == tool].iloc[0]["OEE"])
+                if any(t in hay for t in ("全廠平均", "整廠平均", "平均水準", "平均")):
+                    tgt = round(float(tbl["OEE"].mean()), 1)
+                else:
+                    mm = _re.search(r"(\d{2,3})\s*%", hay)
+                    tgt = float(mm.group(1)) if mm else None
+                if tgt and cur > 0:
+                    import pandas as _pd
+                    from ai4bi.blocks.datastore import materialize_dataframe
+                    mv = materialize_dataframe(contracts["fab_process_move"])
+                    act = float(mv.groupby("tool_id")["move_count"].sum().get(tool, 0))
+                    extra = round(act * (tgt / cur - 1))
+                    wt = _pd.DataFrame([{"情境": f"{tool} OEE {cur}%→{tgt}%", "目前產出": round(act),
+                                         "增量 moves": extra, "新產出": round(act + extra)}])
+                    msg = (f"把 {tool} 的 OEE 由 {cur}% 拉到 {tgt}%，等比可多產出約 +{extra} moves"
+                           f"（{round(act)} → {round(act + extra)}）。")
+                    return self._capacity_result(msg, wt, "what-if：OEE 提升")
         # optional grouping: roll per-tool OEE up to vendor / area / tool_group
         grp = ("vendor" if any(t in hay for t in ("vendor", "供應商", "廠商")) else
                "area" if any(t in hay for t in ("區", "area", "區域")) else
@@ -2035,15 +2056,34 @@ class NL2ProposalService:
         # actual dragging factor, so fall through to the default worst-factor naming.
         factor_words = sum(bool(any(t in hay for t in grp_words)) for grp_words in (
             ("可用率", "availability"), ("表現", "performance"), ("良率", "quality", "品質")))
+        # Round 131: OEE loss decomposition / Pareto — "三大損失各幾個百分點 / 損失 Pareto".
+        # When losses are asked without singling out ONE factor, rank each factor's loss
+        # (100 − factor, in points) so the user sees where to attack first.
+        is_loss = any(t in hay for t in ("損失", "loss", "pareto", "百分點", "六大損失", "拆解"))
+        if is_loss and factor_words != 1:
+            import pandas as _pd
+            avg = tbl[["可用率A", "表現P", "良率Q"]].mean()
+            lt = _pd.DataFrame([
+                {"因子": "可用率(A)", "平均%": round(float(avg["可用率A"]), 1)},
+                {"因子": "表現(P)", "平均%": round(float(avg["表現P"]), 1)},
+                {"因子": "良率(Q)", "平均%": round(float(avg["良率Q"]), 1)},
+            ])
+            lt["損失百分點"] = (100 - lt["平均%"]).round(1)
+            lt = lt.sort_values("損失百分點", ascending=False).reset_index(drop=True)
+            top = lt.iloc[0]
+            msg = (f"OEE 三大損失（全廠平均，百分點）：{top['因子']} 損失最大 {top['損失百分點']} 點，"
+                   f"其次見表。Pareto 上應優先改善 {top['因子']}。")
+            return self._capacity_result(msg, lt, "OEE 損失拆解（Pareto）")
+        _WORST = ("最差", "最低", "最大", "影響最大", "拖累", "嚴重", "損失", "worst", "loss")
         focus = None
         if factor_words == 1 and any(t in hay for t in ("表現", "performance")) and \
-                any(t in hay for t in ("最差", "最低", "拖累", "worst")):
+                any(t in hay for t in _WORST):
             focus = ("表現P", "表現(P)")
         elif factor_words == 1 and any(t in hay for t in ("良率", "quality", "品質")) and any(
-                t in hay for t in ("最差", "最低", "影響最大", "拖累", "worst")):
+                t in hay for t in _WORST):
             focus = ("良率Q", "良率(Q)")
         elif factor_words == 1 and any(t in hay for t in ("可用率", "availability")) and any(
-                t in hay for t in ("最差", "最低", "拖累", "worst")):
+                t in hay for t in _WORST):
             focus = ("可用率A", "可用率(A)")
         if focus:
             col, label = focus
@@ -5004,7 +5044,15 @@ def _looks_like_capacity(prompt: str, normalized: str) -> bool:
 
 def _looks_like_oee(prompt: str, normalized: str) -> bool:
     hay = f"{prompt.lower()} {normalized}"
-    return any(c in hay for c in _OEE_CUES)
+    if any(c in hay for c in _OEE_CUES):
+        return True
+    # A factor-LOSS question ("表現損失最大的機台", "可用率拖累最嚴重") is an OEE question
+    # even without the literal "OEE" — route it to OEE before the capacity cues so the
+    # "停機/速度" wording doesn't divert it to the plain availability table.
+    factor = any(f in hay for f in ("可用率", "availability", "表現", "performance",
+                                    "良率", "quality", "品質", "稼動"))
+    lossword = any(w in hay for w in ("損失", "loss", "拖累", "六大損失"))
+    return factor and lossword
 
 
 _SPC_CUES: tuple[str, ...] = (
