@@ -233,6 +233,23 @@ def _load_all_contracts() -> dict[str, DataBlockContract]:
     return contracts
 
 
+def _report_block_contracts(report: ExecutableReportSpec) -> dict[str, DataBlockContract]:
+    """Round 155: the blocks the CURRENT report actually uses (resolved through
+    _load_all_contracts), plus any genuinely user-loaded sources. This is what the
+    calc-metric / cross-fact panels should offer — not the static retail seed that
+    lingers in user_blocks after switching demos."""
+    all_c = _load_all_contracts()
+    ids: set[str] = set()
+    for page in report.pages.values():
+        for visual in page.visuals.values():
+            for ref in visual.query.block_refs:
+                ids.add(ref.block_id)
+    # include user uploads/DB imports (tracked by a meta entry) so freshly added
+    # data is editable even before it appears in a visual
+    ids |= set(st.session_state.get(_USER_BLOCK_META_KEY, {}).keys())
+    return {bid: all_c[bid] for bid in ids if bid in all_c}
+
+
 def _share_password_ok(report: ExecutableReportSpec) -> bool:
     """Round 064: gate a protected read-only share behind a password.
 
@@ -864,8 +881,11 @@ def _render_draft_controls(
             render_data_source_manager()
             render_upload_panel()
             render_connector_panel()
-            _user_blocks: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
             _user_meta: dict = st.session_state.get(_USER_BLOCK_META_KEY, {})
+            # Round 155: only genuinely uploaded/connected blocks (meta-tracked),
+            # not the demo seed lingering in user_blocks.
+            _all_blocks: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
+            _user_blocks = {b: c for b, c in _all_blocks.items() if b in _user_meta}
             if _user_blocks:
                 with st.expander("📊 從這份資料建立報表", expanded=False):
                     bid_choice = st.selectbox(
@@ -892,7 +912,7 @@ def _render_draft_controls(
             st.caption("把多份資料用共同欄位關聯起來，並定義計算欄位（類似 Power BI 的模型檢視）。")
             render_join_builder(expanded=True)
             render_data_model_view()
-            render_calc_metric_panel()
+            render_calc_metric_panel(_report_block_contracts(report))
             render_cross_fact_panel()
             render_what_if_panel()
             with st.expander("➕ 手動新增圖表", expanded=False):

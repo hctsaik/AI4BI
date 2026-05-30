@@ -39,11 +39,15 @@ def render_data_source_manager() -> None:
     ``meta`` dicts, so this is the single place to see and manage all sources —
     Power BI's "Queries" / Power Query pane equivalent.
     """
-    user_blocks: dict[str, DataBlockContract] = st.session_state.get(_USER_BLOCKS_KEY, {})
+    all_blocks: dict[str, DataBlockContract] = st.session_state.get(_USER_BLOCKS_KEY, {})
     meta: dict = st.session_state.get(_USER_BLOCK_META_KEY, {})
+    # Round 155: only show GENUINELY user-loaded sources (upload / DB import carry a
+    # meta entry). Demo blocks seeded into user_blocks have no meta, so they no
+    # longer masquerade as "your data" — fixes retail blocks showing on the semi demo.
+    user_blocks = {bid: c for bid, c in all_blocks.items() if bid in meta}
     if not user_blocks:
         st.info(
-            "目前沒有自己的資料來源。用下方「上傳檔案」或「連接資料庫」加入第一份資料；"
+            "目前沒有自己上傳的資料來源。用下方「上傳檔案」或「連接資料庫」加入第一份資料；"
             "加入 2 份以上後，可到 **🔗 模型** 模式把它們關聯起來。",
             icon="📂",
         )

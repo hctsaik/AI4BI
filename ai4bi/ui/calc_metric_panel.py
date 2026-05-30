@@ -72,9 +72,13 @@ def _existing_derived(contract) -> list[MetricDefinition]:
     return [m for m in contract.metrics if m.disaggregation_method == DisaggregationMethod.none]
 
 
-def render_calc_metric_panel() -> None:
-    """Render the '新增計算欄位' panel (sidebar)."""
-    user_blocks: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
+def render_calc_metric_panel(blocks: dict | None = None) -> None:
+    """Render the '新增計算欄位' panel.
+
+    Round 155: ``blocks`` is the CURRENT report's blocks (so the dataset/column
+    options match what you're actually looking at — semiconductor vs retail).
+    Falls back to all user blocks when not supplied (tests / older callers)."""
+    user_blocks: dict = blocks if blocks is not None else st.session_state.get(_USER_BLOCKS_KEY, {})
     if not user_blocks:
         return
 
