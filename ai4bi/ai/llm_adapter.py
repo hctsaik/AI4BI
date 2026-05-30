@@ -44,6 +44,7 @@ SUPPORTED_INTENTS = (
     # ── Round 078-091: conversational answer engine (computed answers) ──────
     "answer_metric",          # "how much revenue last month?" → a number
     "ranking",                # "top 5 products by revenue" → ranked table
+    "breakdown",              # "revenue by region" → grouped table (no superlative)
     "grouped_topn",           # "top 3 products per store" → per-group ranked table
     "segment_count",          # "customers who bought > 3 times" → list (HAVING)
     "explain_change",         # "why did revenue drop? decompose by region"

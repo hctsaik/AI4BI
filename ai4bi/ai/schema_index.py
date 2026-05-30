@@ -124,6 +124,10 @@ def _col_tokens(col_name: str) -> list[str]:
 def _is_date_col(col_name: str, data_type: str) -> bool:
     if data_type in ("date", "timestamp", "datetime"):
         return True
+    # Round 114: a NUMERIC column is a measure, never a date dimension — even if
+    # its name contains "time" (e.g. queue_time_hr, process_time_min, cycle_time).
+    if data_type in ("integer", "int", "float", "number", "numeric", "double", "bigint"):
+        return False
     tokens = set(_col_tokens(col_name))
     return bool(tokens & {"date", "time", "ts", "dt", "day", "month", "year",
                           "week", "period", "timestamp", "at", "on", "created", "updated"})

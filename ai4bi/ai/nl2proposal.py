@@ -549,6 +549,11 @@ class NL2ProposalService:
             if ranked is not None:
                 return ranked
 
+        if intent == "breakdown":  # Round 114
+            bd = self._answer_breakdown(prompt, normalized, report, contracts)
+            if bd is not None:
+                return bd
+
         if intent == "pacing_question":  # Round 088
             pace = self._answer_pacing(prompt, normalized, report, contracts)
             if pace is not None:
@@ -677,6 +682,14 @@ class NL2ProposalService:
             yoy = self._answer_calendar_yoy(prompt, normalized, report, contracts)
             if yoy is not None:
                 return yoy
+
+        # Round 114: plain "metric by dimension" breakdown ("各製程站的移動次數").
+        # After ranking/decompose (so superlatives/why still win), before the
+        # generic single-number answer.
+        if _looks_like_breakdown(prompt, normalized):
+            bd = self._answer_breakdown(prompt, normalized, report, contracts)
+            if bd is not None:
+                return bd
 
         if _looks_like_metric_question(prompt, normalized):
             answer = self._answer_metric(prompt, normalized, report, semantic_model, contracts)
@@ -1630,6 +1643,50 @@ class NL2ProposalService:
         intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                           trust_notes=notes, risk_level="low")
         return NL2ProposalResult(intent=intent, message=sentence, result_table=table,
+                                 trust_notes=notes, risk_level="low")
+
+    def _answer_breakdown(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 114: plain "metric BY dimension" breakdown ("各製程站的移動次數").
+
+        Like ranking but without a superlative — groups a metric by a categorical
+        dimension and returns every group (sorted desc). Returns None to fall
+        through when no metric/dimension resolves.
+        """
+        executor = getattr(self, "_executor", None)
+        if executor is None or not contracts:
+            return None
+        idx = SchemaIndex.build(contracts)
+        match = idx.best_metric_match(prompt, normalized)
+        if match is None:
+            return None
+        block_id, metric_name, alias = match.block_id, match.metric_name, match.alias
+        dim_col = _resolve_decomp_dimension(idx, prompt, normalized, contracts, block_id)
+        if dim_col is None:
+            return None
+
+        from ai4bi.query_spec import BlockRef, DimensionRef, SortDirection, SortSpec, VisualQuerySpec
+        spec = VisualQuerySpec(
+            spec_id=f"by_{metric_name}", block_refs=[BlockRef(block_id)],
+            metrics=[MetricRef(block_id, metric_name, alias)],
+            dimensions=[DimensionRef(block_id, dim_col, dim_col)],
+            sort=[SortSpec(alias, SortDirection.desc)], inherit_global_filter=False)
+        try:
+            df = executor.run(spec)
+        except Exception:  # noqa: BLE001
+            return None
+        if df is None or df.empty:
+            return None
+        sentence = f"「{alias}」依「{dim_col}」分組（共 {len(df)} 組）。"
+        notes = [f"依「{dim_col}」分組彙總「{alias}」（治理查詢路徑），來源：{block_id}。"]
+        intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                          trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=sentence, result_table=df,
                                  trust_notes=notes, risk_level="low")
 
     def _answer_ranking(
@@ -3322,13 +3379,29 @@ def _format_metric_value(value: float | None, unit: str) -> str:
 
 _RANK_TRIGGERS: tuple[str, ...] = (
     "最高", "最低", "最多", "最少", "最賺", "最好", "最差", "最大", "最小",
+    "最長", "最久", "最短", "最快", "最慢", "最忙", "最閒", "最嚴重", "最常",
     "賣最", "排名", "排行", "前幾", "前十", "前五", "前三",
     "top ", "bottom ", "best ", "worst ", "highest", "lowest", "ranking", "rank ",
+    "longest", "shortest", "slowest", "fastest", "most ", "least ",
 )
 _RANK_ASC_WORDS: tuple[str, ...] = (
-    "最低", "最少", "最差", "最小", "賣最差", "賣最少", "最不", "墊底",
-    "bottom", "worst", "lowest", "least", "fewest",
+    "最低", "最少", "最差", "最小", "最短", "最快", "最閒", "賣最差", "賣最少", "最不", "墊底",
+    "bottom", "worst", "lowest", "least", "fewest", "shortest", "fastest",
 )
+
+
+_BREAKDOWN_MARKERS: tuple[str, ...] = (
+    "各", "每個", "每一", "每種", "每類", "依", "按", "照", "分布", "分佈", "分組",
+    " by ", " per ", "breakdown", "group by", "分別",
+)
+_EDIT_VERBS: tuple[str, ...] = ("改成", "換成", "改為", "改用", "變成", "change to", "switch to")
+
+
+def _looks_like_breakdown(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    if any(v in hay for v in _EDIT_VERBS):
+        return False  # "改成依月份" is an edit, not a breakdown answer
+    return any(m in hay for m in _BREAKDOWN_MARKERS)
 
 
 def _looks_like_ranking(prompt: str, normalized: str) -> bool:
@@ -3673,8 +3746,14 @@ _BASKET_TRIGGERS = ("一起買", "一起購買", "常買在一起", "搭配", "�
 _CUSTOMER_HINTS = ("customer", "member", "client", "user", "客戶", "顧客", "會員")
 _DATE_COL_HINTS = ("date", "_at", "time", "日期", "時間")
 _MONEY_HINTS = ("revenue", "amount", "sales", "spend", "price", "total", "營收", "金額", "銷售", "消費")
-_ENTITY_HINTS = ("product", "sku", "item", "store", "category", "商品", "品項", "門市", "品類")
-_VALUE_HINTS = ("revenue", "amount", "sales", "qty", "quantity", "count", "營收", "金額", "銷售", "數量")
+_ENTITY_HINTS = ("product", "sku", "item", "store", "category", "商品", "品項", "門市", "品類",
+                 # Round 114: fab entities
+                 "tool", "step", "lot", "wafer", "vendor", "機台", "設備", "製程", "站",
+                 "批", "晶圓", "供應商", "product_family", "tool_group", "tool_id", "step_name")
+_VALUE_HINTS = ("revenue", "amount", "sales", "qty", "quantity", "count", "營收", "金額", "銷售", "數量",
+                # Round 114: fab measures
+                "yield", "queue", "move", "defect", "die", "rework", "良率", "等待",
+                "移動", "缺陷", "晶粒", "重工", "time", "process")
 _PRODUCT_HINTS = ("product", "item", "sku", "商品", "品項")
 _BASKET_KEY_HINTS = ("customer", "member", "date", "_at", "store", "客戶", "門市", "日期")
 
@@ -3728,9 +3807,16 @@ def _pick_fact_for_analysis(facts: dict, kind: str):
             }
             required = ("customer", "date")
         elif kind in ("decline", "dormant", "newproduct"):
+            # value must be a NUMERIC, non-id column — else 'move' matches move_id
+            # (a string) and the streak math crashes. (Round 114)
+            numeric = {c.name for c in contract.columns
+                       if getattr(c, "data_type", "") in ("integer", "float", "int", "number",
+                                                          "numeric", "double", "bigint")}
+            num_cols = [c for c in cols
+                        if c in numeric and not c.lower().endswith(("_id", "_code", "_no"))]
             entity = _guess_col(cols, _ENTITY_HINTS)
             date = _guess_col(cols, _DATE_COL_HINTS)
-            value = _guess_col(cols, _VALUE_HINTS, exclude={entity} if entity else set())
+            value = _guess_col(num_cols, _VALUE_HINTS, exclude={entity} if entity else set())
             cmap = {"entity": entity, "date": date, "value": value}
             required = ("entity", "date", "value")
         elif kind == "basketsize":
@@ -3941,7 +4027,12 @@ def _resolve_decomp_dimension(idx, prompt: str, normalized: str, contracts, bloc
                 return False
         return False
 
-    # Try the token right after a "by"/"依" marker first.
+    # Try the token right after a "by"/"依" marker first. Note: we check the
+    # column exists & is categorical ON THE METRIC'S BLOCK rather than requiring
+    # SchemaIndex to have attributed the dim to that block — denormalized facts
+    # share column names (e.g. product_family on both move & yield facts), and
+    # SchemaIndex only records the first block, which would otherwise block a
+    # "yield by product" ranking. (Round 114)
     for marker in _DECOMP_BY_MARKERS:
         i = hay.find(marker)
         if i >= 0:
@@ -3949,13 +4040,18 @@ def _resolve_decomp_dimension(idx, prompt: str, normalized: str, contracts, bloc
             token = re.split(r"[\s,。.，?？]+", tail)[0] if tail else ""
             if token:
                 entry = idx.find_dim(token)
-                if entry and entry.block_id == block_id and _is_categorical(entry.column_name):
+                if entry and _is_categorical(entry.column_name):
                     return entry.column_name
 
-    best = idx.best_dim_match(prompt, normalized)
-    if best and best.block_id == block_id and _is_categorical(best.column_name):
-        return best.column_name
-    return None
+    # Pick the LONGEST categorical-on-block keyword match. (Round 114: don't just
+    # take best_dim_match's single longest — that can be a non-categorical column
+    # like a duration measure, causing the resolver to give up instead of falling
+    # back to a real categorical dimension like step_name.)
+    best_col, best_len = None, 0
+    for kw, entry in idx._dims.items():
+        if (kw in hay) and len(kw) > best_len and _is_categorical(entry.column_name):
+            best_col, best_len = entry.column_name, len(kw)
+    return best_col
 
 
 def _compose_decomposition_sentence(alias, dim_col, df, total, unit, scope) -> str:
