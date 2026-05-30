@@ -54,6 +54,7 @@ SUPPORTED_INTENTS = (
     "insights",               # weekly digest / anomaly scan
     "calendar_yoy",           # this month vs same month last year
     "analytics_chart",        # pareto/ABC, %-of-total, moving-average, forecast
+    "entity_compare",         # compare two named entities side by side
     "unsupported",            # anything else
 )
 

@@ -514,6 +514,11 @@ class NL2ProposalService:
             if seg is not None:
                 return seg
 
+        if intent == "entity_compare":  # Round 108
+            cmp = self._answer_entity_compare(prompt, normalized, report, contracts)
+            if cmp is not None:
+                return cmp
+
         if intent == "analytics_chart":  # Round 105
             ac = self._answer_analytics_chart(prompt, normalized, report, contracts)
             if ac is not None:
@@ -624,6 +629,12 @@ class NL2ProposalService:
             ins = self._answer_insights(prompt, normalized, report, contracts)
             if ins is not None:
                 return ins
+
+        # Round 108: "比較台北和台中" → two-entity side-by-side comparison.
+        if _looks_like_entity_compare(prompt, normalized):
+            cmp = self._answer_entity_compare(prompt, normalized, report, contracts)
+            if cmp is not None:
+                return cmp
 
         # Round 105: Pareto/ABC, %-of-total, moving-average, forecast charts.
         if _detect_analytics_chart(f"{prompt.lower()} {normalized}") is not None:
@@ -1109,6 +1120,96 @@ class NL2ProposalService:
             trust_notes=notes,
             risk_level="low",
         )
+
+    def _answer_entity_compare(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 108: "比較台北和台中" / "Taipei vs Taichung" — two-entity compare.
+
+        Resolves two dimension *values*, finds the categorical column holding
+        both, and compares a metric between them. Returns None (declines) when
+        the operands or column can't be resolved — never guesses.
+        """
+        executor = getattr(self, "_executor", None)
+        if executor is None or not contracts:
+            return None
+        ops = _extract_compare_operands(prompt, normalized)
+        if ops is None:
+            return None
+        a, b = ops
+
+        from ai4bi.blocks.contracts import BlockType
+        from ai4bi.blocks.datastore import materialize_dataframe
+
+        # Find a fact block + categorical column whose values include both operands.
+        target = None
+        for bid, c in contracts.items():
+            if getattr(c, "block_type", None) not in (
+                BlockType.fact, BlockType.snapshot_fact, BlockType.target_fact):
+                continue
+            try:
+                df = materialize_dataframe(c)
+            except Exception:  # noqa: BLE001
+                continue
+            for col in [cc.name for cc in c.columns
+                        if cc.data_type in ("string", "str", "object")]:
+                vals = set(df[col].astype(str).unique()) if col in df.columns else set()
+                if a in vals and b in vals:
+                    target = (bid, col)
+                    break
+            if target:
+                break
+        if target is None:
+            return None
+        block_id, col = target
+
+        idx = SchemaIndex.build(contracts)
+        match = idx.best_metric_match(prompt, normalized)
+        if match is not None and match.block_id == block_id:
+            metric_name, alias = match.metric_name, match.alias
+        else:
+            dm = _default_count_metric(contracts, block_id)
+            if dm is None:
+                return None
+            metric_name, alias = dm
+
+        from ai4bi.query_spec import (
+            BlockRef, DimensionRef, FilterOperator, FilterSpec, VisualQuerySpec,
+        )
+        spec = VisualQuerySpec(
+            spec_id=f"cmp_{metric_name}", block_refs=[BlockRef(block_id)],
+            metrics=[MetricRef(block_id, metric_name, alias)],
+            dimensions=[DimensionRef(block_id, col, col)],
+            filters=[FilterSpec(block_id, col, FilterOperator.in_, [a, b], False)],
+            inherit_global_filter=False)
+        try:
+            df = executor.run(spec)
+        except Exception:  # noqa: BLE001
+            return None
+        if df is None or df.empty or col not in df.columns or alias not in df.columns:
+            return None
+
+        vals = {str(r[col]): float(r[alias]) for _, r in df.iterrows()}
+        va, vb = vals.get(a), vals.get(b)
+        unit = _metric_unit(contracts, block_id, metric_name)
+        if va is not None and vb is not None:
+            hi, lo = (a, b) if va >= vb else (b, a)
+            hv, lv = (va, vb) if va >= vb else (vb, va)
+            diff_pct = ((hv - lv) / abs(lv) * 100) if lv else None
+            sentence = (f"{a} {alias} {_format_metric_value(va, unit)}　vs　"
+                        f"{b} {_format_metric_value(vb, unit)}。{hi} 較高"
+                        + (f"，多 {diff_pct:.1f}%。" if diff_pct is not None else "。"))
+        else:
+            sentence = f"比較 {a} 與 {b} 的 {alias}。"
+        notes = [f"比較「{col}」中 {a} 與 {b} 的「{alias}」（治理查詢路徑），來源：{block_id}。"]
+        intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                          trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=sentence, result_table=df,
+                                 trust_notes=notes, risk_level="low")
 
     def _answer_analytics_chart(
         self,
@@ -3255,6 +3356,42 @@ def _extract_rank_n(prompt: str, normalized: str, default: int = 5) -> int:
         except ValueError:
             pass
     return default
+
+
+# --- Round 108: two-entity comparison ----------------------------------------
+
+# Unambiguous compare cues (so "營收和訂單" — a list, not a comparison — is ignored).
+_COMPARE_CUES = ("比較", "對比", "相比", "比一比", " vs ", " versus ", " v.s ", "對上", "比起")
+_COMPARE_CONNECTORS = (" vs ", " versus ", " v.s ", "對上", "對比", "相比", "比起",
+                       "跟", "和", "與", "還是", "、", "對")
+
+
+def _looks_like_entity_compare(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    return any(c in hay for c in _COMPARE_CUES)
+
+
+def _clean_operand(s: str, side: str) -> str | None:
+    s = s.strip(" ,。，?？!！的")
+    for w in ("請比較", "幫我比較", "比較一下", "比一比", "比較", "看看", "對比一下",
+              "對比", "誰的", "哪個", "哪一個", "compare", "誰", "的"):
+        s = s.replace(w, " ")
+    parts = [p for p in re.split(r"[的\s,，、]+", s) if p]
+    if not parts:
+        return None
+    return parts[-1] if side == "left" else parts[0]
+
+
+def _extract_compare_operands(prompt: str, normalized: str) -> "tuple[str, str] | None":
+    text = prompt.strip()
+    for conn in _COMPARE_CONNECTORS:
+        i = text.find(conn)
+        if i > 0:
+            a = _clean_operand(text[:i], "left")
+            b = _clean_operand(text[i + len(conn):], "right")
+            if a and b and a != b and len(a) >= 1 and len(b) >= 1:
+                return a, b
+    return None
 
 
 # --- Round 105: postprocess / forecast analytics charts ----------------------
