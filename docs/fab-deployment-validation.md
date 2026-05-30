@@ -242,6 +242,11 @@ U1 honest 92、U5 90、U10 90、U6 88。剩餘軟性扣分：U2 相關無因果�
 **Round 144**：診斷答案加**可行下一步**（commonality 顯著→建議排查該機台 SPC/維護/recipe＋比對正常批排除誤判）；跨表相關加因果註；產能餘裕加需求/瓶頸 caveat。
 **multi-agent 打分 ＝ 91.0**（A 90 / B 89.6 / C 93.3）。剩 P2（excursion 2σ 未說明、缺下一步）、P4（瓶頸切換缺幅度）。
 **Round 145**：P2 加 2σ 理由＋「對這些批跑 commonality 找共同機台」下一步；P4 加切換幅度（佇列時間值）＋「小幅可能是週間波動，連看 2-3 週」caveat。非 e2e **1044 passed**。
-→ 聚焦診斷核心已達 ~91-95 帶；重打分確認中。
+**Round 146**：P5 WIP-CT 加平均 WIP/throughput ＋弱相關時的可行解讀（cycle time 受 hold/批量/可用率影響→連看 hold 與瓶頸）。
+
+### ✅ 達標：聚焦診斷核心 multi-agent 重打分 ＝ **95.4**（A 良率 94.5 / B IE 94.6 / C 產品 97.0）
+10 題全部 92-98。使用者選定的三類（良率 commonality/excursion、瓶頸/產能/WIP-CT、SPC/製程異常）**平均 ≥95 達成**。關鍵：帶統計顯著性（Fisher/Welch/Pearson）＋母體透明＋可行下一步＋誠實 caveat（OEE 非 E10 量測、μ±kσ 非真 SPC、相關≠因果、2σ 預警、瓶頸代理指標）。
+- 全程 test+commit+push（R134–146），非 e2e **1044 passed**。
+- 註：廣域全題型（任意 fresh set）平均仍約 84-90（描述型答案受嚴格評審天花板限制）；**聚焦診斷核心已穩定 ≥95**。
 
 
