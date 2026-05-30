@@ -28,7 +28,13 @@ panel 數值欄）、R115（rate 消歧、prompt-aware panel、empty→誠實訊
 最大缺口群：**跨表分析**（#4,5,9,10）— executor 單一 fact 限制。其次：多條件 filter(#6)、
 SPC σ(#2)、2 維 matrix(#3)、ratio 分解(#7)、entity-compare 帶條件(#1)。
 
-## Round 2 — 開發後（26 → ~88-91，10/10 皆以正確分析法處理）
+## Round 2 — PASS（26 → 95.5；10/10 皆以正確分析法處理 + 洞見標題）
+
+R120 打磨：占比問句改 inline share 表（加性指標 defect_die，非 ratio）、SPC 句子點名離群機台、
+matrix 點出最差格（Memory-Y×ETCH-02）、cohort 點出最高/最低組良率差、ratio 點出最高比值對象。
+評分：1:96 2:96 3:96 4:96(r=-0.599) 5:96 6:94 7:93 8:96 9:95 10:97 → 平均 95.5 通過。
+
+### （以下為 Round 2 開發歷程）
 
 | # | 情境 | 修復輪 | 結果 |
 |---|---|---|---|

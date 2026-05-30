@@ -22,7 +22,10 @@ def _added(proposal):
 
 def test_detector():
     assert _detect_analytics_chart("營收的 pareto 分析") == "pareto"
-    assert _detect_analytics_chart("各地區營收佔比") == "share"
+    # Round 120: a plain '佔比' question is now an inline share table; only with a
+    # chart verb does it become a share *chart* proposal.
+    assert _detect_analytics_chart("各地區營收佔比圖") == "share"
+    assert _detect_analytics_chart("各地區營收佔比") is None
     assert _detect_analytics_chart("營收 3 個月移動平均") == "moving_avg"
     assert _detect_analytics_chart("預測下個月營收") == "forecast"
     assert _detect_analytics_chart("營收多少") is None
@@ -43,11 +46,24 @@ def test_pareto_chart_proposal():
 
 
 def test_share_chart_proposal():
+    # explicit '圖' → a share chart proposal
     svc, report, contracts = _ctx()
-    result = svc.propose("各地區營收佔比", report, None, contracts=contracts)
+    result = svc.propose("各地區營收佔比圖", report, None, contracts=contracts)
     v = _added(result.proposal)
     assert v["visualization"]["extra"]["postprocess"] == "share_of_total"
-    assert v["query"]["dimensions"]  # has a category dimension
+    assert v["query"]["dimensions"]
+
+
+def test_share_question_inline_table():
+    # Round 120: a plain '佔比' question returns an inline share table (executor),
+    # not a chart proposal.
+    from ai4bi.analysis.executor import Executor
+    from ai4bi.report.retail_template import build_retail_sales_block
+    svc, report, contracts = _ctx()
+    ex = Executor(extra_contracts={"retail_sales": build_retail_sales_block()})
+    result = svc.propose("各地區營收佔比", report, None, contracts=contracts, executor=ex)
+    assert result.result_table is not None
+    assert "佔總比%" in result.result_table.columns
 
 
 def test_moving_average_proposal_with_window():

@@ -1753,8 +1753,9 @@ class NL2ProposalService:
                 msg = (f"沒有「{ent}」的「{val}」超出 μ±{k:g}σ"
                        f"（μ={limits['mean']}, σ={limits['sigma']}）。")
             else:
-                msg = (f"{len(table)} 個「{ent}」的「{val}」超出管制界限 "
-                       f"μ±{k:g}σ（μ={limits['mean']}, UCL={limits['ucl']}, LCL={limits['lcl']}）。")
+                names = "、".join(str(x) for x in table[ent].head(3).tolist())
+                msg = (f"{len(table)} 個「{ent}」超出管制界限 μ±{k:g}σ：{names}"
+                       f"（μ={limits['mean']}, UCL={limits['ucl']}, LCL={limits['lcl']}）。")
             notes = [f"SPC：依 {ent} 取平均後，以全體 μ±{k:g}σ 為管制界限。來源：{bid}。"]
             intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                               trust_notes=notes, risk_level="low")
@@ -1912,7 +1913,14 @@ class NL2ProposalService:
             table = cohort_by_quantile(merged, ca, cb, q=5)
             if table is None or table.empty:
                 return None
-            sentence = f"依「{ca}」分位分組，看各組「{cb}」（共 {len(table)} 組）。"
+            ocol = next((c for c in table.columns if c.startswith("平均")), None)
+            if ocol is not None and len(table) >= 2:
+                worst = float(table.iloc[-1][ocol])  # highest bucket of ca
+                best = float(table.iloc[0][ocol])
+                sentence = (f"依「{ca}」分位分 {len(table)} 組：{ca} 最高組的平均{cb} {worst} "
+                            f"vs 最低組 {best}（差 {round(best - worst, 2)}）。")
+            else:
+                sentence = f"依「{ca}」分位分組，看各組「{cb}」（共 {len(table)} 組）。"
             notes = [f"跨表 cohort：依 {key} 對齊後，用 {ca} 分位分桶，平均 {cb}。"]
             intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                               trust_notes=notes, risk_level="low")
@@ -1920,8 +1928,16 @@ class NL2ProposalService:
                                      trust_notes=notes, risk_level="low")
         # default: ratio A/B per key
         merged = merged.copy()
-        merged[f"{ca}/{cb}"] = (merged[ca] / merged[cb].replace(0, float("nan"))).round(3)
-        sentence = f"依「{key}」計算「{ca} ÷ {cb}」（跨表比值，共 {len(merged)} 列）。"
+        rcol = f"{ca}/{cb}"
+        merged[rcol] = (merged[ca] / merged[cb].replace(0, float("nan"))).round(3)
+        ranked = merged.dropna(subset=[rcol]).sort_values(rcol, ascending=False)
+        if not ranked.empty:
+            hi = ranked.iloc[0]
+            sentence = (f"「{ca} ÷ {cb}」依「{key}」：最高 {hi[key]}（{hi[rcol]}），"
+                        f"共 {len(merged)} 列。")
+            merged = ranked
+        else:
+            sentence = f"依「{key}」計算「{ca} ÷ {cb}」（跨表比值，共 {len(merged)} 列）。"
         notes = [f"跨表比值：各自彙總到 {key} 後相除（非明細 join）。"]
         intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                           trust_notes=notes, risk_level="low")
@@ -1971,7 +1987,18 @@ class NL2ProposalService:
             pivot = pivot.reset_index()
         except Exception:  # noqa: BLE001
             return None
-        sentence = f"「{alias}」交叉表：{d1}（列）× {d2}（欄）。"
+        # headline the worst (lowest) cell — the tool×product combo to watch
+        worst_txt = ""
+        try:
+            import numpy as np
+            numcols = [c for c in pivot.columns if c != d1]
+            stacked = pivot.set_index(d1)[numcols].stack()
+            if not stacked.empty:
+                (ri, ci), mv = stacked.idxmin(), stacked.min()
+                worst_txt = f"最低：{ri} × {ci} = {round(float(mv), 2)}。"
+        except Exception:  # noqa: BLE001
+            pass
+        sentence = f"「{alias}」交叉表：{d1}（列）× {d2}（欄）。{worst_txt}"
         notes = [f"依「{d1}」×「{d2}」交叉彙總「{alias}」（治理查詢路徑），來源：{block_id}。"]
         intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                           trust_notes=notes, risk_level="low")
@@ -2102,6 +2129,19 @@ class NL2ProposalService:
         dim_col = _resolve_decomp_dimension(idx, prompt, normalized, contracts, block_id)
         if dim_col is None:
             return None
+        # Round 120: share-of-total only makes sense on an ADDITIVE measure; if a
+        # share question resolved a rate/pct/density metric, switch to the additive
+        # sibling (defect_density_pct → defect_die) so the % column is meaningful.
+        hay0 = f"{prompt.lower()} {normalized}"
+        if any(t in hay0 for t in ("占比", "佔比", "比重", "占總", "佔總")) and \
+                any(t in metric_name.lower() for t in ("rate", "pct", "ratio", "density")):
+            base = set(re.split(r"[_\s]+", metric_name.lower())) - {"pct", "rate", "ratio", "density"}
+            for mm in idx._metrics.values():
+                nm = mm.metric_name.lower()
+                if (mm.block_id == block_id and base & set(re.split(r"[_\s]+", nm))
+                        and not any(t in nm for t in ("rate", "pct", "ratio", "density"))):
+                    metric_name, alias = mm.metric_name, mm.alias
+                    break
 
         from ai4bi.query_spec import BlockRef, DimensionRef, SortDirection, SortSpec, VisualQuerySpec
         spec = VisualQuerySpec(
@@ -2115,7 +2155,19 @@ class NL2ProposalService:
             return None
         if df is None or df.empty:
             return None
-        sentence = f"「{alias}」依「{dim_col}」分組（共 {len(df)} 組）。"
+        # Round 120: a "占比/share" breakdown gets an inline 佔總比% column.
+        hay = f"{prompt.lower()} {normalized}"
+        is_share = any(t in hay for t in ("占比", "佔比", "比重", "占總", "佔總", "share", "%", "百分比"))
+        if is_share and alias in df.columns:
+            total = float(df[alias].sum())
+            if total:
+                df = df.copy()
+                df["佔總比%"] = (df[alias] / total * 100).round(1)
+            top = df.iloc[0]
+            sentence = (f"「{alias}」依「{dim_col}」占比：最高 {top[dim_col]}"
+                        + (f"（{top['佔總比%']}%）。" if "佔總比%" in df.columns else "。"))
+        else:
+            sentence = f"「{alias}」依「{dim_col}」分組（共 {len(df)} 組）。"
         notes = [f"依「{dim_col}」分組彙總「{alias}」（治理查詢路徑），來源：{block_id}。"]
         intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                           trust_notes=notes, risk_level="low")
@@ -3989,6 +4041,9 @@ _FORECAST_TRIGGERS = ("預測", "预测", "forecast", "未來幾", "未来几", 
                       "下個月會", "預估", "project")
 
 
+_CHART_VERBS: tuple[str, ...] = ("圖", "chart", "視覺", "畫", "plot", "graph", "視覺化")
+
+
 def _detect_analytics_chart(hay: str) -> str | None:
     if any(t in hay for t in _PARETO_TRIGGERS):
         return "pareto"
@@ -3996,7 +4051,9 @@ def _detect_analytics_chart(hay: str) -> str | None:
         return "moving_avg"
     if any(t in hay for t in _FORECAST_TRIGGERS):
         return "forecast"
-    if any(t in hay for t in _SHARE_TRIGGERS):
+    # Round 120: a plain "占比/share" question is answered inline (breakdown +
+    # share %); only build a chart proposal when a chart is explicitly asked for.
+    if any(t in hay for t in _SHARE_TRIGGERS) and any(v in hay for v in _CHART_VERBS):
         return "share"
     return None
 
