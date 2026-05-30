@@ -34,4 +34,12 @@
 
 **兩位 agent 最終 VERDICT**：手順已「genuinely convenient and Power-BI-like」「genuinely usable… a clear jump」。使用者四項痛點全部解決：階層感（view-modes）、資料來源管理（統一 manager）、join（升為一級＋預設展開＋AI 偵測 key）、Power BI 感（ribbon／view-modes／Copilot ask box／field-well／filters pane）。
 
-剩餘 ~19 分屬**深度而非導航**：field-well 尚不能換 measure、無 drag-drop fields pane、圖表類型 4 種、計算指標非 DAX 公式列、篩選單層。皆為後續增量。
+剩餘屬**深度而非導航**：field-well 尚不能換 measure、無 drag-drop fields pane、計算指標非 DAX 公式列、篩選單層。
+
+## 第 3 輪 — 深度增量（依使用者「按建議進行」）
+**Round 150**：field-well 補上 **值（measure）切換**——下拉選該 block 的指標，換指標時重排 `query/metrics` 治理 patch；`agg_override=None` 讓每個指標保留其認證彙總法（rate/average 指標不會被誤加總，這點評審指出「Power BI 反而不強制」＝真實優勢）。AppTest 實測 revenue→order_count 0 例外。field-well 現為完整「值 / 分組 / 圖表類型」面板。
+
+**Power BI 分析師 re-eval**：S5 76→**87**、S7 72→**78**（計算指標移到 🔗模型 mode 旁邊＋新指標可直接在 field-well 選用）、**整體 81.3→~83.7**。
+
+剩餘到 95 的三項：①原生 drag-drop fields pane（**Streamlit 無原生拖放，須自訂 React 元件＝結構天花板**）②計算指標深度（lineage/格式/公式輔助，可做）③常駐右側 Visualizations pane 映射選取視覺（可做，最便宜的下一步）。導航/手順已到位，剩深度。
+
