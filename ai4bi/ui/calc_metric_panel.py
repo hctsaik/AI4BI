@@ -12,6 +12,8 @@ Saved measures are appended to the user block's contract (disaggregation_method
 
 from __future__ import annotations
 
+import re
+
 import streamlit as st
 
 from ai4bi.analysis.executor import QueryPlanningError, _build_derived_formula_expr
@@ -21,6 +23,31 @@ from ai4bi.ui.upload import _USER_BLOCKS_KEY, _USER_BLOCK_META_KEY
 
 def _column_names(contract) -> list[str]:
     return [c.name for c in contract.columns]
+
+
+def _insert_token(token: str) -> None:
+    """Append a token to the formula box (on_click runs before the rerun, so the
+    text_input keyed 'calc_formula' picks it up)."""
+    cur = st.session_state.get("calc_formula", "")
+    sep = "" if (not cur or cur.endswith((" ", "(", ",")) or token in (")", ",")) else " "
+    st.session_state["calc_formula"] = f"{cur}{sep}{token}"
+
+
+def formula_lineage(formula: str, contract) -> tuple[list[str], list[str]]:
+    """Round 152: return (referenced_columns, referenced_metrics) so the user can
+    see exactly what a calculated measure depends on."""
+    cols = [c.name for c in contract.columns]
+    metrics = [m.name for m in contract.metrics]
+    used_cols = [c for c in cols if re.search(rf"(?<![\w]){re.escape(c)}(?![\w])", formula)]
+    used_metrics = [m for m in metrics if re.search(rf"(?<![\w]){re.escape(m)}(?![\w])", formula)]
+    return used_cols, used_metrics
+
+
+# Round 152: display-format presets → the unit string the render layer already uses.
+_UNIT_PRESETS = {
+    "數字（無單位）": "", "百分比 %": "%", "金額 $": "$", "金額（元）": "元",
+    "千": "千", "萬": "萬", "次數": "次",
+}
 
 
 def validate_formula(formula: str, contract, parameters: dict | None = None) -> tuple[bool, str]:
@@ -66,27 +93,52 @@ def render_calc_metric_panel() -> None:
         )
         contract = user_blocks[block_id]
 
-        st.caption("可用欄位：" + "、".join(f"`{c}`" for c in _column_names(contract)))
-
         name = st.text_input("指標名稱", placeholder="毛利率", key="calc_name")
+
+        # ── Guided authoring: click a column or function to insert it ──────────
+        st.caption("點欄位或函式即可插入公式（不用自己打）：")
+        _cols = _column_names(contract)
+        _grid = st.columns(3)
+        for i, col in enumerate(_cols[:12]):
+            _grid[i % 3].button(
+                col, key=f"calc_ins_col_{block_id}_{col}", width="stretch",
+                on_click=_insert_token, args=(col,),
+            )
+        _fn_grid = st.columns(4)
+        for i, tok in enumerate(["+", "-", "*", "/", "(", ")", "NULLIF(", "SUM(",
+                                 "AVG(", "COUNT(", "CASE WHEN", "END"]):
+            _fn_grid[i % 4].button(
+                tok, key=f"calc_ins_fn_{block_id}_{tok}", width="stretch",
+                on_click=_insert_token, args=(tok,),
+            )
+
         formula = st.text_input(
             "公式",
             placeholder="(revenue - cost) / NULLIF(revenue, 0)",
             key="calc_formula",
         )
+        if st.button("🧹 清空公式", key="calc_clear_formula"):
+            st.session_state["calc_formula"] = ""
+            st.rerun()
+
         col1, col2 = st.columns(2)
         with col1:
-            unit = st.text_input("單位（選填）", placeholder="%", key="calc_unit")
+            unit_label = st.selectbox("顯示格式", list(_UNIT_PRESETS.keys()), key="calc_unit_preset")
+            unit = _UNIT_PRESETS[unit_label]
         with col2:
             desc = st.text_input("說明（選填）", key="calc_desc")
 
         from ai4bi.ui.what_if_panel import get_parameters
         _params = get_parameters()
 
-        # Live validation
+        # Live validation + lineage (what this measure depends on)
         if formula.strip():
             ok, msg = validate_formula(formula, contract, _params)
             (st.success if ok else st.error)(msg)
+            used_cols, used_metrics = formula_lineage(formula, contract)
+            if used_cols or used_metrics:
+                dep = "、".join(f"`{c}`" for c in used_cols + used_metrics)
+                st.caption(f"🔗 依賴欄位／指標：{dep}")
         else:
             ok = False
 
