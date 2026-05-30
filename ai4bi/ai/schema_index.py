@@ -263,13 +263,41 @@ class SchemaIndex:
         confident WRONG answers. Requiring length >= 2 makes the engine decline
         (return None) when the asked-for metric isn't really present, which the
         answer handlers turn into a graceful "not found" rather than a wrong rank.
+
+        Round 114: when the prompt signals a *rate* (率/rate/%/比率), break ties
+        toward a rate/pct/ratio-named metric — so '重工率' resolves rework_rate,
+        not rework_count.
         """
+        hay = f"{prompt.lower()} {normalized}"
+        wants_rate = any(s in hay for s in ("率", "rate", "%", "比率", "比例", "percent", "佔比", "占比"))
+
+        def _is_rate(e: "MetricEntry") -> bool:
+            return any(t in e.metric_name.lower()
+                       for t in ("rate", "pct", "ratio", "percent", "density"))
+
         best: Optional[MetricEntry] = None
-        best_len = 0
+        best_score = 0.0
         for kw, entry in self._metrics.items():
             if len(kw) < 2:
                 continue
-            if (kw in normalized or kw in prompt) and len(kw) > best_len:
-                best = entry
-                best_len = len(kw)
+            if kw in normalized or kw in prompt:
+                score = len(kw) + (0.5 if (wants_rate and _is_rate(entry)) else 0.0)
+                if score > best_score:
+                    best, best_score = entry, score
+
+        # Shared keywords collapse to the first-registered metric (setdefault), so
+        # '重工' alone maps to rework_count even when the prompt says '重工率'. When
+        # the prompt wants a rate and the match isn't one, switch to a rate-variant
+        # metric that shares a base token. (Round 114)
+        if best is not None and wants_rate and not _is_rate(best):
+            base = set(best.metric_name.lower().split("_")) - {
+                "count", "sum", "total", "num", "qty", "amount"}
+            seen: set[str] = set()
+            for entry in self._metrics.values():
+                if entry.metric_name in seen:
+                    continue
+                seen.add(entry.metric_name)
+                if _is_rate(entry) and base & set(entry.metric_name.lower().split("_")):
+                    best = entry
+                    break
         return best

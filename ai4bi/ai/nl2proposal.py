@@ -1792,6 +1792,21 @@ class NL2ProposalService:
             return None
         block_id, contract, cols_map = best
 
+        # Round 115: prompt-aware override for entity×value analyses. Prefer the
+        # block where the dimension the user NAMED (機台/製程/product) and the
+        # measure they NAMED (良率/等待/缺陷) both resolve, instead of guessing
+        # from column order (which picked lot_id / queue_time for '機台良率').
+        if kind in ("decline", "dormant", "newproduct"):
+            idx = SchemaIndex.build(contracts)
+            for bid, c in facts.items():
+                ent = _resolve_decomp_dimension(idx, prompt, normalized, contracts, bid)
+                val = _resolve_numeric_column(prompt, normalized, c)
+                date = _find_date_column(contracts, bid)
+                if ent and val and date:
+                    block_id, contract, cols_map = bid, c, {
+                        "entity": ent, "date": date, "value": val}
+                    break
+
         if kind in ("decline", "dormant", "newproduct"):
             # Period: explicit word wins; default monthly for dormancy/launches,
             # weekly for streaks (more periods available).
@@ -1811,7 +1826,13 @@ class NL2ProposalService:
 
         table, sentence = _execute_panel_analysis(kind, df, cols_map)
         if table is None or table.empty:
-            return None
+            # Round 115: the analysis ran but found nothing qualifying. Report
+            # that honestly instead of falling through to "unsupported intent".
+            msg = f"沒有符合「{_PANEL_LABELS[kind]}」條件的結果。"
+            intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                              trust_notes=[msg], risk_level="low")
+            return NL2ProposalResult(intent=intent, message=msg,
+                                     trust_notes=[msg], risk_level="low")
 
         notes = [
             f"使用「{_PANEL_LABELS[kind]}」分析（純 pandas，於記憶體資料計算）。",
@@ -3775,6 +3796,35 @@ def _detect_panel_analysis(prompt: str, normalized: str) -> str | None:
     if any(t in hay for t in _BASKET_TRIGGERS):
         return "basket"
     return None
+
+
+def _resolve_numeric_column(prompt: str, normalized: str, contract) -> str | None:
+    """Round 115: match the prompt to a NUMERIC column via tokens + ZH synonyms.
+
+    So '良率' resolves the yield_pct column, '等待' the queue_time_hr column, etc.
+    Used to make panel analyses (decline/dormant/launch) prompt-aware instead of
+    guessing from column order. Returns None when nothing matches.
+    """
+    from ai4bi.ai.schema_index import _EN_TO_ZH
+    hay = f"{prompt.lower()} {normalized}"
+    best, best_len = None, 0
+    for c in getattr(contract, "columns", []) or []:
+        if getattr(c, "data_type", "") not in ("integer", "float", "int", "number",
+                                               "numeric", "double", "bigint"):
+            continue
+        low = c.name.lower()
+        if low.endswith(("_id", "_code", "_no")):
+            continue
+        kws: set[str] = set()
+        for tok in re.split(r"[_\s]+", low):
+            if tok:
+                kws.add(tok)
+                for zh in _EN_TO_ZH.get(tok, []):
+                    kws.add(zh)
+        for kw in kws:
+            if len(kw) >= 2 and kw in hay and len(kw) > best_len:
+                best, best_len = c.name, len(kw)
+    return best
 
 
 def _guess_col(cols: list[str], hints: tuple[str, ...], exclude: set[str] | None = None) -> str | None:
