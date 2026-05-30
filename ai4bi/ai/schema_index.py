@@ -90,6 +90,9 @@ _EN_TO_ZH: dict[str, list[str]] = {
     "failed":     ["失敗", "失效"],
     "cycle":      ["週期", "循環"],
     "throughput": ["產出", "吞吐", "產能"],
+    "time":       ["時間", "時長"],
+    "age":        ["時間", "時長", "老化", "年齡"],
+    "duration":   ["時間", "時長", "持續時間"],
 }
 
 _ZH_TO_EN: dict[str, str] = {}  # built lazily below
@@ -170,6 +173,8 @@ class SchemaIndex:
     """Runtime keyword index built from loaded DataBlockContracts."""
     _dims: dict[str, DimEntry] = field(default_factory=dict)    # keyword → DimEntry
     _metrics: dict[str, MetricEntry] = field(default_factory=dict)  # keyword → MetricEntry
+    # Round 122: (MetricEntry, full keyword set) per metric — uncollapsed.
+    _metric_keywords: list = field(default_factory=list)
 
     @classmethod
     def build(cls, contracts: dict[str, DataBlockContract]) -> "SchemaIndex":
@@ -234,6 +239,10 @@ class SchemaIndex:
                         m_keywords.append(zh)
                 for kw in m_keywords:
                     idx._metrics.setdefault(kw, m_entry)
+                # Round 122: keep the FULL keyword set per metric (not collapsed by
+                # setdefault) so best_metric_match can score every metric — needed
+                # to tell apart hold_count vs avg_hold_age_hr etc.
+                idx._metric_keywords.append((m_entry, {k for k in m_keywords if len(k) >= 2}))
 
         return idx
 
@@ -275,7 +284,25 @@ class SchemaIndex:
             return any(t in e.metric_name.lower()
                        for t in ("rate", "pct", "ratio", "percent", "density"))
 
+        # Round 122: score EVERY metric by its full keyword set — number of
+        # distinct keywords matched (so avg_hold_age_hr matching '保留'+'時間' beats
+        # hold_count matching only '保留'), tie-broken by longest keyword + a small
+        # rate bonus. Falls back to the collapsed dict if the uncollapsed set is
+        # unavailable (older indexes).
         best: Optional[MetricEntry] = None
+        if self._metric_keywords:
+            best_key = (0, 0, 0.0)
+            for entry, kws in self._metric_keywords:
+                matched = [k for k in kws if k in hay]
+                if not matched:
+                    continue
+                longest = max(len(k) for k in matched)
+                rate_bonus = 1.0 if (wants_rate and _is_rate(entry)) else 0.0
+                key = (len(matched), longest, rate_bonus)
+                if key > best_key:
+                    best_key, best = key, entry
+            return best
+
         best_score = 0.0
         for kw, entry in self._metrics.items():
             if len(kw) < 2:
@@ -284,20 +311,4 @@ class SchemaIndex:
                 score = len(kw) + (0.5 if (wants_rate and _is_rate(entry)) else 0.0)
                 if score > best_score:
                     best, best_score = entry, score
-
-        # Shared keywords collapse to the first-registered metric (setdefault), so
-        # '重工' alone maps to rework_count even when the prompt says '重工率'. When
-        # the prompt wants a rate and the match isn't one, switch to a rate-variant
-        # metric that shares a base token. (Round 114)
-        if best is not None and wants_rate and not _is_rate(best):
-            base = set(best.metric_name.lower().split("_")) - {
-                "count", "sum", "total", "num", "qty", "amount"}
-            seen: set[str] = set()
-            for entry in self._metrics.values():
-                if entry.metric_name in seen:
-                    continue
-                seen.add(entry.metric_name)
-                if _is_rate(entry) and base & set(entry.metric_name.lower().split("_")):
-                    best = entry
-                    break
         return best
