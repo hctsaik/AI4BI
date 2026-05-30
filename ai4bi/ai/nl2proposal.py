@@ -1247,10 +1247,16 @@ class NL2ProposalService:
         if match is not None and match.block_id == block_id:
             metric_name, alias = match.metric_name, match.alias
         else:
-            dm = _default_count_metric(contracts, block_id)
-            if dm is None:
-                return None
-            metric_name, alias = dm
+            # Round 124: the global best metric may be on another block; prefer the
+            # best metric ON the comparison column's block before defaulting.
+            on_block = _best_metric_on_block(idx, prompt, normalized, block_id)
+            if on_block is not None:
+                metric_name, alias = on_block
+            else:
+                dm = _default_count_metric(contracts, block_id)
+                if dm is None:
+                    return None
+                metric_name, alias = dm
 
         from ai4bi.query_spec import (
             BlockRef, DimensionRef, FilterOperator, FilterSpec, VisualQuerySpec,
@@ -4191,6 +4197,22 @@ def _looks_like_segment_count(prompt: str, normalized: str) -> bool:
     # An entity to group by + a comparison + a number is enough — the threshold
     # may be on a count (買超過 3 次) OR any measure (queue > 5 小時的 lot).
     return any(h in hay for h in _ENTITY_CUE_HINTS)
+
+
+def _best_metric_on_block(idx, prompt: str, normalized: str, block_id: str):
+    """Round 124: best metric the prompt names that lives ON ``block_id``."""
+    hay = f"{prompt.lower()} {normalized}"
+    best, best_key = None, (0, 0)
+    for entry, kws in getattr(idx, "_metric_keywords", []):
+        if entry.block_id != block_id:
+            continue
+        matched = [k for k in kws if k in hay]
+        if not matched:
+            continue
+        key = (len(matched), max(len(k) for k in matched))
+        if key > best_key:
+            best_key, best = key, (entry.metric_name, entry.alias)
+    return best
 
 
 def _entity_col_on_block(idx, prompt: str, normalized: str, contracts, block_id: str) -> str | None:
