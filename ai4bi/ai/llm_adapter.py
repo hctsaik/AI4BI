@@ -50,6 +50,8 @@ SUPPORTED_INTENTS = (
     "commonality",            # shared tool across lots failing a yield cut
     "matrix",                 # 2-dimension cross-tab (dim1 x dim2)
     "multi_filter",           # multi-condition AND filter then a metric
+    "capacity",               # utilization / loading / headroom / plan / throughput
+    "oee",                    # overall equipment effectiveness
     "grouped_topn",           # "top 3 products per store" → per-group ranked table
     "segment_count",          # "customers who bought > 3 times" → list (HAVING)
     "explain_change",         # "why did revenue drop? decompose by region"

@@ -312,8 +312,101 @@ def build_wafer_yield_block() -> DataBlockContract:
     return block
 
 
+_CAPACITY_ID = "fab_tool_capacity"
+
+# Embedded utilization / availability / performance signal per tool (Round 128):
+#   (util, uptime/availability, ideal_move_min, performance)
+#   util = actual ÷ capacity (ETCH-02 ~constraint; CVD idle headroom)
+#   uptime = availability; performance = speed efficiency
+#   ETCH-02: high util but LOW availability (0.70) AND low performance (0.78) →
+#   worst OEE despite being the bottleneck.
+_TOOL_CAP = {
+    "PHOTO-01": (0.78, 0.92, 42, 0.93), "PHOTO-02": (0.70, 0.90, 42, 0.90),
+    "ETCH-01":  (0.86, 0.88, 60, 0.90), "ETCH-02":  (0.94, 0.70, 60, 0.78),
+    "CVD-01":   (0.46, 0.95, 50, 0.92), "CVD-02":   (0.40, 0.95, 50, 0.92),
+    "IMP-01":   (0.66, 0.86, 35, 0.90), "IMP-02":   (0.60, 0.84, 35, 0.88),
+    "CMP-01":   (0.52, 0.90, 30, 0.91), "CMP-02":   (0.55, 0.90, 30, 0.91),
+    "METAL-01": (0.62, 0.89, 55, 0.90), "METAL-02": (0.58, 0.89, 55, 0.89),
+}
+_TOOL_META = {tid: (tg, _AREA[tg], v) for tg, tools in _TOOLS.items()
+              for (tid, v, _r, _y) in tools}
+
+
+def build_tool_capacity_block() -> DataBlockContract:
+    """Round 128: per-tool capacity / availability reference (one row per tool).
+
+    capacity = actual moves ÷ embedded utilisation; available/run hours give
+    availability (uptime); planned_moves a target; ideal_move_min the ideal
+    process time — together enabling utilisation, loading, headroom, plan
+    attainment, OEE (availability × performance × quality)."""
+    if _CAPACITY_ID in _CACHE:
+        return _CACHE[_CAPACITY_ID]
+    moves, _ = _generate()
+    actual = {}
+    for m in moves:
+        actual[m["tool_id"]] = actual.get(m["tool_id"], 0) + m["move_count"]
+    rows = []
+    for tid, (util, uptime, ideal_min, perf) in _TOOL_CAP.items():
+        tg, area, vendor = _TOOL_META.get(tid, ("", "", ""))
+        act = actual.get(tid, 0)
+        capacity = max(int(round(act / util)), act) if util else act
+        # Derive hours from the actual ideal work so OEE Performance is realistic:
+        #   ideal_h = act × ideal_min/60 ; run_h = ideal_h/perf ; avail_h = run_h/uptime
+        ideal_h = act * ideal_min / 60.0
+        run_hours = round(ideal_h / perf, 1) if perf else ideal_h
+        available_hours = round(run_hours / uptime, 1) if uptime else run_hours
+        planned = int(round(capacity * 0.90))  # plan = 90% of capacity
+        rows.append({
+            "tool_id": tid, "tool_group": tg, "area": area, "vendor": vendor,
+            "capacity_moves": capacity, "actual_moves_ref": act,
+            "available_hours": available_hours, "run_hours": run_hours,
+            "uptime_pct": round(uptime * 100, 1), "ideal_move_min": ideal_min,
+            "planned_moves": planned,
+        })
+    block = DataBlockContract(
+        block_id=_CAPACITY_ID, block_type=BlockType.fact,
+        grain="one row per tool (capacity reference)",
+        version="1.0.0", description="機台產能 / 稼動參考",
+        block_lifecycle=LifecycleStatus.draft, primary_keys=["tool_id"],
+        columns=[
+            ColumnSchema(name="tool_id", data_type="string"),
+            ColumnSchema(name="tool_group", data_type="string"),
+            ColumnSchema(name="area", data_type="string"),
+            ColumnSchema(name="vendor", data_type="string"),
+            ColumnSchema(name="capacity_moves", data_type="integer"),
+            ColumnSchema(name="actual_moves_ref", data_type="integer"),
+            ColumnSchema(name="available_hours", data_type="float"),
+            ColumnSchema(name="run_hours", data_type="float"),
+            ColumnSchema(name="uptime_pct", data_type="float"),
+            ColumnSchema(name="ideal_move_min", data_type="integer"),
+            ColumnSchema(name="planned_moves", data_type="integer"),
+        ],
+        metrics=[
+            MetricDefinition(name="capacity_moves", formula="SUM(capacity_moves)",
+                             disaggregation_method=DisaggregationMethod.sum, description="產能(可做移動數)"),
+            MetricDefinition(name="planned_moves", formula="SUM(planned_moves)",
+                             disaggregation_method=DisaggregationMethod.sum, description="計畫移動數"),
+            MetricDefinition(name="available_hours", formula="SUM(available_hours)",
+                             disaggregation_method=DisaggregationMethod.sum, unit="hr", description="可用工時"),
+            MetricDefinition(name="run_hours", formula="SUM(run_hours)",
+                             disaggregation_method=DisaggregationMethod.sum, unit="hr", description="運轉工時"),
+            MetricDefinition(name="availability_pct",
+                             formula="SUM(run_hours) / NULLIF(SUM(available_hours),0) * 100",
+                             disaggregation_method=DisaggregationMethod.none, unit="%",
+                             description="可用率(運轉÷可用工時)"),
+            MetricDefinition(name="avg_uptime_pct", formula="AVG(uptime_pct)",
+                             disaggregation_method=DisaggregationMethod.none, unit="%", description="平均稼動率"),
+        ],
+        data_source=InlineDataSource(records=rows),
+        policy=PolicySpec(data_classification=DataClassification.internal),
+    )
+    _CACHE[_CAPACITY_ID] = block
+    return block
+
+
 def fab_contracts() -> dict[str, DataBlockContract]:
-    return {_MOVE_ID: build_process_move_block(), _YIELD_ID: build_wafer_yield_block()}
+    return {_MOVE_ID: build_process_move_block(), _YIELD_ID: build_wafer_yield_block(),
+            _CAPACITY_ID: build_tool_capacity_block()}
 
 
 def build_fab_demo_report() -> ExecutableReportSpec:

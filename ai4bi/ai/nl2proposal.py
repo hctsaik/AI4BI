@@ -549,6 +549,16 @@ class NL2ProposalService:
             if ranked is not None:
                 return ranked
 
+        if intent == "oee":  # Round 128
+            oee = self._answer_oee(prompt, normalized, report, contracts)
+            if oee is not None:
+                return oee
+
+        if intent == "capacity":  # Round 128
+            cap = self._answer_capacity(prompt, normalized, report, contracts)
+            if cap is not None:
+                return cap
+
         if intent == "spc":  # Round 117
             sp = self._answer_spc(prompt, normalized, report, contracts)
             if sp is not None:
@@ -671,6 +681,16 @@ class NL2ProposalService:
             ac = self._answer_analytics_chart(prompt, normalized, report, contracts)
             if ac is not None:
                 return ac
+
+        # Round 128: capacity / OEE analytics (move fact × capacity reference).
+        if _looks_like_oee(prompt, normalized):
+            oee = self._answer_oee(prompt, normalized, report, contracts)
+            if oee is not None:
+                return oee
+        if _looks_like_capacity(prompt, normalized):
+            cap = self._answer_capacity(prompt, normalized, report, contracts)
+            if cap is not None:
+                return cap
 
         # Round 117: SPC control-limit outliers + commonality. Specific cues,
         # checked early.
@@ -1752,6 +1772,168 @@ class NL2ProposalService:
         intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                           trust_notes=notes, risk_level="low")
         return NL2ProposalResult(intent=intent, message=sentence, result_table=table,
+                                 trust_notes=notes, risk_level="low")
+
+    def _answer_capacity(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 128: capacity analytics — utilization / loading / headroom /
+        plan attainment / throughput rate (move fact × capacity reference)."""
+        if not contracts or "fab_tool_capacity" not in contracts:
+            return None
+        hay = f"{prompt.lower()} {normalized}"
+        gk = ("area" if any(t in hay for t in ("區", "area", "區域")) else
+              "vendor" if any(t in hay for t in ("vendor", "供應商", "廠商")) else
+              "tool_group" if any(t in hay for t in ("機台群", "tool group", "群組")) else "tool_id")
+        from ai4bi.analysis import capacity as _cap
+        asc = any(t in hay for t in ("最低", "最少", "最差", "停機最多", "最閒", "lowest", "worst", "least"))
+        # availability (run ÷ available hours) lives on the capacity reference
+        if any(t in hay for t in ("可用率", "availability", "停機", "稼動率")) and \
+                not any(t in hay for t in ("利用率", "loading", "負載", "餘裕", "達成", "throughput")):
+            from ai4bi.blocks.datastore import materialize_dataframe
+            cap = materialize_dataframe(contracts["fab_tool_capacity"])
+            cap = cap[["tool_id", "uptime_pct", "run_hours", "available_hours"]].copy()
+            cap = cap.rename(columns={"uptime_pct": "可用率%"}).sort_values(
+                "可用率%", ascending=asc or any(t in hay for t in ("停機", "最低"))).reset_index(drop=True)
+            w = cap.iloc[0]
+            msg = f"機台可用率（運轉÷可用工時）：{'最低' if asc else '最高'} {w['tool_id']}（{w['可用率%']}%）。"
+            return self._capacity_result(msg, cap, "可用率 availability")
+        if any(t in hay for t in ("達成率", "計畫", "plan", "達標", "計劃", "vs actual", "實際對計畫")):
+            tbl = _cap.plan_attainment(contracts, gk if gk != "tool_id" else "area")
+            if tbl is None or tbl.empty:
+                return None
+            w = tbl.iloc[0]
+            msg = f"計畫達成率（依 {gk if gk!='tool_id' else 'area'}）：最低 {w.iloc[0]}（{w['達成率%']}%）。"
+            return self._capacity_result(msg, tbl, "計畫達成率（實際÷計畫）")
+        if any(t in hay for t in ("throughput", "每小時", "每工時", "單位工時", "moves/hr", "moves per", "產出率")):
+            tbl = _cap.throughput_rate(contracts, gk)
+            if tbl is None or tbl.empty:
+                return None
+            if asc:
+                tbl = tbl.sort_values("moves_per_hr").reset_index(drop=True)
+            w = tbl.iloc[0]
+            msg = (f"產出率（moves/運轉小時，依 {gk}）："
+                   f"{'最低' if asc else '最高'} {w.iloc[0]}（{w['moves_per_hr']}/hr）。")
+            return self._capacity_result(msg, tbl, "產出率 moves/run-hour")
+        # default: utilization / loading / headroom
+        tbl = _cap.utilization(contracts, gk)
+        if tbl is None or tbl.empty:
+            return None
+        # filter to a named area/tool value if the prompt scopes one ("ETCH 區的餘裕")
+        gkcol = "tool_id" if gk == "tool_id" else gk
+        if gkcol in tbl.columns:
+            vals = {str(x) for x in tbl[gkcol].unique()}
+            picked = next((v for v in vals if v and v.lower() in hay and len(v) >= 3), None)
+            if picked:
+                tbl = tbl[tbl[gkcol] == picked].reset_index(drop=True)
+            elif gkcol == "tool_id":
+                # tool-family prefix ("CVD 機台" → CVD-01/CVD-02)
+                fams = {v.split("-")[0] for v in vals if "-" in v}
+                fam = next((f for f in fams if f and f.lower() in hay and len(f) >= 3), None)
+                if fam:
+                    tbl = tbl[tbl[gkcol].str.startswith(fam + "-")].reset_index(drop=True)
+        # "瓶頸/constraint" = highest loading (least headroom), never headroom-sorted
+        is_bottleneck = any(t in hay for t in ("瓶頸", "constraint", "滿載", "最滿"))
+        is_headroom = (not is_bottleneck) and any(
+            t in hay for t in ("餘裕", "headroom", "閒置", "還能", "空間", "line balance", "落差", "平衡"))
+        if is_headroom:
+            tbl = tbl.sort_values("餘裕", ascending=False).reset_index(drop=True)
+            w = tbl.iloc[0]
+            msg = f"產能餘裕（依 {gk}）：最多 {w.iloc[0]}（餘裕 {w['餘裕']}，利用率 {w['利用率%']}%）。"
+        else:
+            w = tbl.iloc[0]
+            label = "負載率" if any(t in hay for t in ("負載", "loading", "滿載")) else "利用率"
+            msg = f"{label}（依 {gk}）：最高 {w.iloc[0]}（{w['利用率%']}%），最該關注的瓶頸/滿載點。"
+        return self._capacity_result(msg, tbl, "產能利用率（實際÷產能）")
+
+    def _answer_oee(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 128: OEE = Availability × Performance × Quality per tool."""
+        if not contracts or "fab_tool_capacity" not in contracts:
+            return None
+        import re as _re
+        from ai4bi.analysis.capacity import compute_oee
+        tbl = compute_oee(contracts)
+        if tbl is None or tbl.empty:
+            return None
+        hay = f"{prompt.lower()} {normalized}"
+        # optional grouping: roll per-tool OEE up to vendor / area / tool_group
+        grp = ("vendor" if any(t in hay for t in ("vendor", "供應商", "廠商")) else
+               "area" if any(t in hay for t in ("區", "area", "區域")) else
+               "tool_group" if any(t in hay for t in ("機台群", "tool group", "群組")) else None)
+        if grp:
+            from ai4bi.blocks.datastore import materialize_dataframe
+            cap = materialize_dataframe(contracts["fab_tool_capacity"])[["tool_id", grp]]
+            j = tbl.merge(cap, on="tool_id", how="left")
+            tbl = (j.groupby(grp)[["可用率A", "表現P", "良率Q", "OEE"]]
+                   .mean().round(1).reset_index().sort_values("OEE").reset_index(drop=True))
+            w = tbl.iloc[0]
+            msg = (f"OEE（依 {grp}）最低：{w[grp]}（OEE {w['OEE']}%；A {w['可用率A']}%、"
+                   f"P {w['表現P']}%、Q {w['良率Q']}%）。")
+            return self._capacity_result(msg, tbl, "OEE = 可用率 × 表現 × 良率（依群組平均）")
+        asks_which_tool = any(t in hay for t in (
+            "哪一台", "哪台", "哪一", "哪個機台", "which tool", "先處理", "處理哪", "優先處理"))
+        # fab-wide average (no per-tool drill asked)
+        if (not asks_which_tool) and any(
+                t in hay for t in ("全廠", "整廠", "全廠平均", "overall", "whole fab", "平均 oee", "平均oee")):
+            import pandas as _pd
+            avg = tbl[["可用率A", "表現P", "良率Q", "OEE"]].mean().round(1)
+            summ = _pd.DataFrame([{"範圍": "全廠平均", **avg.to_dict()}])
+            msg = (f"全廠平均 OEE：{avg['OEE']}%（A {avg['可用率A']}%、P {avg['表現P']}%、"
+                   f"Q {avg['良率Q']}%）。世界級標竿約 85%。")
+            return self._capacity_result(msg, summ, "OEE 全廠平均")
+        # threshold filter ("OEE 低於 60% 的機台")
+        m = _re.search(r"(低於|小於|below|under|<)\s*([0-9]+(?:\.[0-9]+)?)", hay)
+        if m and any(t in hay for t in ("oee",)):
+            thr = float(m.group(2))
+            sub = tbl[tbl["OEE"] < thr].reset_index(drop=True)
+            msg = (f"OEE 低於 {thr:g}% 的機台共 {len(sub)} 台"
+                   + (f"：{', '.join(sub['tool_id'])}。" if len(sub) else "（無）。"))
+            return self._capacity_result(msg, sub if len(sub) else tbl, "OEE 門檻篩選")
+        # factor focus: performance / quality / availability worst — but only when ONE
+        # factor is named. A question listing all three ("是A、P還是Q拖累？") wants the
+        # actual dragging factor, so fall through to the default worst-factor naming.
+        factor_words = sum(bool(any(t in hay for t in grp_words)) for grp_words in (
+            ("可用率", "availability"), ("表現", "performance"), ("良率", "quality", "品質")))
+        focus = None
+        if factor_words == 1 and any(t in hay for t in ("表現", "performance")) and \
+                any(t in hay for t in ("最差", "最低", "拖累", "worst")):
+            focus = ("表現P", "表現(P)")
+        elif factor_words == 1 and any(t in hay for t in ("良率", "quality", "品質")) and any(
+                t in hay for t in ("最差", "最低", "影響最大", "拖累", "worst")):
+            focus = ("良率Q", "良率(Q)")
+        elif factor_words == 1 and any(t in hay for t in ("可用率", "availability")) and any(
+                t in hay for t in ("最差", "最低", "拖累", "worst")):
+            focus = ("可用率A", "可用率(A)")
+        if focus:
+            col, label = focus
+            tbl = tbl.sort_values(col).reset_index(drop=True)
+            w = tbl.iloc[0]
+            msg = (f"{label} 最低：{w['tool_id']}（{col} {w[col]}%；OEE {w['OEE']}%）。"
+                   f"這是該機台 OEE 最該優先改善的環節。")
+            return self._capacity_result(msg, tbl, f"OEE 因子聚焦：{label}")
+        w = tbl.iloc[0]
+        # name the dragging factor for the worst tool
+        factors = {"可用率(A)": w["可用率A"], "表現(P)": w["表現P"], "良率(Q)": w["良率Q"]}
+        worst_factor = min(factors, key=factors.get)
+        msg = (f"OEE 最低：{w['tool_id']}（OEE {w['OEE']}%；A {w['可用率A']}%、"
+               f"P {w['表現P']}%、Q {w['良率Q']}%）。主要拖累：{worst_factor}。")
+        return self._capacity_result(msg, tbl, "OEE = 可用率 × 表現 × 良率")
+
+    def _capacity_result(self, msg: str, table, note: str) -> "NL2ProposalResult":
+        notes = [note + "（move fact × 產能參考對齊，跨表彙總）。"]
+        intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                          trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=msg, result_table=table,
                                  trust_notes=notes, risk_level="low")
 
     def _answer_spc(
@@ -4486,6 +4668,26 @@ def _detect_panel_analysis(prompt: str, normalized: str) -> str | None:
     if any(t in hay for t in _BASKET_TRIGGERS):
         return "basket"
     return None
+
+
+_CAPACITY_CUES: tuple[str, ...] = (
+    "利用率", "稼動率", "稼動", "使用率", "utilization", "util", "負載", "負載率",
+    "loading", "滿載", "餘裕", "headroom", "閒置", "產能", "capacity",
+    "達成率", "達標", "計畫 vs", "throughput", "每工時", "單位工時", "moves/hr",
+    "moves per", "產出率", "瓶頸機台", "瓶頸是哪", "瓶頸",
+    "可用率", "availability", "停機", "line balance", "線平衡", "產線平衡",
+)
+_OEE_CUES: tuple[str, ...] = ("oee", "設備總合效率", "設備綜合效率", "綜合效率", "總合效率")
+
+
+def _looks_like_capacity(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    return any(c in hay for c in _CAPACITY_CUES)
+
+
+def _looks_like_oee(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    return any(c in hay for c in _OEE_CUES)
 
 
 _SPC_CUES: tuple[str, ...] = (
