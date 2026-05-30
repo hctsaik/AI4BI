@@ -84,6 +84,9 @@ def _generate():
         priority = "Hot" if li % 7 == 0 else "Normal"
         start = d0 + _dt.timedelta(days=li * 3)
         on_hold = 1 if li % 9 == 4 else 0
+        # Two lots have a real yield excursion (~72%), both routed through ETCH-02
+        # — embeds a commonality signal (failing lots share a tool).
+        excursion = li in (4, 13)
         for wno in range(1, 6):
             wafer_id = f"W{lot_num}-{wno:02d}"
             cur = start
@@ -92,6 +95,8 @@ def _generate():
                 tools = _TOOLS[tg]
                 tool_id, vendor, rel, tyf = tools[(li + wno) % len(tools)]
                 if step_id == "ETCH":
+                    if excursion:  # force the excursion lots through ETCH-02
+                        tool_id, vendor, rel, tyf = _TOOLS["ETCH"][1]
                     etch_tool_used = tool_id
                 # queue time scales with the tool's reliability factor + noise
                 qt = round(bq * rel * rng.uniform(0.8, 1.3), 2)
@@ -126,6 +131,8 @@ def _generate():
             tyf = next(t[3] for t in _TOOLS["ETCH"] if t[0] == etch_tool_used)
             trend = 1.0 + (li / 200.0)  # slight improvement over time
             base = 0.985 * prod_yf * tyf * trend
+            if excursion:
+                base = 0.72  # contamination excursion
             base = min(base, 0.999)
             tested = 1000
             good = int(round(tested * base * rng.uniform(0.99, 1.005)))

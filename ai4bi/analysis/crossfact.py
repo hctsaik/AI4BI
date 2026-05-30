@@ -56,6 +56,43 @@ def correlate_facts(merged: pd.DataFrame, a_alias: str, b_alias: str) -> Optiona
     return {"r": round(r, 3), "n": int(len(pair)), "direction": direction, "strength": strength}
 
 
+def commonality(
+    detail_df: pd.DataFrame, entity_col: str, group_col: str, qualifying_groups: set,
+) -> pd.DataFrame:
+    """Round 117: which entity (tool) is common to a set of qualifying groups (lots)?
+
+    Classic fab commonality: given the set of failing lots, find tools that the
+    most of them passed through. Returns [entity_col, 涉及批數, 涵蓋率%] sorted
+    most-shared first. Empty when nothing qualifies.
+    """
+    if (detail_df is None or entity_col not in detail_df.columns
+            or group_col not in detail_df.columns or not qualifying_groups):
+        return pd.DataFrame()
+    qualifying = set(qualifying_groups)
+    sub = detail_df[detail_df[group_col].isin(qualifying)]
+    if sub.empty:
+        return pd.DataFrame()
+    n_fail = len(qualifying)
+    n_all = detail_df[group_col].nunique()
+    fail_counts = sub.groupby(entity_col)[group_col].nunique()
+    all_counts = detail_df.groupby(entity_col)[group_col].nunique()
+    rows = []
+    for ent, cnt in fail_counts.items():
+        base = all_counts.get(ent, cnt)
+        # lift = (share of failing lots through this tool) / (share of all lots)
+        lift = (cnt / n_fail) / (base / n_all) if base and n_all else 0.0
+        rows.append({
+            entity_col: ent,
+            "涉及批數": int(cnt),
+            "涵蓋率%": round(cnt / n_fail * 100, 1),
+            "lift": round(lift, 2),  # >1 = over-represented in failing lots
+        })
+    # rank by lift first (the distinguishing tool), then coverage
+    return (pd.DataFrame(rows)
+            .sort_values(["lift", "涉及批數"], ascending=[False, False])
+            .reset_index(drop=True))
+
+
 def cohort_by_quantile(
     merged: pd.DataFrame, bucket_col: str, outcome_col: str, q: int = 5,
 ) -> pd.DataFrame:

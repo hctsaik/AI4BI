@@ -549,6 +549,16 @@ class NL2ProposalService:
             if ranked is not None:
                 return ranked
 
+        if intent == "spc":  # Round 117
+            sp = self._answer_spc(prompt, normalized, report, contracts)
+            if sp is not None:
+                return sp
+
+        if intent == "commonality":  # Round 117
+            cm = self._answer_commonality(prompt, normalized, report, contracts)
+            if cm is not None:
+                return cm
+
         if intent == "crossfact":  # Round 116
             cf = self._answer_crossfact(prompt, normalized, report, contracts)
             if cf is not None:
@@ -651,6 +661,17 @@ class NL2ProposalService:
             ac = self._answer_analytics_chart(prompt, normalized, report, contracts)
             if ac is not None:
                 return ac
+
+        # Round 117: SPC control-limit outliers + commonality. Specific cues,
+        # checked early.
+        if _looks_like_commonality(prompt, normalized):
+            cm = self._answer_commonality(prompt, normalized, report, contracts)
+            if cm is not None:
+                return cm
+        if _looks_like_spc(prompt, normalized):
+            sp = self._answer_spc(prompt, normalized, report, contracts)
+            if sp is not None:
+                return sp
 
         # Round 116: cross-fact analytics (correlation/cohort/ratio across two
         # facts). Checked before ranking/seasonality so "最長...有關聯" and "前 20%
@@ -1653,6 +1674,130 @@ class NL2ProposalService:
             f"（分區 Top-N，pandas 後處理；治理查詢路徑）。",
             f"來源：{block_id}。",
         ]
+        intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                          trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=sentence, result_table=table,
+                                 trust_notes=notes, risk_level="low")
+
+    def _answer_spc(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 117: SPC control-limit outliers (μ ± kσ) of a measure by entity."""
+        if not contracts:
+            return None
+        from ai4bi.analysis.spc import control_limit_outliers
+        from ai4bi.blocks.contracts import BlockType
+        from ai4bi.blocks.datastore import materialize_dataframe
+        idx = SchemaIndex.build(contracts)
+        hay = f"{prompt.lower()} {normalized}"
+        km = re.search(r"(\d+(?:\.\d+)?)\s*(?:個|倍)?\s*(?:標準差|σ|sigma)", hay)
+        k = float(km.group(1)) if km else 3.0
+        for bid, c in contracts.items():
+            if getattr(c, "block_type", None) not in (
+                    BlockType.fact, BlockType.snapshot_fact, BlockType.target_fact):
+                continue
+            ent = _resolve_decomp_dimension(idx, prompt, normalized, contracts, bid)
+            val = _resolve_numeric_column(prompt, normalized, c)
+            if not ent or not val:
+                continue
+            try:
+                df = materialize_dataframe(c)
+            except Exception:  # noqa: BLE001
+                continue
+            table, limits = control_limit_outliers(df, ent, val, k=k)
+            if not limits:
+                continue
+            if table.empty:
+                msg = (f"沒有「{ent}」的「{val}」超出 μ±{k:g}σ"
+                       f"（μ={limits['mean']}, σ={limits['sigma']}）。")
+            else:
+                msg = (f"{len(table)} 個「{ent}」的「{val}」超出管制界限 "
+                       f"μ±{k:g}σ（μ={limits['mean']}, UCL={limits['ucl']}, LCL={limits['lcl']}）。")
+            notes = [f"SPC：依 {ent} 取平均後，以全體 μ±{k:g}σ 為管制界限。來源：{bid}。"]
+            intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                              trust_notes=notes, risk_level="low")
+            return NL2ProposalResult(intent=intent, message=msg,
+                                     result_table=table if not table.empty else None,
+                                     trust_notes=notes, risk_level="low")
+        return None
+
+    def _answer_commonality(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 117: commonality — which tool is shared by lots failing a yield cut."""
+        if not contracts:
+            return None
+        from ai4bi.analysis.crossfact import commonality
+        from ai4bi.blocks.contracts import BlockType
+        from ai4bi.blocks.datastore import materialize_dataframe
+        idx = SchemaIndex.build(contracts)
+        hay = f"{prompt.lower()} {normalized}"
+
+        # threshold metric (yield) + value, e.g. 良率 < 80
+        thr_m = re.search(r"(\d+(?:\.\d+)?)\s*%?", hay)
+        threshold = float(thr_m.group(1)) if thr_m else None
+        op = "lt" if any(t in hay for t in ("以下", "低於", "小於", "<", "below", "under", "掉到")) else "gt"
+
+        facts = {b: c for b, c in contracts.items()
+                 if getattr(c, "block_type", None) in (
+                     BlockType.fact, BlockType.snapshot_fact, BlockType.target_fact)}
+        # the fact holding the qualifying measure (yield) and the detail fact (moves)
+        measure_block = measure_col = group_key = None
+        for bid, c in facts.items():
+            col = _resolve_numeric_column(prompt, normalized, c)
+            if col and any(t in col.lower() for t in ("yield", "pct", "rate", "defect")):
+                measure_block, measure_col = bid, col
+                break
+        if measure_block is None or threshold is None:
+            return None
+        # shared group key (lot) and the detail fact + entity (tool)
+        detail_block = next((b for b in facts if b != measure_block), None)
+        if detail_block is None:
+            return None
+        shared = ({x.name for x in facts[measure_block].columns}
+                  & {x.name for x in facts[detail_block].columns})
+        # The yield measure is per-wafer, so commonality must group at the finest
+        # shared grain (wafer) — at lot grain every lot uses every tool and the
+        # signal washes out. Prefer wafer_id, else the prompt-mentioned key.
+        group_key = ("wafer_id" if "wafer_id" in shared
+                     else _pick_join_key(prompt, normalized, shared))
+        detail_cols = [c.name for c in facts[detail_block].columns]
+        # the shared *entity* is a tool/machine, NOT the group key (lot). Prefer a
+        # tool-like column; fall back to a categorical dim that isn't the key.
+        entity = _guess_col(detail_cols, ("tool", "機台", "設備", "equipment"))
+        if not entity or entity == group_key:
+            cand = _resolve_decomp_dimension(idx, prompt, normalized, contracts, detail_block)
+            entity = cand if cand and cand != group_key else entity
+        if not group_key or not entity or entity == group_key:
+            return None
+        try:
+            mdf = materialize_dataframe(facts[measure_block])
+            ddf = materialize_dataframe(facts[detail_block])
+        except Exception:  # noqa: BLE001
+            return None
+        grp = mdf.groupby(group_key)[measure_col].mean()
+        qualifying = set(grp[grp < threshold].index if op == "lt" else grp[grp > threshold].index)
+        if not qualifying:
+            msg = f"沒有 {measure_col} {'<' if op=='lt' else '>'} {threshold} 的 {group_key}。"
+            intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                              trust_notes=[msg], risk_level="low")
+            return NL2ProposalResult(intent=intent, message=msg, trust_notes=[msg], risk_level="low")
+        table = commonality(ddf, entity, group_key, qualifying)
+        if table is None or table.empty:
+            return None
+        top = table.iloc[0]
+        sentence = (f"{len(qualifying)} 個不良 {group_key} 中，最常共同經過的「{entity}」是 "
+                    f"{top[entity]}（{top['涉及批數']} 批，涵蓋率 {top['涵蓋率%']}%）。")
+        notes = [f"Commonality：先以 {measure_col} {'<' if op=='lt' else '>'} {threshold} 篩 {group_key}，"
+                 f"再於 {detail_block} 找共同 {entity}。"]
         intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                           trust_notes=notes, risk_level="low")
         return NL2ProposalResult(intent=intent, message=sentence, result_table=table,
@@ -3896,6 +4041,26 @@ def _detect_panel_analysis(prompt: str, normalized: str) -> str | None:
     if any(t in hay for t in _BASKET_TRIGGERS):
         return "basket"
     return None
+
+
+_SPC_CUES: tuple[str, ...] = (
+    "標準差", "σ", "sigma", "管制界限", "管制上限", "管制下限", "control limit",
+    "超出平均", "異常偏高", "異常偏低", "spc", "幾個標準差", "離群",
+)
+_COMMONALITY_CUES: tuple[str, ...] = (
+    "共同", "共通", "都走過", "共用", "共同經過", "commonality", "common tool",
+    "同一台", "共同的機台", "有沒有共同",
+)
+
+
+def _looks_like_spc(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    return any(c in hay for c in _SPC_CUES)
+
+
+def _looks_like_commonality(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    return any(c in hay for c in _COMMONALITY_CUES)
 
 
 _CROSSFACT_CUES: tuple[str, ...] = (
