@@ -22,6 +22,7 @@ from ai4bi.report.models import (
     ExecutableReportSpec,
     PublishedReportStore,
     ReportProposal,
+    ReportChange,
 )
 from ai4bi.blocks.registry import FilesystemBlockRegistry, BlockNotFoundError, NoCertifiedVersionError
 from ai4bi.report.proposals import build_page_delete_proposal, build_resize_visual_proposal, build_title_proposal, controls_to_proposal, pin_block_version_proposal, prompt_to_proposal, unpin_block_version_proposal
@@ -1730,7 +1731,42 @@ def _render_visual_field_well(component_id, visual, report, cache, contracts) ->
     # Power BI behaviour: the Fields/Visualizations well for the SELECTED visual is
     # open; others stay collapsed so the canvas isn't cluttered.
     _is_selected = st.session_state.get("selected_component_id") == component_id
-    with st.expander("✏️ 編輯這張圖（圖表類型 / 分組）", expanded=_is_selected):
+    with st.expander("✏️ 編輯這張圖（值 / 分組 / 圖表類型）", expanded=_is_selected):
+        # ── measure (值) swap — the primary field, like Power BI's Values well ──
+        if visual.query.metrics:
+            fact_block = visual.query.metrics[0].block_id
+            cur_metric = visual.query.metrics[0].metric_name
+            fc = (contracts or {}).get(fact_block)
+            metric_names = [m.name for m in getattr(fc, "metrics", []) or []]
+            if len(metric_names) >= 2 and cur_metric in metric_names:
+                picked_m = st.selectbox(
+                    "值（要看的數字）", metric_names,
+                    index=metric_names.index(cur_metric),
+                    key=f"fw_measure_{component_id}",
+                    help="換成另一個指標，例如從「營收」改成「數量」或「退貨率」。",
+                )
+                if picked_m != cur_metric:
+                    page_id = next((pid for pid, p in report.pages.items()
+                                    if component_id in p.visuals), None)
+                    if page_id is not None:
+                        before_m = [{"block_id": m.block_id, "metric_name": m.metric_name,
+                                     "alias": m.alias, "agg_override": (m.agg_override.value if m.agg_override else None)}
+                                    for m in visual.query.metrics]
+                        after_m = [{"block_id": fact_block, "metric_name": picked_m,
+                                    "alias": picked_m, "agg_override": None}]
+                        proposal = ReportProposal(
+                            description=f"值改為 {picked_m}",
+                            changes=[ReportChange(
+                                path=f"pages/{page_id}/visuals/{component_id}/query/metrics",
+                                label=f"值 → {picked_m}", before=before_m, after=after_m,
+                                affects_data=True)],
+                            target_component_id=component_id,
+                        )
+                        workspace.stage_proposal(proposal)
+                        workspace.accept_pending()
+                        cache.invalidate_all()
+                        st.rerun()
+
         # ── chart-type switch ──
         type_keys = list(_CHART_TYPE_LABELS.keys())
         cur_idx = type_keys.index(vtype) if vtype in type_keys else 0
