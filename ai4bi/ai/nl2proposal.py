@@ -1820,6 +1820,56 @@ class NL2ProposalService:
               "tool_group" if any(t in hay for t in ("機台群", "tool group", "群組")) else "tool_id")
         from ai4bi.analysis import capacity as _cap
         asc = any(t in hay for t in ("最低", "最少", "最差", "停機最多", "最閒", "lowest", "worst", "least"))
+        # Round 130: what-if simulation (uptime uplift / tool failure) — checked first
+        # since "稼動率…提升到 85%" / "故障" otherwise trip the availability branch.
+        wif = self._answer_capacity_whatif(prompt, normalized, hay, contracts)
+        if wif is not None:
+            return wif
+        # Round 130: overall single-number utilisation / attainment ("全廠整體利用率").
+        if any(t in hay for t in ("整體", "總體", "整廠", "全廠整體", "全廠的產能利用")) and \
+                not any(t in hay for t in ("各", "每", "依", "by ", "排名", "哪一", "哪台", "哪個", "哪區")):
+            from ai4bi.blocks.datastore import materialize_dataframe
+            mv = materialize_dataframe(contracts["fab_process_move"])
+            cp = materialize_dataframe(contracts["fab_tool_capacity"])
+            import pandas as _pd
+            act, capm = float(mv["move_count"].sum()), float(cp["capacity_moves"].sum())
+            plan = float(cp["planned_moves"].sum())
+            if "達成" in hay or "計畫" in hay or "計劃" in hay or "plan" in hay:
+                rate = round(act / plan * 100, 1) if plan else 0.0
+                summ = _pd.DataFrame([{"範圍": "全廠", "實際": round(act), "計畫": round(plan), "達成率%": rate}])
+                msg = f"全廠總體計畫達成率：{rate}%（實際 {round(act)} / 計畫 {round(plan)}）。"
+                return self._capacity_result(msg, summ, "全廠總體達成率")
+            util = round(act / capm * 100, 1) if capm else 0.0
+            summ = _pd.DataFrame([{"範圍": "全廠", "實際": round(act), "產能": round(capm),
+                                   "利用率%": util, "餘裕": round(capm - act)}])
+            msg = f"全廠總體產能利用率：{util}%（實際 {round(act)} / 產能 {round(capm)}，餘裕 {round(capm - act)}）。"
+            return self._capacity_result(msg, summ, "全廠總體利用率")
+        # Round 130: gap-to-target loading ("距滿載 90% 還差多少 move").
+        m_tgt = re.search(r"(?:滿載|目標|到|達|load)\D{0,4}(\d{2,3})\s*%", hay)
+        if m_tgt and any(t in hay for t in ("還差", "差多少", "缺口", "還能接", "還可接", "可再接", "可多接")):
+            target = float(m_tgt.group(1)) / 100
+            tbl = _cap.utilization(contracts, gk)
+            if tbl is not None and not tbl.empty:
+                tbl = tbl.copy()
+                tbl[f"距{int(target*100)}%缺口"] = (tbl["產能"] * target - tbl["實際"]).round(0)
+                tbl = tbl.sort_values(f"距{int(target*100)}%缺口", ascending=False).reset_index(drop=True)
+                gkcol = "tool_id" if gk == "tool_id" else gk
+                w = tbl.iloc[0]
+                msg = (f"距 {int(target*100)}% 滿載的可接單空間（依 {gk}）：最多 {w[gkcol]}"
+                       f"（還可接 {w[f'距{int(target*100)}%缺口']} moves，目前利用率 {w['利用率%']}%）。")
+                return self._capacity_result(msg, tbl, f"距 {int(target*100)}% 滿載缺口")
+        # Round 130: capacity shortfall / expansion ("產能缺口最大的區 / 擴產先加哪區").
+        if any(t in hay for t in ("缺口", "擴產", "加機台", "增購", "加產能", "該加", "投資哪", "瓶頸區")):
+            tbl = _cap.plan_attainment(contracts, gk if gk != "tool_id" else "area")
+            if tbl is not None and not tbl.empty:
+                tbl = tbl.copy()
+                tbl["缺口"] = (tbl["計畫"] - tbl["實際"]).round(0).clip(lower=0)
+                tbl = tbl.sort_values("缺口", ascending=False).reset_index(drop=True)
+                gcol = tbl.columns[0]
+                w = tbl.iloc[0]
+                msg = (f"產能缺口（計畫−實際，依 {gcol}）最大：{w[gcol]}（缺口 {w['缺口']} moves，"
+                       f"達成率 {w['達成率%']}%）→ 擴產應優先此處。")
+                return self._capacity_result(msg, tbl, "產能缺口（計畫−實際）")
         # availability (run ÷ available hours) lives on the capacity reference
         if any(t in hay for t in ("可用率", "availability", "停機", "稼動率")) and \
                 not any(t in hay for t in ("利用率", "loading", "負載", "餘裕", "達成", "throughput")):
@@ -1865,10 +1915,10 @@ class NL2ProposalService:
                 fam = next((f for f in fams if f and f.lower() in hay and len(f) >= 3), None)
                 if fam:
                     tbl = tbl[tbl[gkcol].str.startswith(fam + "-")].reset_index(drop=True)
-        # "瓶頸/constraint" = highest loading (least headroom), never headroom-sorted
-        is_bottleneck = any(t in hay for t in ("瓶頸", "constraint", "滿載", "最滿"))
+        # "瓶頸/拖累/constraint" = highest loading (least headroom), never headroom-sorted
+        is_bottleneck = any(t in hay for t in ("瓶頸", "constraint", "滿載", "最滿", "拖累", "卡整線", "拖垮"))
         is_headroom = (not is_bottleneck) and any(
-            t in hay for t in ("餘裕", "headroom", "閒置", "還能", "空間", "line balance", "落差", "平衡"))
+            t in hay for t in ("餘裕", "headroom", "閒置", "還能", "空間", "line balance", "落差"))
         if is_headroom:
             tbl = tbl.sort_values("餘裕", ascending=False).reset_index(drop=True)
             w = tbl.iloc[0]
@@ -1878,6 +1928,58 @@ class NL2ProposalService:
             label = "負載率" if any(t in hay for t in ("負載", "loading", "滿載")) else "利用率"
             msg = f"{label}（依 {gk}）：最高 {w.iloc[0]}（{w['利用率%']}%），最該關注的瓶頸/滿載點。"
         return self._capacity_result(msg, tbl, "產能利用率（實際÷產能）")
+
+    def _answer_capacity_whatif(self, prompt, normalized, hay, contracts) -> "NL2ProposalResult | None":
+        """Round 130: light capacity what-if — uptime uplift (X%→Y%) or tool failure.
+
+        Throughput per run-hour is fixed, so output scales with uptime; a failed tool
+        loses its actual moves. Reports the resulting capacity delta, scoped to the
+        tool/area named in the prompt. Returns None when no what-if pattern matches.
+        """
+        import re as _re
+        from ai4bi.blocks.datastore import materialize_dataframe
+        import pandas as _pd
+        cp = materialize_dataframe(contracts["fab_tool_capacity"])
+        mv = materialize_dataframe(contracts["fab_process_move"])
+        actual = mv.groupby("tool_id")["move_count"].sum()
+        # scope: a tool_id named in the prompt
+        tool = next((t for t in cp["tool_id"].astype(str) if t.lower() in hay), None)
+
+        is_fail = any(t in hay for t in ("故障", "當機", "壞掉", "失效", "掉機", "停機一",
+                                         "停擺", "下線")) and \
+            any(t in hay for t in ("產能", "產出", "掉多少", "少多少", "影響", "會掉", "損失"))
+        m_up = _re.search(r"(\d{1,3})\s*%.{0,12}?(?:提升到|提高到|拉到|升到|到|→|->|改善到)\s*(\d{1,3})\s*%", hay)
+        m_up1 = _re.search(r"(?:提升到|提高到|拉到|升到|改善到)\s*(\d{1,3})\s*%", hay)
+
+        if is_fail and tool is not None:
+            lost = float(actual.get(tool, 0))
+            total = float(actual.sum())
+            share = round(lost / total * 100, 1) if total else 0.0
+            tbl = _pd.DataFrame([{"情境": f"{tool} 故障停機", "損失 moves": round(lost),
+                                  "占全廠%": share, "剩餘產出": round(total - lost)}])
+            msg = (f"若 {tool} 故障停機，預估直接損失其產出 ~{round(lost)} moves"
+                   f"（占全廠 {share}%）。{tool} 是瓶頸，實務上整線產出可能等比下滑。")
+            return self._capacity_result(msg, tbl, "what-if：機台故障")
+
+        if (m_up or m_up1) and tool is not None:
+            row = cp[cp["tool_id"].astype(str) == tool].iloc[0]
+            u0 = float(row["uptime_pct"]) / 100
+            if m_up:
+                u0_in, u1 = float(m_up.group(1)) / 100, float(m_up.group(2)) / 100
+                u0 = u0_in or u0
+            else:
+                u1 = float(m_up1.group(1)) / 100
+            if u0 <= 0:
+                return None
+            act = float(actual.get(tool, 0))
+            extra = round(act * (u1 / u0 - 1))
+            tbl = _pd.DataFrame([{"情境": f"{tool} 稼動率 {int(u0*100)}%→{int(u1*100)}%",
+                                  "目前產出": round(act), "增量 moves": extra,
+                                  "新產出": round(act + extra)}])
+            msg = (f"{tool} 稼動率從 {int(u0*100)}% 提升到 {int(u1*100)}%，產出可由運轉工時等比增加"
+                   f"約 +{extra} moves（{round(act)} → {round(act+extra)}）。")
+            return self._capacity_result(msg, tbl, "what-if：稼動率提升")
+        return None
 
     def _answer_oee(
         self,
@@ -4882,6 +4984,7 @@ _CAPACITY_CUES: tuple[str, ...] = (
     "達成率", "達標", "計畫 vs", "throughput", "每工時", "單位工時", "moves/hr",
     "moves per", "產出率", "瓶頸機台", "瓶頸是哪", "瓶頸",
     "可用率", "availability", "停機", "line balance", "線平衡", "產線平衡",
+    "擴產", "加機台", "增購", "加產能", "缺口", "投資哪", "瓶頸區", "拖累",  # Round 130
 )
 _OEE_CUES: tuple[str, ...] = ("oee", "設備總合效率", "設備綜合效率", "綜合效率", "總合效率")
 

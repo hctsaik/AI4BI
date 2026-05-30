@@ -217,3 +217,50 @@ def test_D_same_fact_cohort(env):
     r = _ask(env, "cycle time 最久的前 20% 批號的良率掉多少？")
     assert r.result_table is not None
     assert any("平均" in c for c in r.result_table.columns)  # cohort outcome column
+
+
+# --- Round E: capacity planning / what-if (R130) -------------------------
+def test_E1_capacity_shortfall(env):
+    r = _ask(env, "要達成計畫，哪一區的產能缺口最大？")
+    assert r.result_table is not None and "缺口" in r.result_table.columns
+    assert r.result_table.iloc[0]["area"] == "THINFILM"  # biggest plan shortfall
+
+
+def test_E2_expansion_routes(env):
+    r = _ask(env, "如果要擴產，最該先加哪一區的機台？")
+    assert r.result_table is not None and "缺口" in r.result_table.columns
+
+
+def test_E3_whatif_uptime_uplift(env):
+    r = _ask(env, "ETCH-02 的稼動率若從 70% 提升到 85%，產能可多多少？")
+    assert r.result_table is not None and "增量 moves" in r.result_table.columns
+    assert r.result_table.iloc[0]["增量 moves"] > 0
+
+
+def test_E5_line_balance_bottleneck(env):
+    r = _ask(env, "各區的產能是否平衡？哪一區拖累整線？")
+    assert r.result_table is not None
+    assert r.result_table.iloc[0]["area"] == "ETCH"  # 拖累 = highest util, not headroom
+
+
+def test_E7_whatif_tool_failure(env):
+    r = _ask(env, "若 ETCH-02 故障，產能會掉多少？")
+    assert r.result_table is not None and "損失 moves" in r.result_table.columns
+
+
+def test_E8_gap_to_target_loading(env):
+    r = _ask(env, "各機台距離滿載（90%）還差多少 move？")
+    assert r.result_table is not None
+    assert any("90%" in c for c in r.result_table.columns)  # gap-to-target column
+
+
+def test_E9_overall_utilization(env):
+    r = _ask(env, "全廠整體產能利用率是多少？")
+    assert r.result_table is not None and len(r.result_table) == 1
+    assert r.result_table.iloc[0]["範圍"] == "全廠"
+
+
+def test_E10_overall_plan_attainment(env):
+    r = _ask(env, "計畫 vs 實際的總體達成率？")
+    assert r.result_table is not None and "達成率%" in r.result_table.columns
+    assert len(r.result_table) == 1
