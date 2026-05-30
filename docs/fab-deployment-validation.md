@@ -176,4 +176,17 @@
 - 新增 `tests/test_subgroup_and_threshold.py`（5）+ `test_followup_scope.py`。非 e2e **1029 passed**。
 - 下一步：fresh set #3 multi-agent 重打分驗證是否達 ≥95。
 
+---
+
+## 第 3 輪 — 又一組全新 10 情境（`_probe_deploy3.py`，含「誠實限制」測試）
+新角度：多條件篩選、cross-tab、趨勢方向、優先別子群、缺陷 commonality、breakdown 母體、良率 excursion，及兩題**該誠實說做不到**的題（wafer X-Y map、wafer 逐站 genealogy join）。自評 baseline ≈ **47**（silent-wrong 更嚴重：對做不到的需求硬抓最近指標亂回）。
+
+**Round 138**（test+commit+push）— 反 silent-wrong / 誠實化：
+- **T9/T10 誠實限制**：`_honest_limitation` — 偵測需要未具備能力的需求（wafer X-Y map、逐站 genealogy 明細 join），**誠實婉拒並說明可改用什麼**（Pareto/commonality），不再硬抓最近指標亂回。
+- **T8 良率 excursion**：`_answer_excursion` — 以 lot 平均 yield 低於 μ−2σ 找異常下掉批。實測抓到 demo 內建的 LOT-1014、LOT-1005（~72% excursion）。
+- **T4 趨勢方向**：`_answer_trend_direction` — 指標週彙總取線性斜率，回「變好/變差/大致持平」（near-flat 守門避免硬講方向）。
+- **T3 模糊澄清**：「提升產量」加入 `_AMBIGUOUS_TERMS`（瓶頸/餘裕/OEE/WIP 四選一）。
+- 新增 `tests/test_honest_limits_and_trend.py`（4）。非 e2e **1033 passed**。
+- 仍待（Round 139）：T1 多條件篩選（部分是 area 不在 yield fact 的資料限制）、T2 cross-tab、T6 缺陷 commonality 路由、T7 breakdown 母體。
+
 

@@ -678,6 +678,15 @@ class NL2ProposalService:
             if fu is not None:
                 return fu
 
+        # Round 138: honest limitation — if the ask needs a capability we don't
+        # have (wafer X-Y map, genealogy detail join), decline honestly and say
+        # what IS possible, instead of grabbing the nearest metric (silent-wrong).
+        limit_msg = _honest_limitation(prompt, normalized)
+        if limit_msg is not None:
+            return self._unsupported(
+                limit_msg, target_scope=_target_scope(selected_component_id),
+                disambiguation=limit_msg)
+
         if _detect_panel_analysis(prompt, normalized) is not None:
             panel = self._run_panel_analysis(prompt, normalized, contracts)
             if panel is not None:
@@ -741,6 +750,18 @@ class NL2ProposalService:
             sg = self._answer_subgroup_compare(prompt, normalized, report, contracts)
             if sg is not None:
                 return sg
+
+        # Round 138: yield excursion ("良率突然掉下來") + metric trend direction
+        # ("良率這幾週變好還變差"). Before metric question so they aren't answered
+        # with an overall single number (silent-wrong).
+        if _looks_like_excursion(prompt, normalized):
+            exc = self._answer_excursion(prompt, normalized, report, contracts)
+            if exc is not None:
+                return exc
+        if _looks_like_trend_direction(prompt, normalized):
+            td = self._answer_trend_direction(prompt, normalized, report, contracts)
+            if td is not None:
+                return td
 
         # Round 116: cross-fact analytics (correlation/cohort/ratio across two
         # facts). Checked before ranking/seasonality so "最長...有關聯" and "前 20%
@@ -3173,6 +3194,116 @@ class NL2ProposalService:
         return NL2ProposalResult(intent=intent, message=msg, result_table=out,
                                  trust_notes=notes, risk_level="low")
 
+    def _answer_trend_direction(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 138: is a metric trending better or worse over recent weeks?
+        Computes the metric by week and reports direction (slope + recent vs early)."""
+        executor = getattr(self, "_executor", None)
+        if executor is None or not contracts:
+            return None
+        idx = SchemaIndex.build(contracts)
+        match = idx.best_metric_match(prompt, normalized)
+        if match is None:
+            return None
+        block_id, metric_name, alias = match.block_id, match.metric_name, match.alias
+        date_col = _find_date_column(contracts, block_id)
+        if date_col is None:
+            return None
+        from ai4bi.query_spec import (
+            BlockRef, DimensionRef, SortDirection, SortSpec, VisualQuerySpec)
+        spec = VisualQuerySpec(
+            spec_id=f"trend_{metric_name}", block_refs=[BlockRef(block_id)],
+            metrics=[MetricRef(block_id, metric_name, alias)],
+            dimensions=[DimensionRef(block_id, date_col, date_col, truncate_date_to="week")],
+            sort=[SortSpec(date_col, SortDirection.asc)], inherit_global_filter=False)
+        try:
+            df = executor.run(spec)
+        except Exception:  # noqa: BLE001
+            return None
+        if df is None or len(df) < 3 or alias not in df.columns:
+            return None
+        import numpy as _np
+        ys = df[alias].astype(float).to_numpy()
+        xs = _np.arange(len(ys))
+        slope = float(_np.polyfit(xs, ys, 1)[0]) if len(ys) >= 2 else 0.0
+        first, last = float(ys[0]), float(ys[-1])
+        higher_better = "yield" in metric_name.lower() or "良" in alias
+        # "near-flat" guard: slope tiny relative to the metric level → say flat,
+        # so we don't claim a direction the endpoints visibly contradict.
+        scale = float(_np.nanmean(_np.abs(ys))) or 1.0
+        rising = slope > 0
+        if abs(slope) < 0.01 * scale:
+            direction = "大致持平（無明顯趨勢）"
+        elif (rising and higher_better) or (not rising and not higher_better):
+            direction = "變好（往好的方向）"
+        else:
+            direction = "變差（往不好的方向）"
+        msg = (f"「{alias}」近 {len(df)} 週趨勢：{direction}。期初 {round(first,2)} → 期末 "
+               f"{round(last,2)}，整體每週斜率 {round(slope,3)}。")
+        notes = [f"以 {date_col} 週彙總 {alias} 後取線性斜率與期初/期末對比，來源：{block_id}。"]
+        self._remember(block_id=block_id, metric_name=metric_name, alias=alias,
+                       dim_col=None, kind="trend")
+        intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                          trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=msg, result_table=df,
+                                 trust_notes=notes, risk_level="low")
+
+    def _answer_excursion(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 138: yield excursion — lots/wafers whose yield dropped abnormally
+        low (below μ−kσ). Answers "有沒有哪幾批良率突然掉下來" instead of an overall."""
+        if not contracts:
+            return None
+        from ai4bi.analysis.spc import control_limit_outliers
+        from ai4bi.blocks.contracts import BlockType
+        from ai4bi.blocks.datastore import materialize_dataframe
+        # find the yield fact + its yield column + a lot/wafer key
+        for bid, c in contracts.items():
+            if getattr(c, "block_type", None) not in (
+                    BlockType.fact, BlockType.snapshot_fact, BlockType.target_fact):
+                continue
+            cols = {x.name for x in getattr(c, "columns", [])}
+            yld = next((x for x in cols if x.lower() in ("yield_pct", "yield")), None)
+            key = "lot_id" if "lot_id" in cols else ("wafer_id" if "wafer_id" in cols else None)
+            if not yld or not key:
+                continue
+            try:
+                df = materialize_dataframe(c)
+            except Exception:  # noqa: BLE001
+                continue
+            table, limits = control_limit_outliers(df, key, yld, k=2.0)
+            if not limits:
+                continue
+            low = table[table[yld] < limits["mean"]].reset_index(drop=True) \
+                if not table.empty and yld in table.columns else table
+            if low is None or low.empty:
+                msg = (f"沒有 {key} 的平均 {yld} 低於 μ−2σ"
+                       f"（μ={limits['mean']}, LCL={limits['lcl']}）→ 無明顯良率異常下掉。")
+                notes = [f"良率 excursion：以 {key} 平均 {yld}，低於 μ−2σ 視為異常下掉。來源：{bid}。"]
+                intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                                  trust_notes=notes, risk_level="low")
+                return NL2ProposalResult(intent=intent, message=msg, trust_notes=notes,
+                                         risk_level="low")
+            names = "、".join(str(x) for x in low[key].head(5).tolist())
+            msg = (f"{len(low)} 個 {key} 良率異常下掉（低於 μ−2σ，μ={limits['mean']}, "
+                   f"LCL={limits['lcl']}）：{names}。")
+            notes = [f"良率 excursion：以 {key} 平均 {yld}，低於 μ−2σ 為異常。來源：{bid}。"]
+            intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                              trust_notes=notes, risk_level="low")
+            return NL2ProposalResult(intent=intent, message=msg, result_table=low,
+                                     trust_notes=notes, risk_level="low")
+        return None
+
     def _answer_ranking(
         self,
         prompt: str,
@@ -4821,6 +4952,33 @@ def _normalize(prompt: str) -> str:
     return " ".join(prompt.strip().lower().split())
 
 
+# Round 138: requests that need a capability this tool genuinely does NOT have.
+# Returning the nearest metric here is the worst silent-wrong, so we decline
+# honestly and say what IS possible. Keep cues specific to avoid over-declining.
+_UNSUPPORTED_CAPABILITIES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("x-y", "x﹣y", "xy 座標", "座標", "晶圓圖", "wafer map", "晶粒圖", "缺陷分佈圖",
+      "缺陷分布圖", "bin map", "晶圓地圖"),
+     "目前沒有 wafer 級的 X-Y 晶粒座標 / wafer map 資料，無法畫缺陷空間分佈圖。"
+     "現有資料是 lot/wafer 級的良率與缺陷『數量』，我可以給：各機台/各產品的缺陷數 Pareto、"
+     "良率 commonality、或缺陷類型佔比與趨勢。"),
+    (("逐站列出", "每一站", "每一台機台逐站", "完整路徑", "genealogy", "族譜", "逐站",
+      "走過的每一台", "每一台都列"),
+     "目前引擎是單一 fact 查詢，無法做 wafer 逐站 genealogy 的 fact-to-fact 明細串接"
+     "（治理上禁止會扇出的明細 join）。但我可以用 commonality 分析：給定不良批，"
+     "找出它們最常共同經過、且統計顯著（Fisher 檢定）的機台。"),
+)
+
+
+def _honest_limitation(prompt: str, normalized: str) -> str | None:
+    """Return an honest 'can't do that, but here's what I can' message when the
+    request needs an unsupported capability (wafer map / genealogy detail join)."""
+    hay = f"{prompt.lower()} {normalized}"
+    for cues, message in _UNSUPPORTED_CAPABILITIES:
+        if any(c in hay for c in cues):
+            return message
+    return None
+
+
 # Round 135: vague evaluative terms that could map to several governed analyses.
 # When such a term is the gist of an otherwise-unroutable prompt, return a
 # clarifying question instead of a silent wrong guess (the product-lens #1 risk).
@@ -4828,6 +4986,10 @@ _AMBIGUOUS_TERMS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("效率", "efficiency", "效能"),
      "「效率」可以指好幾種分析，您想看哪一個？(1) 設備 OEE　(2) 產能利用率/loading　"
      "(3) 瓶頸或 cycle time　(4) 產出率 moves/hr。請指定其一，我就能給可信的數字。"),
+    (("提升產量", "增加產量", "提高產量", "拉高產量", "增加產出", "提升產能",
+      "怎麼提升", "如何提升", "怎麼改善", "如何增加產"),
+     "要提升產量，先看哪個切入點？(1) 找瓶頸站（依佇列時間/利用率）　(2) 產能餘裕/距滿載缺口　"
+     "(3) OEE 損失拆解（可用率/表現/良率哪個拖累）　(4) WIP↔cycle time。選一個我就能定位。"),
     (("表現", "績效", "performance", "怎麼樣", "怎樣", "如何", "好不好", "狀況"),
      "想了解「表現」的哪個面向？可選：良率、queue time、OEE、產能利用率、瓶頸、缺陷率。"
      "指定指標（與要看的維度，如各機台/各區/各週）我就能分析。"),
@@ -5481,6 +5643,26 @@ def _looks_like_subgroup_compare(prompt: str, normalized: str) -> bool:
     has_measure = any(k in hay for kws, _ in _SUBGROUP_MEASURES for k in kws)
     has_cmp = any(c in hay for c in _SUBGROUP_CMP_CUES)
     return has_flag and has_measure and has_cmp
+
+
+# Round 138: metric trend DIRECTION over time ("良率這幾週是變好還是變差").
+_TREND_DIR_CUES = ("變好", "變差", "變高", "變低", "變壞", "上升", "下降", "走高",
+                   "走低", "趨勢", "走勢", "往上", "往下", "是不是越來越", "越來越")
+_TREND_TIME_CUES = ("這幾週", "這幾周", "近幾週", "近幾周", "逐週", "逐周", "每週",
+                    "每周", "最近", "這陣子", "這幾個月", "逐月", "近期")
+# Round 138: excursion — "良率突然掉下來 / 暴跌 / 異常下降".
+_EXCURSION_CUES = ("突然掉", "掉下來", "掉到", "暴跌", "驟降", "異常下降", "突然變差",
+                   "突然變低", "掉了", "excursion", "突然下滑", "急遽下降", "崩")
+
+
+def _looks_like_trend_direction(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    return any(d in hay for d in _TREND_DIR_CUES) and any(t in hay for t in _TREND_TIME_CUES)
+
+
+def _looks_like_excursion(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    return any(c in hay for c in _EXCURSION_CUES)
 
 
 def _is_pk_like(col: str) -> bool:
