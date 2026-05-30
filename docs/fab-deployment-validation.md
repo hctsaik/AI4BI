@@ -206,4 +206,12 @@
 - 新增 `tests/test_topn_commonality_significance.py`（2）。非 e2e **1037 passed**。
 - 下一步：set #3 重打分 + fresh set #4，續到 ≥95。
 
+## 第 3 輪 — Round 140 後重打分 ＝ 89.6（A 良率 88 / B IE 87.3 / C 產品 93.5）
+T6 從 ~44 升到 ~91（真 commonality + 誠實顯著性）。剩餘扣分集中在 IE/良率 lens：描述型答案缺母體 N（T2/T7）、T8 非時序。
+
+**Round 141**（test+commit+push）— 攻系統性扣分：
+- **T8 時序化**：excursion 對齊 date_col，回報異常**發生的週**＋各批「首次異常日」欄。實測：LOT-1014/LOT-1005「發生時間集中在 2026-03-23、2026-04-13 週」。
+- **T2 cross-tab**：同時報最高＋最低 cell ＋母體 N。實測：最高 Day×ETCH=5.37、最低 Day×CMP=1.25（母體 600 列）。
+- 非 e2e **1039 passed**。下一步：set #3 重打分 + fresh set #4 驗證 ≥95。
+
 

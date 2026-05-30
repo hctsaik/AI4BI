@@ -2832,18 +2832,26 @@ class NL2ProposalService:
             pivot = pivot.reset_index()
         except Exception:  # noqa: BLE001
             return None
-        # headline the worst (lowest) cell — the tool×product combo to watch
-        worst_txt = ""
+        # headline BOTH extremes — the combos to watch — plus the population N.
+        extremes_txt = ""
         try:
-            import numpy as np
             numcols = [c for c in pivot.columns if c != d1]
             stacked = pivot.set_index(d1)[numcols].stack()
             if not stacked.empty:
-                (ri, ci), mv = stacked.idxmin(), stacked.min()
-                worst_txt = f"最低：{ri} × {ci} = {round(float(mv), 2)}。"
+                (lri, lci), lmv = stacked.idxmin(), stacked.min()
+                (hri, hci), hmv = stacked.idxmax(), stacked.max()
+                extremes_txt = (f"最高：{hri} × {hci} = {round(float(hmv),2)}；"
+                                f"最低：{lri} × {lci} = {round(float(lmv),2)}。")
         except Exception:  # noqa: BLE001
             pass
-        sentence = f"「{alias}」交叉表：{d1}（列）× {d2}（欄）。{worst_txt}"
+        n_rows = None
+        try:
+            from ai4bi.blocks.datastore import materialize_dataframe
+            n_rows = len(materialize_dataframe(contracts[block_id]))
+        except Exception:  # noqa: BLE001
+            n_rows = None
+        pop = f"（母體 {n_rows} 列 @ {block_id}）" if n_rows else ""
+        sentence = f"「{alias}」交叉表：{d1}（列）× {d2}（欄）。{extremes_txt}{pop}"
         notes = [f"依「{d1}」×「{d2}」交叉彙總「{alias}」（治理查詢路徑），來源：{block_id}。"]
         intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                           trust_notes=notes, risk_level="low")
@@ -3438,10 +3446,28 @@ class NL2ProposalService:
                 return NL2ProposalResult(intent=intent, message=msg, trust_notes=notes,
                                          risk_level="low")
             names = "、".join(str(x) for x in low[key].head(5).tolist())
+            # Round 141: make it time-aware — say WHEN the flagged lots dropped, so
+            # "突然掉" gets an actual timing instead of a "this isn't temporal" caveat.
+            date_col = _find_date_column(contracts, bid)
+            timing = ""
+            if date_col and date_col in df.columns:
+                try:
+                    import pandas as _pd
+                    flagged_keys = set(low[key].tolist())
+                    sub = df[df[key].isin(flagged_keys)].copy()
+                    sub["_wk"] = _pd.to_datetime(sub[date_col], errors="coerce").dt.to_period("W").astype(str)
+                    wk = sub.dropna(subset=["_wk"]).groupby("_wk").size().sort_values(ascending=False)
+                    if not wk.empty:
+                        weeks = "、".join(wk.index[:2])
+                        low = low.merge(
+                            sub.groupby(key)[date_col].min().rename("首次異常日"),
+                            left_on=key, right_index=True, how="left")
+                        timing = f" 發生時間集中在 {weeks}（已附首次異常日）。"
+                except Exception:  # noqa: BLE001
+                    timing = ""
             msg = (f"{len(low)} 個 {key} 良率異常下掉（低於 μ−2σ，μ={limits['mean']}, "
-                   f"LCL={limits['lcl']}）：{names}。註：此為跨批分布離群判定，"
-                   f"非時序突變偵測；要看「何時」掉需逐週/逐日序列。")
-            notes = [f"良率 excursion：以 {key} 平均 {yld}，低於 μ−2σ 為異常。來源：{bid}。"]
+                   f"LCL={limits['lcl']}）：{names}。{timing}")
+            notes = [f"良率 excursion：以 {key} 平均 {yld} 低於 μ−2σ 為異常，並對齊 {date_col} 標示發生週。來源：{bid}。"]
             intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                               trust_notes=notes, risk_level="low")
             return NL2ProposalResult(intent=intent, message=msg, result_table=low,
