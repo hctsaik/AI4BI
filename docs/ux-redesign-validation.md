@@ -48,5 +48,13 @@
 **Round 152 計算指標深度**：guided authoring（點欄位/函式按鈕插入公式 + 清空）、lineage（「🔗 依賴欄位／指標」即時顯示）、顯示格式 preset（數字/百分比/金額/千/萬/次數→unit）。S7 友善度大升。
 **Round 153 右側 Visualizations pane**：主畫布改「畫布(左) + 🎨視覺化 pane(右)」；pane 讀 selected_component_id，內嵌 field-well（值/分組/圖表類型）編輯選取的視覺；per-visual 重複面板移除避免 key 衝突；唯讀分享維持全寬。實測選取後 pane 出現 fw_measure/fw_type/fw_dim，0 例外。
 
-非 e2e **1044 passed**，全部 commit+push。**#1 原生拖放屬 Streamlit 結構限制**（見下方分析），需自訂前端元件，待使用者決定是否引入。
+非 e2e **1044 passed**，全部 commit+push。
+
+## 第 5 輪 — #1 原生拖放：自訂 React/TS 元件（最高擬真度）
+使用者選擇最高擬真度路線。**Round 154**：以 Streamlit Components API 做真正的雙向自訂元件（React 18 + TS + Vite）。
+- `ai4bi/ui/components/field_well/`：`frontend/`（React/TS 原始碼 + Vite build，dist 已 commit 以免每台都要 build；node_modules gitignore）、`__init__.py`（`declare_component` 包裝 + `is_available()` graceful fallback）、README（重建步驟）。
+- `FieldWell.tsx`：HTML5 drag-drop 把欄位 chip 在 **可用欄位 / 值 / 軸 / 圖例** 之間拖放、圖表類型按鈕、即時「👁 預覽」列、theme-aware；用 `Streamlit.setComponentValue` 回傳指派。
+- 視覺化 pane 以拖放元件為主、下拉 field-well 為 fallback；`_apply_field_well_result` 把回傳 wells 轉成治理的 metrics+dimensions+visual_type patch（nonce 去重、需至少一個 measure、pivot 需 2 維）。
+- **真實瀏覽器（Playwright）驗證**：選取視覺後 component iframe 內出現 11 個可拖曳 chip、值(Values) well、即時預覽；real server boot HTTP 200。新增 `tests/test_field_well_apply.py`（2）鎖住 server 端套用 round-trip。非 e2e **1046 passed**。
+- 四條路線全數落地：sortables（未走）/ elements（未走）/ **自訂 React 元件（已做）**。原本標為「Streamlit 結構天花板」的原生拖放已突破。
 
