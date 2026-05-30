@@ -84,6 +84,8 @@ def _generate():
         priority = "Hot" if li % 7 == 0 else "Normal"
         start = d0 + _dt.timedelta(days=li * 3)
         on_hold = 1 if li % 9 == 4 else 0
+        hold_reason = rng.choice(["等待工程確認", "設備異常", "缺料", "待品質判定"]) if on_hold else ""
+        hold_age = round(rng.uniform(8, 96), 1) if on_hold else 0.0  # Round 122: hold aging hr
         # Two lots have a real yield excursion (~72%), both routed through ETCH-02
         # — embeds a commonality signal (failing lots share a tool).
         excursion = li in (4, 13)
@@ -91,6 +93,7 @@ def _generate():
             wafer_id = f"W{lot_num}-{wno:02d}"
             cur = start
             etch_tool_used = None
+            wafer_had_rework = 0  # Round 122: track for first-pass yield
             for (step_id, step_name, seq, tg, bq, bp) in _STEPS:
                 tools = _TOOLS[tg]
                 tool_id, vendor, rel, tyf = tools[(li + wno) % len(tools)]
@@ -102,6 +105,8 @@ def _generate():
                 qt = round(bq * rel * rng.uniform(0.8, 1.3), 2)
                 pt = round(bp * rng.uniform(0.9, 1.1), 1)
                 rework = 1 if (step_id == "IMPLANT" and rng.random() < 0.12) else 0
+                if rework:
+                    wafer_had_rework = 1
                 cur = cur + _dt.timedelta(days=rng.choice([1, 1, 2]))
                 mid += 1
                 moves.append({
@@ -125,9 +130,12 @@ def _generate():
                     "move_count": 1,
                     "rework_flag": rework,
                     "hold_flag": on_hold if step_id == "IMPLANT" else 0,
+                    "hold_age_hr": hold_age if (on_hold and step_id == "IMPLANT") else 0.0,
+                    "hold_reason": hold_reason if (on_hold and step_id == "IMPLANT") else "",
                 })
             # final yield per wafer — driven by product, the ETCH tool used, time trend
             test_date = cur + _dt.timedelta(days=2)
+            cycle_time_hr = round((test_date - start).days * 24 + rng.uniform(-12, 12), 1)
             tyf = next(t[3] for t in _TOOLS["ETCH"] if t[0] == etch_tool_used)
             trend = 1.0 + (li / 200.0)  # slight improvement over time
             base = 0.985 * prod_yf * tyf * trend
@@ -145,8 +153,11 @@ def _generate():
                 "week": test_date.isocalendar()[1],
                 "lot_id": lot_id,
                 "product_family": prod,
+                "priority": priority,
                 "wafer_id": wafer_id,
                 "etch_tool_id": etch_tool_used,
+                "cycle_time_hr": cycle_time_hr,
+                "had_rework": wafer_had_rework,
                 "tested_die": tested,
                 "good_die": good,
                 "defect_die": defect,
@@ -188,6 +199,8 @@ def build_process_move_block() -> DataBlockContract:
             ColumnSchema(name="move_count", data_type="integer"),
             ColumnSchema(name="rework_flag", data_type="integer"),
             ColumnSchema(name="hold_flag", data_type="integer"),
+            ColumnSchema(name="hold_age_hr", data_type="float"),
+            ColumnSchema(name="hold_reason", data_type="string"),
         ],
         metrics=[
             MetricDefinition(name="move_count", formula="SUM(move_count)",
@@ -203,6 +216,12 @@ def build_process_move_block() -> DataBlockContract:
                              disaggregation_method=DisaggregationMethod.none, description="重工次數"),
             MetricDefinition(name="hold_count", formula="SUM(hold_flag)",
                              disaggregation_method=DisaggregationMethod.none, description="保留(hold)次數"),
+            MetricDefinition(name="avg_hold_age_hr", formula="AVG(hold_age_hr)",
+                             disaggregation_method=DisaggregationMethod.none, unit="hr",
+                             description="平均保留(hold)時間"),
+            MetricDefinition(name="max_hold_age_hr", formula="MAX(hold_age_hr)",
+                             disaggregation_method=DisaggregationMethod.none, unit="hr",
+                             description="最長保留(hold)時間"),
             MetricDefinition(name="rework_rate", formula="SUM(rework_flag) / NULLIF(SUM(move_count),0) * 100",
                              disaggregation_method=DisaggregationMethod.none, unit="%",
                              description="重工率（重工÷移動）"),
@@ -233,8 +252,11 @@ def build_wafer_yield_block() -> DataBlockContract:
             ColumnSchema(name="week", data_type="integer"),
             ColumnSchema(name="lot_id", data_type="string"),
             ColumnSchema(name="product_family", data_type="string"),
+            ColumnSchema(name="priority", data_type="string"),
             ColumnSchema(name="wafer_id", data_type="string"),
             ColumnSchema(name="etch_tool_id", data_type="string"),
+            ColumnSchema(name="cycle_time_hr", data_type="float"),
+            ColumnSchema(name="had_rework", data_type="integer"),
             ColumnSchema(name="tested_die", data_type="integer"),
             ColumnSchema(name="good_die", data_type="integer"),
             ColumnSchema(name="defect_die", data_type="integer"),
@@ -262,6 +284,9 @@ def build_wafer_yield_block() -> DataBlockContract:
                              disaggregation_method=DisaggregationMethod.sum, description="失敗晶圓數"),
             MetricDefinition(name="tested_wafers", formula="COUNT(DISTINCT wafer_id)",
                              disaggregation_method=DisaggregationMethod.none, description="受測晶圓數"),
+            MetricDefinition(name="avg_cycle_time_hr", formula="AVG(cycle_time_hr)",
+                             disaggregation_method=DisaggregationMethod.none, unit="hr",
+                             description="平均生產週期時間"),
         ],
         data_source=InlineDataSource(records=yields),
         policy=PolicySpec(data_classification=DataClassification.internal),

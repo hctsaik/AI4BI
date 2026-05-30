@@ -1608,21 +1608,24 @@ class NL2ProposalService:
             return None
 
         idx = SchemaIndex.build(contracts)
-        entity_col, block_id = _resolve_entity_dimension(idx, prompt, normalized, contracts)
+        # Round 122: resolve the metric FIRST, then the entity on the SAME block —
+        # 'cycle time > 200 的 lot' has cycle on the yield fact but lot_id on both,
+        # so entity-first would mis-bind lot to the move fact and drop the metric.
+        metric_match = idx.best_metric_match(prompt, normalized)
+        if metric_match is not None:
+            block_id = metric_match.block_id
+            metric_name, alias = metric_match.metric_name, metric_match.alias
+            entity_col = _entity_col_on_block(idx, prompt, normalized, contracts, block_id)
+        else:
+            entity_col, block_id = _resolve_entity_dimension(idx, prompt, normalized, contracts)
+            if block_id is None:
+                return None
+            dm = _default_count_metric(contracts, block_id)
+            if dm is None:
+                return None
+            metric_name, alias = dm
         if entity_col is None or block_id is None:
             return None
-
-        # Resolve the count/measure metric on this block: an explicit metric word
-        # wins; otherwise a count-like metric (購買次數 / orders) is the default.
-        metric_match = idx.best_metric_match(prompt, normalized)
-        metric = None
-        if metric_match is not None and metric_match.block_id == block_id:
-            metric = (metric_match.metric_name, metric_match.alias)
-        if metric is None:
-            metric = _default_count_metric(contracts, block_id)
-        if metric is None:
-            return None
-        metric_name, alias = metric
 
         from ai4bi.query_spec import (
             BlockRef, DimensionRef, HavingSpec, SortDirection, SortSpec, VisualQuerySpec,
@@ -4188,6 +4191,11 @@ def _looks_like_segment_count(prompt: str, normalized: str) -> bool:
     # An entity to group by + a comparison + a number is enough — the threshold
     # may be on a count (買超過 3 次) OR any measure (queue > 5 小時的 lot).
     return any(h in hay for h in _ENTITY_CUE_HINTS)
+
+
+def _entity_col_on_block(idx, prompt: str, normalized: str, contracts, block_id: str) -> str | None:
+    """Resolve the categorical entity dimension on a specific block (Round 122)."""
+    return _resolve_decomp_dimension(idx, prompt, normalized, contracts, block_id)
 
 
 def _resolve_entity_dimension(idx, prompt: str, normalized: str, contracts):
