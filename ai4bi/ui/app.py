@@ -382,10 +382,15 @@ def _load_published_snapshot(path: Path) -> ExecutableReportSpec:
     return replace(report, read_only=True)
 
 
-def _render_block_library_panel() -> None:
-    """Render the Data Block View sidebar panel (Round 021, design-council 001-F)."""
+def _render_block_library_panel(contracts: "dict | None" = None) -> None:
+    """Render the Data Block View sidebar panel (Round 021, design-council 001-F).
+
+    Round 156: defaults to the CURRENT report's blocks (+ user uploads) so the
+    library is data-driven — it no longer lists every registry/demo block (which
+    leaked retail blocks onto the semi demo and vice-versa)."""
     with st.expander("資料積木庫", expanded=False):
-        contracts = _load_all_contracts()
+        if contracts is None:
+            contracts = _load_all_contracts()
         if not contracts:
             st.info("No data blocks loaded.")
             return
@@ -904,7 +909,7 @@ def _render_draft_controls(
                         workspace.replace_with_loaded(_new_report)
                         cache.invalidate_all()
                         st.rerun()
-            _render_block_library_panel()
+            _render_block_library_panel(_report_block_contracts(report))
 
         elif "模型" in mode:
             # Relationships + semantic layer — JOIN is the FIRST thing here.
@@ -913,7 +918,7 @@ def _render_draft_controls(
             render_join_builder(expanded=True)
             render_data_model_view()
             render_calc_metric_panel(_report_block_contracts(report))
-            render_cross_fact_panel()
+            render_cross_fact_panel(_report_block_contracts(report))
             render_what_if_panel()
             with st.expander("➕ 手動新增圖表", expanded=False):
                 st.caption("自訂指標、維度與圖表類型（進階使用者）。")
@@ -966,7 +971,7 @@ def _render_draft_controls(
                 st.caption("資料積木資訊與版本鎖定（進階使用者）。")
                 _render_pin_versions_panel(report)
                 st.markdown("---")
-                _render_block_library_panel()
+                _render_block_library_panel(_report_block_contracts(report))
 
         # ── Persistent Filters pane (every mode, like Power BI's Filters) ──
         st.markdown("---")

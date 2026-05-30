@@ -19,8 +19,8 @@ _AGGS = ["SUM", "AVG", "COUNT", "MIN", "MAX"]
 _NUMERIC = ("integer", "int", "float", "double", "number", "numeric")
 
 
-def _fact_blocks() -> dict[str, DataBlockContract]:
-    blocks: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
+def _fact_blocks(blocks: dict | None = None) -> dict[str, DataBlockContract]:
+    blocks = blocks if blocks is not None else st.session_state.get(_USER_BLOCKS_KEY, {})
     return {bid: c for bid, c in blocks.items() if c.block_type == BlockType.fact}
 
 
@@ -33,9 +33,12 @@ def _label(bid: str) -> str:
     return meta.get("display_name") or bid
 
 
-def render_cross_fact_panel() -> None:
-    """Render the cross-table ratio panel (sidebar)."""
-    facts = _fact_blocks()
+def render_cross_fact_panel(blocks: dict | None = None) -> None:
+    """Render the cross-table ratio panel.
+
+    Round 156: ``blocks`` is the CURRENT report's data, so the tables offered are
+    the ones actually in play (needs ≥2 facts to cross)."""
+    facts = _fact_blocks(blocks)
     if len(facts) < 2:
         return
 

@@ -360,12 +360,15 @@ def render_upload_panel() -> None:
 
 def _render_existing_blocks() -> None:
     """Show already-imported user blocks with a delete button."""
-    user_blocks: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
+    meta: dict = st.session_state.get(_USER_BLOCK_META_KEY, {})
+    # Round 156: only list genuinely uploaded/connected blocks (meta-tracked); the
+    # demo seed in user_blocks has no meta and must not appear as "已匯入".
+    all_blocks: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
+    user_blocks = {bid: c for bid, c in all_blocks.items() if bid in meta}
     if not user_blocks:
         return
     st.divider()
     st.caption("**已匯入的資料**")
-    meta: dict = st.session_state.get(_USER_BLOCK_META_KEY, {})
     for bid, contract in list(user_blocks.items()):
         m = meta.get(bid, {})
         cols = st.columns([3, 1])

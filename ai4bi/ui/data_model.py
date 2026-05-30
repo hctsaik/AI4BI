@@ -31,6 +31,15 @@ _SOURCE_BADGE = {
 }
 
 
+def _user_loaded_blocks() -> dict[str, DataBlockContract]:
+    """Round 156: genuinely user-loaded sources (upload / DB import carry a meta
+    entry). Excludes demo blocks seeded into user_blocks, so join/data-model show
+    your data — not retail leftovers when you're on another report."""
+    meta = st.session_state.get(_USER_BLOCK_META_KEY, {})
+    all_blocks = st.session_state.get(_USER_BLOCKS_KEY, {})
+    return {bid: c for bid, c in all_blocks.items() if bid in meta}
+
+
 def render_data_source_manager() -> None:
     """Round 147: unified data-source manager — one list of every loaded source
     (uploaded files + DB-connector imports) with origin, row count, and remove.
@@ -39,12 +48,10 @@ def render_data_source_manager() -> None:
     ``meta`` dicts, so this is the single place to see and manage all sources —
     Power BI's "Queries" / Power Query pane equivalent.
     """
-    all_blocks: dict[str, DataBlockContract] = st.session_state.get(_USER_BLOCKS_KEY, {})
     meta: dict = st.session_state.get(_USER_BLOCK_META_KEY, {})
-    # Round 155: only show GENUINELY user-loaded sources (upload / DB import carry a
-    # meta entry). Demo blocks seeded into user_blocks have no meta, so they no
-    # longer masquerade as "your data" — fixes retail blocks showing on the semi demo.
-    user_blocks = {bid: c for bid, c in all_blocks.items() if bid in meta}
+    # Round 155/156: only GENUINELY user-loaded sources (meta-tracked); demo seed
+    # blocks have no meta, so they don't masquerade as "your data".
+    user_blocks = _user_loaded_blocks()
     if not user_blocks:
         st.info(
             "目前沒有自己上傳的資料來源。用下方「上傳檔案」或「連接資料庫」加入第一份資料；"
@@ -181,8 +188,9 @@ def render_join_builder(expanded: bool = False) -> None:
 
     Round 148: ``expanded`` lets the caller open it by default when it is the
     primary panel of the 模型 view (so the headline feature isn't one click away).
+    Round 156: operates on genuinely user-loaded data only (not the demo seed).
     """
-    user_blocks: dict[str, DataBlockContract] = st.session_state.get(_USER_BLOCKS_KEY, {})
+    user_blocks: dict[str, DataBlockContract] = _user_loaded_blocks()
 
     with st.expander("🔗 資料關聯設定（把兩份資料用共同欄位連結）", expanded=expanded):
         st.caption(
@@ -304,8 +312,10 @@ _DATA_TYPE_ICON = {
 
 
 def render_data_model_view() -> None:
-    """Render the '資料模型' expander — Round 038."""
-    user_blocks: dict[str, DataBlockContract] = st.session_state.get(_USER_BLOCKS_KEY, {})
+    """Render the '資料模型' expander — Round 038.
+
+    Round 156: shows genuinely user-loaded data only (not the demo seed)."""
+    user_blocks: dict[str, DataBlockContract] = _user_loaded_blocks()
     sm = get_user_semantic_model()
 
     with st.expander("🗂️ 資料模型", expanded=False):
