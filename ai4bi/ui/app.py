@@ -1705,10 +1705,11 @@ def _render_visual_cell(
     _summary = humanize_metadata(_meta)
     if _summary:
         st.caption(f"🔍 {_summary}")
-    # Round 148: per-visual field-well (Power BI Visualizations/Fields pane) —
-    # click-to-edit the selected visual without typing NL.
-    if not report.read_only:
-        _render_visual_field_well(component_id, visual, report, cache, contracts)
+    # Round 153: the field-well now lives in the right-hand 🎨 視覺化 pane (Power BI
+    # placement). Mark the selected visual on the canvas so it's clear which one
+    # the pane is editing.
+    if not report.read_only and st.session_state.get("selected_component_id") == component_id:
+        st.caption("🎨 已選取 — 在右側「視覺化」面板編輯這張圖")
     _render_explanation_panel(component_id, visual)
 
 
@@ -1719,20 +1720,23 @@ _CHART_TYPE_LABELS = {
 }
 
 
-def _render_visual_field_well(component_id, visual, report, cache, contracts) -> None:
-    """Round 148: a direct field-well for the selected visual — change chart type
-    or the group-by dimension with dropdowns (no NL needed). Re-uses the governed
-    NL2 structured-dispatch builders so all safety checks still apply."""
+def _render_visual_field_well(component_id, visual, report, cache, contracts, in_pane: bool = False) -> None:
+    """Round 148/153: a direct field-well for the selected visual — change value,
+    group-by dimension, or chart type with dropdowns (no NL needed). Re-uses the
+    governed NL2 structured-dispatch builders so all safety checks still apply.
+    ``in_pane`` renders inline (no expander) for the right-hand Visualizations pane."""
+    import contextlib  # noqa: PLC0415
     vtype = visual.visualization.visual_type.value
     if vtype not in _CHART_TYPE_LABELS:
-        return  # kpi_card / table have no chart-type/dimension well
+        if in_pane:
+            st.caption("這個視覺（KPI 卡）沒有可調整的值/分組/圖表類型。")
+        return  # kpi_card has no chart-type/dimension well
     from ai4bi.ai import NL2ProposalService  # noqa: PLC0415
     svc = NL2ProposalService()
 
-    # Power BI behaviour: the Fields/Visualizations well for the SELECTED visual is
-    # open; others stay collapsed so the canvas isn't cluttered.
-    _is_selected = st.session_state.get("selected_component_id") == component_id
-    with st.expander("✏️ 編輯這張圖（值 / 分組 / 圖表類型）", expanded=_is_selected):
+    _ctx = (contextlib.nullcontext() if in_pane
+            else st.expander("✏️ 編輯這張圖（值 / 分組 / 圖表類型）", expanded=True))
+    with _ctx:
         # ── measure (值) swap — the primary field, like Power BI's Values well ──
         if visual.query.metrics:
             fact_block = visual.query.metrics[0].block_id
@@ -2137,10 +2141,35 @@ def main() -> None:
         with st.expander("Why this result is trusted"):
             st.markdown(_trusted_markdown)
     else:
-        # Canvas is now full-width
-        _render_canvas(report, cache, executor, active_filters)
-        with st.expander("Why this result is trusted"):
-            st.markdown(_trusted_markdown)
+        # Round 153: Power BI-style layout — report canvas on the left, a
+        # persistent 🎨 視覺化 (Visualizations) pane on the right that edits the
+        # currently-selected visual (chosen via the ask box's chart selector).
+        canvas_col, pane_col = st.columns([4, 1.4], gap="medium")
+        with canvas_col:
+            _render_canvas(report, cache, executor, active_filters)
+            with st.expander("Why this result is trusted"):
+                st.markdown(_trusted_markdown)
+        with pane_col:
+            _render_visualizations_pane(report, cache, _load_all_contracts())
+
+
+def _render_visualizations_pane(report: ExecutableReportSpec, cache: QueryCache, contracts) -> None:
+    """Round 153: right-hand Visualizations pane (Power BI placement). Edits the
+    selected visual (value / group-by / chart type) via the governed field-well."""
+    st.markdown("#### 🎨 視覺化")
+    sel = st.session_state.get("selected_component_id")
+    visual = None
+    if sel:
+        for page in report.pages.values():
+            if sel in page.visuals:
+                visual = page.visuals[sel]
+                break
+    if visual is None:
+        st.caption("在上方「① 選擇圖表」挑一張圖，這裡就會出現它的編輯選項"
+                   "（值 / 分組 / 圖表類型）。")
+        return
+    st.caption(f"正在編輯：**{visual.visualization.title or sel}**")
+    _render_visual_field_well(sel, visual, report, cache, contracts, in_pane=True)
 
 
 if __name__ == "__main__":
