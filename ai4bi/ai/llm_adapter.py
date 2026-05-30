@@ -53,6 +53,7 @@ SUPPORTED_INTENTS = (
     "seasonality",            # busiest day-of-week / hour
     "insights",               # weekly digest / anomaly scan
     "calendar_yoy",           # this month vs same month last year
+    "analytics_chart",        # pareto/ABC, %-of-total, moving-average, forecast
     "unsupported",            # anything else
 )
 

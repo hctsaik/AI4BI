@@ -98,6 +98,14 @@ def add_pareto(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
     return out
 
 
+def add_share_of_total(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
+    """Round 105: each row's share of the grand total (%), sorted desc."""
+    out = df.sort_values(value_col, ascending=False).reset_index(drop=True)
+    total = out[value_col].sum()
+    out["佔總比(%)"] = (out[value_col] / total * 100).round(1) if total else 0.0
+    return out
+
+
 def apply_postprocess(df: pd.DataFrame, query_spec, style) -> pd.DataFrame:
     """Apply the configured post-processing to a result DataFrame (no-op if none)."""
     mode = (style.extra or {}).get("postprocess")
@@ -114,6 +122,8 @@ def apply_postprocess(df: pd.DataFrame, query_spec, style) -> pd.DataFrame:
             return add_moving_average(df, value_col, window)
         if mode == "pareto":
             return add_pareto(df, value_col)
+        if mode == "share_of_total":
+            return add_share_of_total(df, value_col)
         if mode == "top_n":
             return add_top_n(df, value_col, int(style.extra.get("top_n_count", 10)))
     except Exception:  # noqa: BLE001 — never break a chart over post-processing

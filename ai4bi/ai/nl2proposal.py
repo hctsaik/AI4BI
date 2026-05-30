@@ -514,6 +514,11 @@ class NL2ProposalService:
             if seg is not None:
                 return seg
 
+        if intent == "analytics_chart":  # Round 105
+            ac = self._answer_analytics_chart(prompt, normalized, report, contracts)
+            if ac is not None:
+                return ac
+
         if intent == "calendar_yoy":  # Round 100
             yoy = self._answer_calendar_yoy(prompt, normalized, report, contracts)
             if yoy is not None:
@@ -619,6 +624,12 @@ class NL2ProposalService:
             ins = self._answer_insights(prompt, normalized, report, contracts)
             if ins is not None:
                 return ins
+
+        # Round 105: Pareto/ABC, %-of-total, moving-average, forecast charts.
+        if _detect_analytics_chart(f"{prompt.lower()} {normalized}") is not None:
+            ac = self._answer_analytics_chart(prompt, normalized, report, contracts)
+            if ac is not None:
+                return ac
 
         # Round 096: "哪幾天最忙 / busiest day of week / 哪個時段" → weekday/hour
         # seasonality. Checked before ranking since it carries a date-bucket cue.
@@ -1098,6 +1109,86 @@ class NL2ProposalService:
             trust_notes=notes,
             risk_level="low",
         )
+
+    def _answer_analytics_chart(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 105: NL on-ramp for the postprocess / forecast engines.
+
+        Pareto/ABC, %-of-total, moving-average and forecast were render-wired but
+        only reachable from the canned demo. This builds a new visual with the
+        right extra config so the ask box can request them. Returns None to fall
+        through.
+        """
+        if not contracts:
+            return None
+        kind = _detect_analytics_chart(f"{prompt.lower()} {normalized}")
+        if kind is None:
+            return None
+        idx = SchemaIndex.build(contracts)
+        match = idx.best_metric_match(prompt, normalized)
+        if match is None:
+            return None
+        block_id, metric_name, alias = match.block_id, match.metric_name, match.alias
+
+        from ai4bi.report.builder import build_add_visual_proposal
+        from ai4bi.query_spec import (
+            BlockRef, DimensionRef, SortDirection, SortSpec, VisualizationSpec, VisualQuerySpec,
+        )
+
+        page_id = "main" if "main" in report.pages else next(iter(report.pages), None)
+        if page_id is None:
+            return None
+        existing = {vid for p in report.pages.values() for vid in p.visuals}
+
+        n = _extract_analytics_n(prompt, normalized)
+        if kind in ("pareto", "share"):
+            dim_col = _resolve_decomp_dimension(idx, prompt, normalized, contracts, block_id)
+            if dim_col is None:
+                return None
+            vid = _unique_id(f"{kind}_{metric_name}", existing)
+            q = VisualQuerySpec(vid, [BlockRef(block_id)],
+                                metrics=[MetricRef(block_id, metric_name, alias)],
+                                dimensions=[DimensionRef(block_id, dim_col, dim_col)],
+                                sort=[SortSpec(alias, SortDirection.desc)],
+                                inherit_global_filter=False)
+            mode = "pareto" if kind == "pareto" else "share_of_total"
+            title = (f"{alias} Pareto/ABC（依{dim_col}）" if kind == "pareto"
+                     else f"{alias} 佔比（依{dim_col}）")
+            viz = VisualizationSpec(VisualType.bar_chart, title=title,
+                                    extra={"postprocess": mode, "data_labels": True})
+            msg = f"已準備{('Pareto/ABC' if kind=='pareto' else '佔比')}分析：{alias} 依 {dim_col}。"
+        else:  # moving_avg or forecast → time series
+            date_col = _find_date_column(contracts, block_id)
+            if date_col is None:
+                return None
+            vid = _unique_id(f"{kind}_{metric_name}", existing)
+            q = VisualQuerySpec(vid, [BlockRef(block_id)],
+                                metrics=[MetricRef(block_id, metric_name, alias)],
+                                dimensions=[DimensionRef(block_id, date_col, date_col,
+                                                         truncate_date_to="week")],
+                                sort=[SortSpec(date_col, SortDirection.asc)],
+                                inherit_global_filter=False)
+            if kind == "moving_avg":
+                extra = {"postprocess": "moving_avg", "postprocess_window": n or 4}
+                title = f"{alias} 趨勢 + {n or 4} 期移動平均"
+                msg = f"已準備 {alias} 的移動平均平滑趨勢。"
+            else:  # forecast
+                extra = {"trend_line": {"method": "linear", "forecast_periods": n or 4}}
+                title = f"{alias} 趨勢 + 未來 {n or 4} 期預測"
+                msg = f"已準備 {alias} 的趨勢預測（外推 {n or 4} 期）。"
+            viz = VisualizationSpec(VisualType.line_chart, title=title, extra=extra)
+
+        proposal = build_add_visual_proposal(page_id, vid, q, viz)
+        notes = [msg, f"指標：{alias}（{metric_name} @ {block_id}）；套用後重新查詢。"]
+        intent = AIIntent(intent_kind="add_visual", target_scope=f"page:{page_id}",
+                          trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=msg, proposal=proposal,
+                                 trust_notes=notes, risk_level="low")
 
     def _answer_calendar_yoy(
         self,
@@ -3164,6 +3255,48 @@ def _extract_rank_n(prompt: str, normalized: str, default: int = 5) -> int:
         except ValueError:
             pass
     return default
+
+
+# --- Round 105: postprocess / forecast analytics charts ----------------------
+
+_PARETO_TRIGGERS = ("pareto", "柏拉圖", "柏拉图", "abc 分析", "abc分析", "80/20", "80-20",
+                    "關鍵少數", "关键少数", "重要少數", "80%的營收", "8 成", "八成")
+_SHARE_TRIGGERS = ("佔總比", "占總比", "佔比", "占比", "百分比", "% of total", "share of total",
+                   "占總", "佔總", "比重", "佔多少比例", "占多少比例")
+_MOVING_AVG_TRIGGERS = ("移動平均", "移动平均", "moving average", "moving avg", "平滑", "smooth",
+                        "均線", "ma 線", "ma線")
+_FORECAST_TRIGGERS = ("預測", "预测", "forecast", "未來幾", "未来几", "推估", "外推",
+                      "下個月會", "預估", "project")
+
+
+def _detect_analytics_chart(hay: str) -> str | None:
+    if any(t in hay for t in _PARETO_TRIGGERS):
+        return "pareto"
+    if any(t in hay for t in _MOVING_AVG_TRIGGERS):
+        return "moving_avg"
+    if any(t in hay for t in _FORECAST_TRIGGERS):
+        return "forecast"
+    if any(t in hay for t in _SHARE_TRIGGERS):
+        return "share"
+    return None
+
+
+def _extract_analytics_n(prompt: str, normalized: str) -> int | None:
+    m = re.search(r"(\d+)\s*(?:期|個月|個週|週|周|months?|weeks?|points?)", f"{prompt} {normalized}")
+    if m:
+        try:
+            return max(1, min(int(m.group(1)), 52))
+        except ValueError:
+            return None
+    return None
+
+
+def _unique_id(base: str, existing: set) -> str:
+    vid, c = base, 1
+    while vid in existing:
+        vid = f"{base}_{c}"; c += 1
+    existing.add(vid)
+    return vid
 
 
 # --- Round 100: calendar YoY (same period last year) -------------------------
