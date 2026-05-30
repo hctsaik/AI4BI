@@ -1704,7 +1704,80 @@ def _render_visual_cell(
     _summary = humanize_metadata(_meta)
     if _summary:
         st.caption(f"🔍 {_summary}")
+    # Round 148: per-visual field-well (Power BI Visualizations/Fields pane) —
+    # click-to-edit the selected visual without typing NL.
+    if not report.read_only:
+        _render_visual_field_well(component_id, visual, report, cache, contracts)
     _render_explanation_panel(component_id, visual)
+
+
+_CHART_TYPE_LABELS = {
+    "bar_chart": "長條圖", "line_chart": "折線圖",
+    "pie_chart": "圓餅圖", "scatter": "散佈圖",
+}
+
+
+def _render_visual_field_well(component_id, visual, report, cache, contracts) -> None:
+    """Round 148: a direct field-well for the selected visual — change chart type
+    or the group-by dimension with dropdowns (no NL needed). Re-uses the governed
+    NL2 structured-dispatch builders so all safety checks still apply."""
+    vtype = visual.visualization.visual_type.value
+    if vtype not in _CHART_TYPE_LABELS:
+        return  # kpi_card / table have no chart-type/dimension well
+    from ai4bi.ai import NL2ProposalService  # noqa: PLC0415
+    svc = NL2ProposalService()
+
+    with st.expander("✏️ 編輯這張圖（圖表類型 / 分組）", expanded=False):
+        # ── chart-type switch ──
+        type_keys = list(_CHART_TYPE_LABELS.keys())
+        cur_idx = type_keys.index(vtype) if vtype in type_keys else 0
+        new_label = st.selectbox(
+            "圖表類型",
+            [_CHART_TYPE_LABELS[k] for k in type_keys],
+            index=cur_idx,
+            key=f"fw_type_{component_id}",
+        )
+        new_type = type_keys[[_CHART_TYPE_LABELS[k] for k in type_keys].index(new_label)]
+        if new_type != vtype:
+            res = svc._build_single_proposal(
+                "chart_type_change", {"target_type": new_type}, "",
+                report, component_id, None, contracts)
+            if res is not None and res.proposal is not None:
+                workspace.stage_proposal(res.proposal)
+                workspace.accept_pending()
+                cache.invalidate_all()
+                st.rerun()
+
+        # ── group-by dimension switch (categorical columns of the visual's block) ──
+        block_ids = {ref.block_id for ref in visual.query.block_refs}
+        dim_cols: list[str] = []
+        for bid in block_ids:
+            c = (contracts or {}).get(bid)
+            for col in getattr(c, "columns", []) or []:
+                if getattr(col, "data_type", "") in ("string", "str", "object", "text", "varchar") \
+                        and not col.name.lower().endswith(("_id", "_code")):
+                    dim_cols.append(col.name)
+        cur_dims = [d.column_name for d in visual.query.dimensions]
+        cur_dim = cur_dims[0] if cur_dims else None
+        if dim_cols:
+            options = sorted(set(dim_cols))
+            idx = options.index(cur_dim) if cur_dim in options else 0
+            picked = st.selectbox(
+                "分組依據（group by）", options, index=idx,
+                key=f"fw_dim_{component_id}",
+                help="改變這張圖的分組維度，例如從「月份」改成「產品」。",
+            )
+            if picked != cur_dim:
+                res = svc._build_single_proposal(
+                    "categorical_dimension_change", {"dimension_keyword": picked}, picked,
+                    report, component_id, None, contracts)
+                if res is not None and res.proposal is not None:
+                    workspace.stage_proposal(res.proposal)
+                    workspace.accept_pending()
+                    cache.invalidate_all()
+                    st.rerun()
+                elif res is not None and res.message:
+                    st.caption(f"⚠️ {res.message}")
 
 
 _GRAIN_LABELS = {
