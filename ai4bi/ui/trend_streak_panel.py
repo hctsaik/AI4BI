@@ -51,7 +51,7 @@ def render_trend_streak_panel(blocks: dict | None = None) -> None:
     if not facts:
         return
     with st.expander("📉 連續下滑偵測（誰在持續走弱）", expanded=False):
-        st.caption("找出指標連續多期下滑的商品 / 門市 / 品類，提早介入。")
+        st.caption("找出某個指標連續多期下滑的對象（依你選的維度，如產品 / 機台 / 類別），提早發現問題。")
         bid = st.selectbox(
             "資料集", list(facts.keys()),
             format_func=lambda b: st.session_state.get(_USER_BLOCK_META_KEY, {})

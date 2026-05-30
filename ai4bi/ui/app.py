@@ -233,6 +233,31 @@ def _load_all_contracts() -> dict[str, DataBlockContract]:
     return contracts
 
 
+_DATE_DIMISH = ("date", "_at", "_on", "time", "日期", "時間", "month", "week", "day")
+
+
+def _sample_metric_dim(report: ExecutableReportSpec) -> tuple[str, str]:
+    """Round 157: a representative metric alias + categorical dimension from the
+    CURRENT report, so NL example prompts match the actual data (semiconductor vs
+    retail) instead of hardcoded retail copy."""
+    metric_alias = dim_col = None
+    for page in report.pages.values():
+        for v in page.visuals.values():
+            for m in v.query.metrics:
+                metric_alias = metric_alias or (m.alias or m.metric_name)
+            for d in v.query.dimensions:
+                name = d.column_name
+                is_date = getattr(d, "truncate_date_to", None) or \
+                    any(h in name.lower() for h in _DATE_DIMISH)
+                if not is_date and dim_col is None:
+                    dim_col = name
+            if metric_alias and dim_col:
+                break
+        if metric_alias and dim_col:
+            break
+    return (metric_alias or "數值"), (dim_col or "類別")
+
+
 def _report_block_contracts(report: ExecutableReportSpec) -> dict[str, DataBlockContract]:
     """Round 155: the blocks the CURRENT report actually uses (resolved through
     _load_all_contracts), plus any genuinely user-loaded sources. This is what the
@@ -1462,22 +1487,24 @@ def _render_visual_assistant(report: ExecutableReportSpec, cache: QueryCache, ex
         # Round 102: a short, drag-resizable text_area — roomier than a single line
         # while typing a longer NL request, but it doesn't permanently occupy the
         # sidebar (user-reported sizing feedback). height≈3 lines; drag to grow.
+        # Round 157: data-driven example prompts — use THIS report's metric +
+        # dimension so the hints match the actual data (no hardcoded retail copy).
+        _m, _d = _sample_metric_dim(report)
         prompt = st.text_area(
             "② 告訴我你想做什麼，或直接問問題",
-            placeholder="例：上個月營收多少？／為什麼營收下降 依地區拆解／營收超過 10 萬的地區／加一張趨勢圖",
+            placeholder=f"例：{_m}最高的 5 個{_d}／各{_d}的{_m}／為什麼{_m}有變化？依{_d}拆解／加一張趨勢圖",
             height=80,
             disabled=report.read_only,
             help="輸入較長的句子時可拖曳右下角放大；按「送出請求」執行。",
         )
         with st.expander("💡 你可以這樣問（不只是改圖，也能直接得到答案）", expanded=False):
             st.markdown(
-                "- **直接問數字**：「上個月營收多少？」「總共幾筆訂單？」→ 立即算出答案＋來源\n"
-                "- **排名**：「最賺的 5 個商品」「每個地區營收最高的 2 個商品」→ 排行表\n"
-                "- **問原因**：「為什麼營收下降？依地區拆解」→ 找出貢獻最多增減的維度\n"
-                "- **名單**：「買超過 3 次的客戶」「營收超過 10 萬的地區」「哪些客戶快流失」\n"
-                "- **趨勢**：「哪些商品連續下滑」「常一起買的商品」\n"
-                "- **目標**：「把營收目標設為 100 萬」「達標了嗎？」\n"
-                "- **改圖／分析**：「加一張趨勢圖」「加一張地圖」「改成依月份」「把離群值標紅色」"
+                f"- **直接問數字**：「{_m}總共多少？」→ 立即算出答案＋來源\n"
+                f"- **排名**：「{_m}最高的 5 個{_d}」「每個{_d}的{_m}」→ 排行表\n"
+                f"- **問原因**：「為什麼{_m}有變化？依{_d}拆解」→ 找出貢獻最多增減的維度\n"
+                f"- **趨勢**：「{_m}這幾週的趨勢」「哪個{_d}連續下滑」\n"
+                f"- **目標**：「{_m}有沒有達到目標？」\n"
+                "- **改圖／分析**：「加一張趨勢圖」「改成依其他維度」「把離群值標紅色」"
             )
         if st.button("送出請求", type="primary", disabled=report.read_only, width="stretch"):
             # Load semantic model — merge demo SM with user-defined relationships (Round 037)
