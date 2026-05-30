@@ -2154,22 +2154,109 @@ def main() -> None:
 
 
 def _render_visualizations_pane(report: ExecutableReportSpec, cache: QueryCache, contracts) -> None:
-    """Round 153: right-hand Visualizations pane (Power BI placement). Edits the
-    selected visual (value / group-by / chart type) via the governed field-well."""
+    """Round 153/154: right-hand Visualizations pane (Power BI placement). Edits the
+    selected visual via a real drag-and-drop field-well (custom React component),
+    with the dropdown field-well kept as a fallback."""
     st.markdown("#### 🎨 視覺化")
     sel = st.session_state.get("selected_component_id")
-    visual = None
+    visual = page_id = None
     if sel:
-        for page in report.pages.values():
+        for pid, page in report.pages.items():
             if sel in page.visuals:
-                visual = page.visuals[sel]
+                visual, page_id = page.visuals[sel], pid
                 break
     if visual is None:
         st.caption("在上方「① 選擇圖表」挑一張圖，這裡就會出現它的編輯選項"
-                   "（值 / 分組 / 圖表類型）。")
+                   "（拖放欄位 / 圖表類型）。")
         return
     st.caption(f"正在編輯：**{visual.visualization.title or sel}**")
-    _render_visual_field_well(sel, visual, report, cache, contracts, in_pane=True)
+
+    from ai4bi.ui.components.field_well import field_well, is_available  # noqa: PLC0415
+    used_dnd = False
+    if is_available() and visual.query.metrics:
+        fact_block = visual.query.metrics[0].block_id
+        fc = (contracts or {}).get(fact_block)
+        if fc is not None:
+            measures = [{"name": m.name, "label": m.name, "kind": "measure"}
+                        for m in getattr(fc, "metrics", []) or []]
+            dims = [{"name": c.name, "label": c.name, "kind": "dimension"}
+                    for c in getattr(fc, "columns", []) or []
+                    if getattr(c, "data_type", "") in ("string", "str", "object", "text", "varchar")
+                    and not c.name.lower().endswith(("_id", "_code"))]
+            cur_dims = [d.column_name for d in visual.query.dimensions]
+            wells = {
+                "values": [m.metric_name for m in visual.query.metrics],
+                "axis": cur_dims[:1],
+                "legend": cur_dims[1:2],
+            }
+            result = field_well(
+                available=measures + dims, wells=wells,
+                chart_type=visual.visualization.visual_type.value,
+                key=f"fw_dnd_{sel}",
+            )
+            used_dnd = True
+            if isinstance(result, dict) and result.get("nonce"):
+                if st.session_state.get(f"_fw_nonce_{sel}") != result["nonce"]:
+                    st.session_state[f"_fw_nonce_{sel}"] = result["nonce"]
+                    if _apply_field_well_result(report, page_id, sel, visual, fact_block, result):
+                        cache.invalidate_all()
+                        st.rerun()
+
+    # Dropdown fallback (also covers no-build / AppTest / KPI visuals).
+    label = "或用下拉選單編輯" if used_dnd else "編輯選項"
+    with st.expander(label, expanded=not used_dnd):
+        _render_visual_field_well(sel, visual, report, cache, contracts, in_pane=True)
+
+
+def _apply_field_well_result(report, page_id, sel, visual, fact_block, result) -> bool:
+    """Round 154: turn a drag-drop field-well result into a governed query patch
+    (metrics + dimensions + chart type). Returns True if anything changed."""
+    from ai4bi.query_spec import VisualType  # noqa: PLC0415
+    values = [v for v in (result.get("values") or []) if v]
+    dims = [d for d in (result.get("axis") or []) + (result.get("legend") or []) if d]
+    new_type = result.get("chart_type")
+    if not values:
+        return False  # a visual needs at least one measure
+
+    changes = []
+    cur_metrics = [m.metric_name for m in visual.query.metrics]
+    if values != cur_metrics:
+        before_m = [{"block_id": m.block_id, "metric_name": m.metric_name, "alias": m.alias,
+                     "agg_override": (m.agg_override.value if m.agg_override else None)}
+                    for m in visual.query.metrics]
+        after_m = [{"block_id": fact_block, "metric_name": v, "alias": v, "agg_override": None}
+                   for v in values]
+        changes.append(ReportChange(
+            path=f"pages/{page_id}/visuals/{sel}/query/metrics",
+            label="值", before=before_m, after=after_m, affects_data=True))
+
+    cur_dims = [d.column_name for d in visual.query.dimensions]
+    if dims != cur_dims:
+        before_d = [{"block_id": d.block_id, "column_name": d.column_name, "alias": d.alias,
+                     "truncate_date_to": d.truncate_date_to} for d in visual.query.dimensions]
+        after_d = [{"block_id": fact_block, "column_name": d, "alias": d, "truncate_date_to": None}
+                   for d in dims]
+        changes.append(ReportChange(
+            path=f"pages/{page_id}/visuals/{sel}/query/dimensions",
+            label="分組", before=before_d, after=after_d, affects_data=True))
+
+    cur_type = visual.visualization.visual_type.value
+    if new_type and new_type != cur_type:
+        try:
+            VisualType(new_type)
+            if not (new_type == "pivot" and len(dims) < 2):
+                changes.append(ReportChange(
+                    path=f"pages/{page_id}/visuals/{sel}/visualization/visual_type",
+                    label="圖表類型", before=cur_type, after=new_type, affects_data=False))
+        except ValueError:
+            pass
+
+    if not changes:
+        return False
+    workspace.stage_proposal(ReportProposal(
+        description="拖放編輯視覺", changes=changes, target_component_id=sel))
+    workspace.accept_pending()
+    return True
 
 
 if __name__ == "__main__":
