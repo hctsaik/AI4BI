@@ -887,6 +887,17 @@ class NL2ProposalService:
         if _looks_like_period_comparison(prompt, normalized):
             return self._period_comparison(prompt, normalized, report, selected_component_id, contracts)
 
+        # Round 135: nothing routed. Before giving up, if the prompt is a vague
+        # evaluative question ("效率怎麼樣"), ASK a clarifying question rather than
+        # silently guessing or flatly rejecting — silent-wrong destroys trust.
+        clarify = _ambiguous_clarification(prompt, normalized)
+        if clarify is not None:
+            return self._unsupported(
+                clarify,
+                target_scope=_target_scope(selected_component_id),
+                disambiguation=clarify,
+            )
+
         return self._unsupported(
             "No supported governed BI intent was detected.",
             target_scope=_target_scope(selected_component_id),
@@ -1402,6 +1413,24 @@ class NL2ProposalService:
             viz = VisualizationSpec(VisualType.bar_chart, title=title,
                                     extra={"postprocess": mode, "data_labels": True})
             msg = f"已準備{('Pareto/ABC' if kind=='pareto' else '佔比')}分析：{alias} 依 {dim_col}。"
+            # Round 135: "最近有沒有哪一類在惡化" — Pareto answers the static ranking;
+            # add a recent-vs-earlier trend so a worsening category is named.
+            worsen_cue = any(t in f"{prompt.lower()} {normalized}" for t in (
+                "惡化", "變多", "變嚴重", "上升", "增加", "最近", "趨勢", "worsen",
+                "worse", "rising", "increas", "trend", "近期", "走高"))
+            if kind == "pareto" and worsen_cue:
+                trend_msg, trend_tbl = self._pareto_trend(contracts, block_id, metric_name, dim_col)
+                if trend_msg:
+                    notes_trend = trend_msg
+                    intent = AIIntent(intent_kind="analysis_request",
+                                      target_scope=f"page:{page_id}",
+                                      trust_notes=[trend_msg], risk_level="low")
+                    return NL2ProposalResult(
+                        intent=intent,
+                        message=f"{msg} {trend_msg}",
+                        result_table=trend_tbl,
+                        proposal=build_add_visual_proposal(page_id, vid, q, viz),
+                        trust_notes=[trend_msg], risk_level="low")
         else:  # moving_avg or forecast → time series
             date_col = _find_date_column(contracts, block_id)
             if date_col is None:
@@ -1445,6 +1474,53 @@ class NL2ProposalService:
                                      proposal=proposal, trust_notes=notes, risk_level="low")
         return NL2ProposalResult(intent=intent, message=msg, proposal=proposal,
                                  trust_notes=notes, risk_level="low")
+
+    def _pareto_trend(self, contracts, block_id, metric_col, dim_col):
+        """Round 135: split a category metric into earlier vs recent halves by
+        date and find which category is worsening (largest share increase).
+
+        Returns (message, per-category trend DataFrame) or (None, None)."""
+        from ai4bi.blocks.datastore import materialize_dataframe
+        import pandas as _pd
+        try:
+            df = materialize_dataframe(contracts[block_id])
+        except Exception:  # noqa: BLE001
+            return None, None
+        date_col = _find_date_column(contracts, block_id)
+        # the additive base column behind the metric (defect_die etc.)
+        val = metric_col if metric_col in df.columns else next(
+            (c for c in df.columns if "defect" in c.lower() and df[c].dtype.kind in "if"), None)
+        if date_col is None or val is None or dim_col not in df.columns:
+            return None, None
+        work = df[[date_col, dim_col, val]].copy()
+        work[date_col] = _pd.to_datetime(work[date_col], errors="coerce")
+        work = work.dropna(subset=[date_col])
+        if work.empty:
+            return None, None
+        midpoint = work[date_col].median()
+        earlier = work[work[date_col] <= midpoint]
+        recent = work[work[date_col] > midpoint]
+        if earlier.empty or recent.empty:
+            return None, None
+        e_share = earlier.groupby(dim_col)[val].sum()
+        r_share = recent.groupby(dim_col)[val].sum()
+        e_tot, r_tot = e_share.sum() or 1, r_share.sum() or 1
+        rows = []
+        for cat in set(e_share.index) | set(r_share.index):
+            ep = e_share.get(cat, 0) / e_tot * 100
+            rp = r_share.get(cat, 0) / r_tot * 100
+            rows.append({dim_col: cat, "前期佔比%": round(ep, 1),
+                         "近期佔比%": round(rp, 1), "變化(點)": round(rp - ep, 1)})
+        tbl = _pd.DataFrame(rows).sort_values("變化(點)", ascending=False).reset_index(drop=True)
+        if tbl.empty:
+            return None, None
+        w = tbl.iloc[0]
+        if w["變化(點)"] > 0:
+            tmsg = (f"惡化趨勢：「{w[dim_col]}」近期佔比由 {w['前期佔比%']}% 升到 {w['近期佔比%']}%"
+                    f"（+{w['變化(點)']} 點，以 {date_col} 中位數切前後期），最該關注。")
+        else:
+            tmsg = f"各類近期佔比皆未上升，無明顯惡化（以 {date_col} 中位數切前後期）。"
+        return tmsg, tbl
 
     def _answer_calendar_yoy(
         self,
@@ -2933,6 +3009,15 @@ class NL2ProposalService:
             f"依「{alias}」對「{dim_col}」排序取前 {n}（治理查詢 sort+limit，認證語意層）。",
             f"來源：{block_id}。",
         ]
+        # Round 135: when ranking by a weighted-yield metric and the user asks about
+        # weighting ("是用晶圓數加權的嗎"), confirm the method explicitly in plain words.
+        if "weighted_yield" in metric_name.lower():
+            wnote = ("此「加權良率」＝SUM(良品)/SUM(受測晶粒)，以晶粒數加權（非各晶圓良率的"
+                     "簡單平均），故大晶圓不會被小晶圓等權稀釋。")
+            notes.append(wnote)
+            if any(t in f"{prompt.lower()} {normalized}" for t in (
+                    "加權", "weighted", "晶圓數", "晶粒", "die", "平均", "怎麼算")):
+                sentence = f"{sentence} {wnote}"
         intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                           trust_notes=notes, risk_level="low")
         return NL2ProposalResult(
@@ -3111,6 +3196,18 @@ class NL2ProposalService:
         sentence = _compose_answer_sentence(
             alias, value, unit, period, previous, delta_pct, cur_label, prev_label
         )
+
+        # Round 135: faithfulness provenance — population N, date span, method,
+        # exclusions. Always added to trust notes; appended to the sentence when
+        # the user explicitly asks ("幾片晶圓 / 母體 / 排除了什麼 / 怎麼算").
+        prov = _provenance_note(contracts, block_id, date_col, metric_name)
+        if prov:
+            notes.append(prov)
+            asks_prov = any(t in f"{prompt.lower()} {normalized}" for t in (
+                "幾片", "幾筆", "母體", "排除", "怎麼算", "用什麼算", "幾個", "幾批",
+                "how many", "population", "exclud", "based on"))
+            if asks_prov:
+                sentence = f"{sentence} {prov}"
 
         answer = DirectAnswer(
             question=prompt.strip(),
@@ -4487,6 +4584,72 @@ class NL2ProposalService:
 
 def _normalize(prompt: str) -> str:
     return " ".join(prompt.strip().lower().split())
+
+
+# Round 135: vague evaluative terms that could map to several governed analyses.
+# When such a term is the gist of an otherwise-unroutable prompt, return a
+# clarifying question instead of a silent wrong guess (the product-lens #1 risk).
+_AMBIGUOUS_TERMS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("效率", "efficiency", "效能"),
+     "「效率」可以指好幾種分析，您想看哪一個？(1) 設備 OEE　(2) 產能利用率/loading　"
+     "(3) 瓶頸或 cycle time　(4) 產出率 moves/hr。請指定其一，我就能給可信的數字。"),
+    (("表現", "績效", "performance", "怎麼樣", "怎樣", "如何", "好不好", "狀況"),
+     "想了解「表現」的哪個面向？可選：良率、queue time、OEE、產能利用率、瓶頸、缺陷率。"
+     "指定指標（與要看的維度，如各機台/各區/各週）我就能分析。"),
+)
+
+
+def _provenance_note(contracts, block_id: str, date_col: str | None,
+                     metric_name: str = "") -> str | None:
+    """Round 135: build a population/method/exclusions provenance line for an
+    answer. States N rows, the date span, and the aggregation method (so a
+    weighted yield isn't mistaken for a simple average)."""
+    if not contracts or block_id not in contracts:
+        return None
+    try:
+        from ai4bi.blocks.datastore import materialize_dataframe
+        df = materialize_dataframe(contracts[block_id])
+    except Exception:  # noqa: BLE001
+        return None
+    if df is None or df.empty:
+        return None
+    n = len(df)
+    grain = ("片晶圓" if "wafer_id" in df.columns and df["wafer_id"].nunique() == n
+             else "筆")
+    span = ""
+    if date_col and date_col in df.columns:
+        try:
+            import pandas as _pd
+            d = _pd.to_datetime(df[date_col], errors="coerce").dropna()
+            if not d.empty:
+                span = f"，期間 {d.min().date()}～{d.max().date()}"
+        except Exception:  # noqa: BLE001
+            span = ""
+    method = ""
+    if "weighted_yield" in metric_name.lower() or metric_name.lower() == "weighted_yield_pct":
+        method = "；方法＝SUM(良品)/SUM(受測晶粒)（以晶粒數加權，非各晶圓良率的簡單平均）"
+    return (f"母體：N={n} {grain}（{block_id}）{span}{method}"
+            f"；未套用額外排除規則，null 值不計入彙總。")
+
+
+def _ambiguous_clarification(prompt: str, normalized: str) -> str | None:
+    """Return a clarifying question when the prompt is a vague evaluative ask.
+
+    Only reached after all handlers declined, so it won't shadow real routes.
+    Requires the prompt be short-ish and lack a concrete metric cue, so a
+    specific question that merely failed to route isn't turned into a clarify.
+    """
+    hay = f"{prompt.lower()} {normalized}"
+    # If a concrete fab metric is already named, this isn't "vague" — let the
+    # plain unsupported message stand (the user was specific; routing has a gap).
+    concrete = ("良率", "yield", "queue", "等待", "缺陷", "defect", "oee", "利用率",
+                "cycle", "週期", "wip", "重工", "rework", "良品", "稼動")
+    if any(c in hay for c in concrete):
+        return None
+    for terms, question in _AMBIGUOUS_TERMS:
+        if any(t in hay for t in terms):
+            return question
+    return None
 
 
 # ---------------------------------------------------------------------------
