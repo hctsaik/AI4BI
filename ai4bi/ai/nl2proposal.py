@@ -2400,8 +2400,17 @@ class NL2ProposalService:
             return NL2ProposalResult(intent=intent, message=msg,
                                      result_table=per if per is not None and not per.empty else None,
                                      trust_notes=notes, risk_level="low")
+        # Round 146: add average WIP/throughput context + an actionable Little's Law
+        # read, so a weak r still yields a useful operational takeaway.
+        avg_wip = round(float(per["wip"].mean()), 1)
+        avg_tp = round(float(per["throughput"].mean()), 1)
+        weak = abs(summary["r"]) < 0.5
+        action = ("（r 偏弱，cycle time 受 WIP 以外因素影響較大，如 hold/批量/機台可用率；"
+                  "建議連看 hold 時間與瓶頸站）" if weak else
+                  "（符合 Little's Law：要縮短 cycle time，優先降 WIP 或提 throughput）")
         msg = (f"{summary['relationship']}；WIP 與 cycle time 的相關係數 r={summary['r']}"
-               f"（依週對齊，n={summary['n']} 週）。表中 littles_law_ct = WIP/throughput 為誠實對照。")
+               f"（依週對齊，n={summary['n']} 週；平均 WIP≈{avg_wip}、throughput≈{avg_tp}/週）。"
+               f"{action}表中 littles_law_ct = WIP/throughput 為誠實對照。")
         notes = [f"WIP↔cycle time：每週以 {lot_col or '列數'} 計 WIP、以 {ct} 取平均 cycle time，"
                  f"Pearson r。Little's Law 對照欄非宣稱值。來源：{bid}。"]
         intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
