@@ -1495,16 +1495,16 @@ class NL2ProposalService:
                 title = f"{alias} 趨勢 + {n or 4} 期移動平均"
                 msg = f"{alias} 的 {n or 4} 期移動平均平滑趨勢（下表為各期值）。"
             else:  # forecast
-                extra = {"trend_line": {"method": "linear", "forecast_periods": n or 4}}
-                title = f"{alias} 趨勢 + 未來 {n or 4} 期預測"
-                msg = f"已準備 {alias} 的趨勢預測（外推 {n or 4} 期）。"
+                extra = {"trend_line": {"method": "linear", "forecast_periods": n or 1}}
+                title = f"{alias} 趨勢 + 未來 {n or 1} 期預測"
+                msg = f"已準備 {alias} 的趨勢預測（外推 {n or 1} 期）。"
             viz = VisualizationSpec(VisualType.line_chart, title=title, extra=extra)
 
         proposal = build_add_visual_proposal(page_id, vid, q, viz)
         notes = [msg, f"指標：{alias}（{metric_name} @ {block_id}）；套用後重新查詢。"]
         # Round 126: also compute the result INLINE (executor + postprocess) so a
         # '走勢/移動平均/Pareto' question gets a direct table, not only a chart to
-        # apply. Forecast stays chart-only (the projection is a visual overlay).
+        # apply.
         executor = getattr(self, "_executor", None)
         inline = None
         if executor is not None and kind in ("pareto", "share", "moving_avg"):
@@ -1515,6 +1515,27 @@ class NL2ProposalService:
                     inline = apply_postprocess(df, q, viz)
             except Exception:  # noqa: BLE001
                 inline = None
+        # Round 142: forecast — also give a PROJECTED NUMBER inline (linear
+        # extrapolation), so "下個月良率大概多少" gets a value, not just a chart.
+        if executor is not None and kind == "forecast":
+            try:
+                import numpy as _np
+                df = executor.run(q)
+                if df is not None and len(df) >= 3 and alias in df.columns:
+                    ys = df[alias].astype(float).to_numpy()
+                    xs = _np.arange(len(ys))
+                    a, b = _np.polyfit(xs, ys, 1)
+                    horizon = n or 1
+                    proj = float(a * (len(ys) - 1 + horizon) + b)
+                    unit = _metric_unit(contracts, block_id, metric_name) or ""
+                    recent = float(ys[-1])
+                    msg = (f"依線性趨勢外推，{alias} 未來第 {horizon} 期約 "
+                           f"{round(proj, 2)}{unit}（最近一期 {round(recent,2)}{unit}，"
+                           f"每期斜率 {round(float(a),3)}）。註：簡單線性外推，僅供參考，"
+                           f"不計季節性/製程變更。")
+                    inline = df
+            except Exception:  # noqa: BLE001
+                pass
         intent = AIIntent(intent_kind="analysis_request" if inline is not None else "add_visual",
                           target_scope=f"page:{page_id}", trust_notes=notes, risk_level="low")
         if inline is not None:
@@ -3294,6 +3315,20 @@ class NL2ProposalService:
             work[flag_col] = work[flag_col].map(lambda v: "有" if float(v) > 0 else "無")
         grp = work.groupby(flag_col)[meas_col].agg(["mean", "count"]).reset_index()
         if len(grp) < 2:
+            # Round 142: cross-fact attribution washout — e.g. a wafer's yield can't
+            # be pinned to one vendor because it passes through many vendors' tools,
+            # so vendor-per-lot collapses to a single value. Say so honestly instead
+            # of returning None (which would fall through to a misleading overall).
+            if flag_block != meas_block:
+                msg = (f"無法把「{meas_col}」乾淨地歸因到單一「{flag_col}」："
+                       f"一個 {meas_block} 單位（如晶圓）會經過多個 {flag_col}（{flag_block}），"
+                       f"以 lot 對齊後幾乎都落在同一個 {flag_col}，比較會失真。"
+                       f"建議改用 commonality：低良率晶圓是否較常經過某「{flag_col}」的機台。")
+                notes = [msg]
+                intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                                  trust_notes=notes, risk_level="medium")
+                return NL2ProposalResult(intent=intent, message=msg, trust_notes=notes,
+                                         risk_level="medium")
             return None
         grp = grp.sort_values("mean", ascending=not higher_better).reset_index(drop=True)
         grp["mean"] = grp["mean"].round(2)
@@ -3500,6 +3535,14 @@ class NL2ProposalService:
         dim_col = _resolve_decomp_dimension(idx, prompt, normalized, contracts, block_id)
         if dim_col is None:
             return None
+        # Round 142: an explicit "哪一台機台 / which tool" must group by the tool
+        # column even when another entity word (lot) also appears in the prompt.
+        hay_r = f"{prompt.lower()} {normalized}"
+        if any(t in hay_r for t in ("哪一台", "哪台", "機台", "which tool", "哪個機台", "哪部機")):
+            block_cols = [col.name for col in getattr(contracts.get(block_id), "columns", [])]
+            tool_c = _guess_col(block_cols, ("tool_id", "tool", "機台", "設備", "equipment"))
+            if tool_c and tool_c != dim_col:
+                dim_col = tool_c
 
         n = _extract_rank_n(prompt, normalized)
         ascending = _ranking_is_ascending(prompt, normalized)
@@ -3742,6 +3785,20 @@ class NL2ProposalService:
                 "加權", "簡單平均", "weighted", "simple average", "怎麼來"))
             if asks_prov:
                 sentence = f"{sentence} {prov}"
+
+        # Round 142: target verdict — "良率有沒有達到 95% 的目標？" → state met/missed
+        # against the target named in the prompt, instead of just the number.
+        hay_t = f"{prompt.lower()} {normalized}"
+        if any(t in hay_t for t in ("達到", "達標", "目標", "有沒有達", "是否達", "target", "goal")):
+            tgt = _parse_threshold(hay_t)
+            if tgt is not None and value is not None:
+                gap = round(value - tgt, 2)
+                u = unit or ""
+                if value >= tgt:
+                    verdict = f"已達標 ✅（{round(value,2)}{u} ≥ 目標 {tgt}{u}，高出 {abs(gap)}{u}）。"
+                else:
+                    verdict = f"未達標 ⚠️（{round(value,2)}{u} < 目標 {tgt}{u}，差 {abs(gap)}{u}）。"
+                sentence = f"{sentence} {verdict}"
 
         answer = DirectAnswer(
             question=prompt.strip(),
@@ -5136,6 +5193,11 @@ _UNSUPPORTED_CAPABILITIES: tuple[tuple[tuple[str, ...], str], ...] = (
      "目前引擎是單一 fact 查詢，無法做 wafer 逐站 genealogy 的 fact-to-fact 明細串接"
      "（治理上禁止會扇出的明細 join）。但我可以用 commonality 分析：給定不良批，"
      "找出它們最常共同經過、且統計顯著（Fisher 檢定）的機台。"),
+    (("成本", "金額", "費用", "損失多少錢", "cost", "scrap cost", "報廢成本", "$",
+      "美元", "台幣", "元"),
+     "目前資料集沒有成本/金額欄位（只有良率、缺陷數、queue/cycle time 等製造指標），"
+     "無法換算金錢損失。我可以給：報廢/不良晶圓『數量』、良率損失、缺陷數，"
+     "若你提供單片成本，我再幫你乘上數量估算。"),
 )
 
 
@@ -5535,7 +5597,9 @@ _SHARE_TRIGGERS = ("佔總比", "占總比", "佔比", "占比", "百分比", "%
 _MOVING_AVG_TRIGGERS = ("移動平均", "移动平均", "moving average", "moving avg", "平滑", "smooth",
                         "均線", "ma 線", "ma線", "走勢")
 _FORECAST_TRIGGERS = ("預測", "预测", "forecast", "未來幾", "未来几", "推估", "外推",
-                      "下個月會", "預估", "project")
+                      "下個月會", "預估", "project", "下個月", "下月", "下週", "下周",
+                      "照這個趨勢", "依這個趨勢", "按這個趨勢", "大概多少", "會是多少",
+                      "估計", "估算未來")
 
 
 _CHART_VERBS: tuple[str, ...] = ("圖", "chart", "視覺", "畫", "plot", "graph", "視覺化")
@@ -5804,6 +5868,8 @@ _SUBGROUP_FLAGS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("日班", "夜班", "白班", "晚班", "早班", "班別", "shift", "day班", "night班",
       "day 班", "night 班"), "shift"),
     (("優先", "priority", "hot", "急件", "趕貨"), "priority"),
+    (("供應商", "廠商", "設備商", "vendor", "供货商", "原廠"), "vendor"),
+    (("產品", "product", "品項", "產品別", "product family"), "product_family"),
 )
 _SUBGROUP_MEASURES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (("良率", "yield", "良品率"), ("weighted_yield_pct", "yield_pct")),

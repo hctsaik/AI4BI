@@ -214,4 +214,16 @@ T6 從 ~44 升到 ~91（真 commonality + 誠實顯著性）。剩餘扣分集�
 - **T2 cross-tab**：同時報最高＋最低 cell ＋母體 N。實測：最高 Day×ETCH=5.37、最低 Day×CMP=1.25（母體 600 列）。
 - 非 e2e **1039 passed**。下一步：set #3 重打分 + fresh set #4 驗證 ≥95。
 
+## 第 4 輪 — 又一組全新 10 情境（`_probe_deploy4.py`）
+新角度：供應商良率、同表相關、digest、pacing vs 目標、forecast、缺陷×產品 matrix、3 輪 drill、hold by tool、成本（該誠實拒絕）。自評 baseline ≈ **65**（silent-wrong 重現於新面向）。
+
+**Round 142**（test+commit+push）：
+- **U10 成本誠實拒絕**：`_UNSUPPORTED_CAPABILITIES` 加成本/金額 → 無金額欄位即誠實說明＋可改算數量。
+- **U5 目標達成判定**：metric 答案偵測「達到 X% 目標」→ 回「未達標 ⚠️ 92.18% < 95%，差 2.82%」。
+- **U6 維度修正**：「哪一台機台」強制 group by tool_id（原誤抓 lot_id）。
+- **U9 forecast 數字**：forecast 路徑加線性外推**數值**（下個月約 92.83%）＋僅供參考註。
+- **U1 跨表歸因誠實**：供應商良率 → vendor per-lot 因晶圓經多家而塌成單值；不再回整體假象，改**誠實說明無法歸因＋建議改用 commonality**。
+- **U2/U7/U8 本來就過**（同表相關 r=0.426、缺陷×產品 matrix、3 輪 drill IMPLANT=3.2）。
+- 新增 `tests/test_target_forecast_attribution.py`（5）。非 e2e **1044 passed**。
+
 
