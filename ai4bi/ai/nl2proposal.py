@@ -737,6 +737,14 @@ class NL2ProposalService:
             if mf2 is not None:
                 return mf2
 
+        # Round 121: cold-start grouped measure filter ("queue > 5 小時的 lot")
+        # — checked BEFORE the plain-answer engine, since '哪些…？' phrasing also
+        # trips the question marker but wants a list, not a single total.
+        if _looks_like_segment_count(prompt, normalized):
+            seg = self._answer_segment_count(prompt, normalized, report, contracts)
+            if seg is not None:
+                return seg
+
         # Round 114: plain "metric by dimension" breakdown ("各製程站的移動次數").
         # After ranking/decompose (so superlatives/why still win), before the
         # generic single-number answer.
@@ -1862,6 +1870,31 @@ class NL2ProposalService:
         facts = {b: c for b, c in contracts.items()
                  if getattr(c, "block_type", None) in (
                      BlockType.fact, BlockType.snapshot_fact, BlockType.target_fact)}
+        hay0 = f"{prompt.lower()} {normalized}"
+        is_corr0 = any(t in hay0 for t in ("關聯", "相關", "關係", "correlat", "linked", "有沒有關"))
+        # Round 121: same-fact correlation — two numeric columns in ONE fact
+        # (e.g. defect_density vs yield, both in fab_wafer_yield). Checked first.
+        if is_corr0:
+            from ai4bi.analysis.crossfact import correlate_facts as _corr
+            from ai4bi.blocks.datastore import materialize_dataframe as _mat
+            for bid, c in facts.items():
+                two = _resolve_two_numeric_cols(prompt, normalized, c)
+                if len(two) == 2:
+                    try:
+                        df1 = _mat(c)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    stat = _corr(df1, two[0], two[1])
+                    if stat is None:
+                        continue
+                    sentence = (f"「{two[0]}」與「{two[1]}」（同表 {bid}，n={stat['n']}）"
+                                f"相關係數 r={stat['r']}（{stat['direction']}相關，{stat['strength']}）。")
+                    notes = [f"同表相關：直接以每列計算 Pearson 相關。來源：{bid}。"]
+                    intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                                      trust_notes=notes, risk_level="low")
+                    return NL2ProposalResult(intent=intent, message=sentence,
+                                             result_table=df1[two].head(50),
+                                             trust_notes=notes, risk_level="low")
         if len(facts) < 2:
             return None
         # A numeric column the prompt references, per fact.
@@ -4000,7 +4033,9 @@ def _looks_like_entity_compare(prompt: str, normalized: str) -> bool:
 # "Hot 批" / "ETCH 站" → "Hot" / "ETCH". (Round 119)
 _OPERAND_CLASSIFIERS = frozenset({
     "批", "批號", "個", "台", "站", "區", "顆", "片", "組", "群", "類", "種", "家", "間",
+    "班", "班別", "機台", "設備", "產品",
     "的", "區的", "平均", "差", "差多少", "相差", "queue", "time", "良率", "rate",
+    "移動次數", "誰比較高", "誰比較低", "誰較高", "比較高", "move", "count",
 })
 
 
@@ -4137,6 +4172,8 @@ def _is_hour_seasonality(hay: str) -> bool:
 _ENTITY_CUE_HINTS: tuple[str, ...] = (
     "客戶", "顧客", "會員", "customer", "member", "buyer", "client",
     "商品", "產品", "品項", "product", "item", "sku", "門市", "store",
+    # Round 121: fab entities
+    "lot", "批", "批號", "wafer", "晶圓", "機台", "設備", "tool", "製程", "站", "step",
 )
 _COUNT_CUE_HINTS: tuple[str, ...] = (
     "次", "筆", "訂單", "下單", "購買", "買", "回購", "單",
@@ -4148,8 +4185,9 @@ def _looks_like_segment_count(prompt: str, normalized: str) -> bool:
     hay = f"{prompt.lower()} {normalized}"
     if _measure_operator(hay) is None or re.search(r"\d", hay) is None:
         return False
-    return (any(h in hay for h in _ENTITY_CUE_HINTS)
-            and any(h in hay for h in _COUNT_CUE_HINTS))
+    # An entity to group by + a comparison + a number is enough — the threshold
+    # may be on a count (買超過 3 次) OR any measure (queue > 5 小時的 lot).
+    return any(h in hay for h in _ENTITY_CUE_HINTS)
 
 
 def _resolve_entity_dimension(idx, prompt: str, normalized: str, contracts):
@@ -4398,6 +4436,32 @@ def _pick_join_key(prompt: str, normalized: str, shared: set) -> str | None:
         if col in shared:
             return col
     return sorted(shared)[0]
+
+
+def _resolve_two_numeric_cols(prompt: str, normalized: str, contract) -> list:
+    """Round 121: up to 2 DISTINCT numeric columns the prompt references (for
+    same-fact correlation), longest keyword first."""
+    from ai4bi.ai.schema_index import _EN_TO_ZH
+    hay = f"{prompt.lower()} {normalized}"
+    best_per_col: dict[str, int] = {}
+    for c in getattr(contract, "columns", []) or []:
+        if getattr(c, "data_type", "") not in ("integer", "float", "int", "number",
+                                               "numeric", "double", "bigint"):
+            continue
+        low = c.name.lower()
+        if low.endswith(("_id", "_code", "_no")):
+            continue
+        kws: set[str] = set()
+        for tok in re.split(r"[_\s]+", low):
+            if tok:
+                kws.add(tok)
+                for zh in _EN_TO_ZH.get(tok, []):
+                    kws.add(zh)
+        for kw in kws:
+            if len(kw) >= 2 and kw in hay:
+                best_per_col[c.name] = max(best_per_col.get(c.name, 0), len(kw))
+    ordered = sorted(best_per_col.items(), key=lambda kv: kv[1], reverse=True)
+    return [col for col, _ in ordered[:2]]
 
 
 def _resolve_numeric_column(prompt: str, normalized: str, contract) -> str | None:
