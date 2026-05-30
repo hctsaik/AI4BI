@@ -21,9 +21,55 @@ from typing import Optional
 import streamlit as st
 
 from ai4bi.blocks.contracts import BlockType, DataBlockContract
-from ai4bi.ui.upload import _USER_BLOCKS_KEY
+from ai4bi.ui.upload import _USER_BLOCKS_KEY, _USER_BLOCK_META_KEY
 
 _USER_SEMANTIC_MODEL_KEY = "user_semantic_model"
+
+_SOURCE_BADGE = {
+    "duckdb": "🦆 DuckDB", "sqlite": "💾 SQLite", "postgres": "🐘 Postgres",
+    "postgresql": "🐘 Postgres", "url": "🌐 URL",
+}
+
+
+def render_data_source_manager() -> None:
+    """Round 147: unified data-source manager — one list of every loaded source
+    (uploaded files + DB-connector imports) with origin, row count, and remove.
+
+    Both upload.py and connector_panel.py write to the same ``user_blocks`` /
+    ``meta`` dicts, so this is the single place to see and manage all sources —
+    Power BI's "Queries" / Power Query pane equivalent.
+    """
+    user_blocks: dict[str, DataBlockContract] = st.session_state.get(_USER_BLOCKS_KEY, {})
+    meta: dict = st.session_state.get(_USER_BLOCK_META_KEY, {})
+    if not user_blocks:
+        st.info(
+            "目前沒有自己的資料來源。用下方「上傳檔案」或「連接資料庫」加入第一份資料；"
+            "加入 2 份以上後，可到 **🔗 模型** 模式把它們關聯起來。",
+            icon="📂",
+        )
+        return
+    n_rel = len(get_user_semantic_model().get("relationships", []))
+    st.caption(f"**已載入 {len(user_blocks)} 個資料來源 · {n_rel} 個關聯**")
+    for bid, contract in list(user_blocks.items()):
+        m = meta.get(bid, {})
+        origin = _SOURCE_BADGE.get(str(m.get("source", "")).lower(), "📄 上傳檔案")
+        cols = st.columns([4, 1])
+        with cols[0]:
+            st.markdown(
+                f"**{m.get('display_name', bid)}** · {origin}  \n"
+                f"<span style='color:#888;font-size:0.85em'>"
+                f"{m.get('row_count', '?')} 行 · {len(m.get('metric_names', []))} 指標 · "
+                f"{len(m.get('dim_names', []))} 維度 · `{bid}`</span>",
+                unsafe_allow_html=True,
+            )
+        with cols[1]:
+            if st.button("移除", key=f"dsm_remove_{bid}"):
+                st.session_state.get(_USER_BLOCKS_KEY, {}).pop(bid, None)
+                st.session_state.get(_USER_BLOCK_META_KEY, {}).pop(bid, None)
+                st.rerun()
+    if len(user_blocks) >= 2:
+        st.caption("💡 想把多份資料合併分析？到 **🔗 模型** 模式建立關聯（join）。")
+    st.divider()
 
 
 # ---------------------------------------------------------------------------

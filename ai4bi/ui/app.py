@@ -41,7 +41,7 @@ from ai4bi.ai.suggestions import generate_suggestions, detect_anomalies, Anomaly
 from ai4bi.report.retail_template import (
     build_retail_demo_report, build_retail_sales_block, build_store_staffing_block,
 )
-from ai4bi.ui.data_model import render_join_builder, render_data_model_view, get_user_semantic_model
+from ai4bi.ui.data_model import render_join_builder, render_data_model_view, get_user_semantic_model, render_data_source_manager
 from ai4bi.ui.workspace_manager import render_workspace_panel  # Round 039
 from ai4bi.ui.audit_trail import render_audit_trail, record_change  # Round 040
 from ai4bi.ui.report_slicer import render_report_slicer, get_slicer_filters, SlicerDefinition  # Round 041
@@ -794,7 +794,7 @@ def _render_draft_controls(
     with st.sidebar:
         st.title("AI for BI")
 
-        # Demo switcher — Round 033
+        # Demo switcher — Round 033 (persistent, top)
         _is_user_report = report.audit.report_id.startswith("upload_")
         _is_retail_demo = report.audit.report_id == "retail_demo_v1"
         _is_semi_demo = report.audit.report_id == "semiconductor_queue_time_v1"
@@ -803,7 +803,6 @@ def _render_draft_controls(
                 workspace.replace_with_loaded(build_retail_demo_report())
                 cache.invalidate_all()
                 st.rerun()
-            st.markdown("---")
         if _is_retail_demo:
             with st.expander("進階示範（半導體）", expanded=False):
                 if st.button("載入半導體示範報表", key="load_semi_demo"):
@@ -811,20 +810,147 @@ def _render_draft_controls(
                     cache.invalidate_all()
                     st.rerun()
 
-        # ── Zone 0: AI 建議 (Round 031 — Copilot-style suggestions) ─────
-        _render_ai_suggestions(report, cache)
+        # ── Ribbon: always-on actions (undo / redo / clear cache) ──────────
+        # Round 147: promoted out of the buried 報表設定 expander so editing
+        # actions are always reachable, like Power BI's ribbon.
+        _rb = st.columns(3)
+        with _rb[0]:
+            if st.button("復原", disabled=not workspace.can_undo(), width="stretch"):
+                _rev_before = report.revision
+                workspace.undo()
+                record_change("Undo", "Undid last proposal", report.report_id, _rev_before, workspace.current_report().revision)
+                _clear_visual_assistant_context()
+                _request_widget_sync()
+                cache.invalidate_all()
+                st.rerun()
+        with _rb[1]:
+            if st.button("重做", disabled=not workspace.can_redo(), width="stretch"):
+                _rev_before = report.revision
+                workspace.redo()
+                record_change("Redo", "Redid last proposal", report.report_id, _rev_before, workspace.current_report().revision)
+                _clear_visual_assistant_context()
+                _request_widget_sync()
+                cache.invalidate_all()
+                st.rerun()
+        with _rb[2]:
+            if st.button("🗑 快取", disabled=report.read_only, width="stretch"):
+                cache.invalidate_all()
+                st.rerun()
 
-        # ── Zone 0b: 想觀察的數字 (spec 8.1 primary entry) ───────────────
-        _render_metric_first_entry(report, cache)
-
+        # ── View-mode selector (Round 147 — Power BI-style view modes) ─────
+        # Replaces the old flat ~25-panel scroll. Each mode shows only its
+        # relevant panes, so the join/data-model/data-source features are
+        # first-class destinations instead of buried expanders.
+        mode = st.radio(
+            "模式",
+            ["🔍 探索", "🗂️ 資料", "🔗 模型", "📊 分析", "📤 分享"],
+            horizontal=True, label_visibility="collapsed", key="_nav_mode",
+        )
         st.markdown("---")
 
-        # ── Zone 1: 篩選條件 ────────────────────────────────────────────────
+        if "探索" in mode:
+            # Ask / read the report: suggestions, metric-first entry, NL assistant.
+            _render_ai_suggestions(report, cache)
+            _render_metric_first_entry(report, cache)
+            _render_visual_assistant(report, cache, executor)
+            render_bookmark_panel(cache)
+
+        elif "資料" in mode:
+            # Unified data-source manager: one place to add & inspect every source.
+            st.subheader("資料來源")
+            st.caption("在這裡上傳檔案、連接資料庫，並管理已載入的資料。")
+            render_data_source_manager()
+            render_upload_panel()
+            render_connector_panel()
+            _user_blocks: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
+            _user_meta: dict = st.session_state.get(_USER_BLOCK_META_KEY, {})
+            if _user_blocks:
+                with st.expander("📊 從這份資料建立報表", expanded=False):
+                    bid_choice = st.selectbox(
+                        "選擇已匯入的資料",
+                        list(_user_blocks.keys()),
+                        key="create_report_block_sel",
+                    )
+                    if st.button("建立新報表", key="create_report_from_upload", type="primary"):
+                        _meta = _user_meta.get(bid_choice, {})
+                        _contract = _user_blocks[bid_choice]
+                        _new_report = build_report_from_block(
+                            _contract,
+                            _meta.get("metric_names", []),
+                            _meta.get("dim_names", []),
+                        )
+                        workspace.replace_with_loaded(_new_report)
+                        cache.invalidate_all()
+                        st.rerun()
+            _render_block_library_panel()
+
+        elif "模型" in mode:
+            # Relationships + semantic layer — JOIN is the FIRST thing here.
+            st.subheader("資料模型")
+            st.caption("把多份資料用共同欄位關聯起來，並定義計算欄位（類似 Power BI 的模型檢視）。")
+            render_join_builder()
+            render_data_model_view()
+            render_calc_metric_panel()
+            render_cross_fact_panel()
+            render_what_if_panel()
+            with st.expander("➕ 手動新增圖表", expanded=False):
+                st.caption("自訂指標、維度與圖表類型（進階使用者）。")
+                _render_add_visual_panel(report, cache)
+
+        elif "分析" in mode:
+            st.subheader("進階分析")
+            render_cohort_panel()
+            render_basket_panel()
+            render_rfm_panel()
+            render_trend_streak_panel()
+            if executor is not None:
+                render_change_panel(_load_all_contracts(), executor)
+                render_summary_panel(_load_all_contracts(), executor)
+
+        elif "分享" in mode:
+            st.subheader("分享與管理")
+            render_workspace_panel(store, cache)
+            with st.expander("📤 分享與發布", expanded=False):
+                st.caption("檢查報表是否符合發布條件，建立唯讀分享連結，或載入已發布版本。")
+                _render_publication_readiness(report)
+                st.markdown("---")
+                _render_published_snapshot_browser(report, cache)
+            _render_digest_scheduler(report, executor)
+            render_alert_manager(_load_all_contracts())
+            with st.expander("⚙️ 報表設定", expanded=False):
+                st.caption(f"版本 {report.revision}")
+                if not report.read_only:
+                    new_title = st.text_input("報表標題", value=report.title, key="widget_report_title")
+                    if new_title != report.title:
+                        title_proposal = build_title_proposal(report.title, new_title)
+                        workspace.stage_proposal(title_proposal)
+                        st.rerun()
+                if not report.read_only and len(report.pages) > 1:
+                    delete_page_id = st.selectbox(
+                        "刪除頁面",
+                        list(report.pages.keys()),
+                        format_func=lambda page_id: report.pages[page_id].display_name or page_id,
+                        key="widget_delete_page",
+                    )
+                    if st.button("Stage Page Delete", width="stretch"):
+                        workspace.stage_proposal(
+                            build_page_delete_proposal(workspace.current_report(), delete_page_id)
+                        )
+                        workspace.set_message(f"Page '{delete_page_id}' deletion staged.")
+                        st.rerun()
+            render_audit_trail()
+            with st.expander("🔧 系統工具", expanded=False):
+                st.caption("資料積木資訊與版本鎖定（進階使用者）。")
+                _render_pin_versions_panel(report)
+                st.markdown("---")
+                _render_block_library_panel()
+
+        # ── Persistent Filters pane (every mode, like Power BI's Filters) ──
+        st.markdown("---")
         _has_demo_controls = all(
             k in report.controls for k in ("process_step", "product_family", "breakdown")
         )
         if _has_demo_controls:
-            # Semiconductor demo: use existing report controls
             st.subheader("篩選條件")
             steps = st.multiselect(
                 report.controls["process_step"].label,
@@ -855,163 +981,12 @@ def _render_draft_controls(
                     cache.invalidate_all()
                     st.rerun()
         else:
-            # Round 041: Universal slicer for user data / retail demo
+            st.subheader("篩選條件")
             _active_slicers = render_report_slicer(_load_all_contracts(), cache)
             st.session_state["_active_slicers"] = _active_slicers
 
-        # ── Row-level security demo (Round 106) ───────────────────────────
+        # ── Row-level security demo (Round 106) — persistent (View as) ─────
         _render_identity_selector(report, cache, executor)
-
-        st.markdown("---")
-
-        # ── Zone 2: 對這張圖說話 ─────────────────────────────────────────
-        _render_visual_assistant(report, cache, executor)
-
-        st.markdown("---")
-
-        # ── Zone 3: 工作區 (Round 039) ───────────────────────────────────
-        render_workspace_panel(store, cache)
-
-        # ── Zone 3 (legacy controls inline — undo/redo/title/cache) ─────
-        with st.expander("⚙️ 報表設定", expanded=False):
-            st.caption(f"版本 {report.revision}")
-
-            if not report.read_only:
-                new_title = st.text_input("報表標題", value=report.title, key="widget_report_title")
-                if new_title != report.title:
-                    title_proposal = build_title_proposal(report.title, new_title)
-                    workspace.stage_proposal(title_proposal)
-                    st.rerun()
-
-            if not report.read_only and len(report.pages) > 1:
-                delete_page_id = st.selectbox(
-                    "刪除頁面",
-                    list(report.pages.keys()),
-                    format_func=lambda page_id: report.pages[page_id].display_name or page_id,
-                    key="widget_delete_page",
-                )
-                if st.button("Stage Page Delete", width="stretch"):
-                    workspace.stage_proposal(
-                        build_page_delete_proposal(workspace.current_report(), delete_page_id)
-                    )
-                    workspace.set_message(f"Page '{delete_page_id}' deletion staged.")
-                    st.rerun()
-
-            button_cols = st.columns(2)
-            with button_cols[0]:
-                if st.button("復原", disabled=not workspace.can_undo(), width="stretch"):
-                    _rev_before = report.revision
-                    workspace.undo()
-                    record_change("Undo", "Undid last proposal", report.report_id, _rev_before, workspace.current_report().revision)
-                    _clear_visual_assistant_context()
-                    _request_widget_sync()
-                    cache.invalidate_all()
-                    st.rerun()
-            with button_cols[1]:
-                if st.button("重做", disabled=not workspace.can_redo(), width="stretch"):
-                    _rev_before = report.revision
-                    workspace.redo()
-                    record_change("Redo", "Redid last proposal", report.report_id, _rev_before, workspace.current_report().revision)
-                    _clear_visual_assistant_context()
-                    _request_widget_sync()
-                    cache.invalidate_all()
-                    st.rerun()
-            if st.button("清除查詢快取", width="stretch"):
-                cache.invalidate_all()
-                st.rerun()
-
-        # ── Zone 3b: 上傳資料 (Round 028) ───────────────────────────────────
-        render_upload_panel()
-        # ── Zone 3b2: 外部資料庫連接器 (Round 043) ──────────────────────────
-        render_connector_panel()
-        _user_blocks: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
-        _user_meta: dict = st.session_state.get(_USER_BLOCK_META_KEY, {})
-        if _user_blocks:
-            with st.expander("📊 從上傳資料建立報表", expanded=False):
-                bid_choice = st.selectbox(
-                    "選擇已匯入的資料",
-                    list(_user_blocks.keys()),
-                    key="create_report_block_sel",
-                )
-                if st.button("建立新報表", key="create_report_from_upload", type="primary"):
-                    _meta = _user_meta.get(bid_choice, {})
-                    _contract = _user_blocks[bid_choice]
-                    _new_report = build_report_from_block(
-                        _contract,
-                        _meta.get("metric_names", []),
-                        _meta.get("dim_names", []),
-                    )
-                    workspace.replace_with_loaded(_new_report)
-                    cache.invalidate_all()
-                    st.rerun()
-
-        # ── Zone 3c: 資料關聯設定 (Round 037) ────────────────────────────────
-        render_join_builder()
-
-        # ── Zone 3d: 資料模型 (Round 038) ─────────────────────────────────
-        render_data_model_view()
-
-        # ── Zone 3d2: 計算欄位 (Round 052) ────────────────────────────────
-        render_calc_metric_panel()
-
-        # ── Zone 3d3: 跨資料表計算 (Round 055) ────────────────────────────
-        render_cross_fact_panel()
-
-        # ── Zone 3d4: What-If 參數 (Round 060) ────────────────────────────
-        render_what_if_panel()
-
-        # ── Zone 3d6: 客戶留存分析 (Round 062) ────────────────────────────
-        render_cohort_panel()
-
-        # ── Zone 3d8: 商品關聯 (Round 077) ────────────────────────────────
-        render_basket_panel()
-
-        # ── Zone 3d9: 客戶流失風險 / RFM (Round 082) ──────────────────────
-        render_rfm_panel()
-
-        # ── Zone 3d10: 連續下滑偵測 (Round 085) ───────────────────────────
-        render_trend_streak_panel()
-
-        # ── Zone 3d7: 變化分解 (Round 071) ────────────────────────────────
-        if executor is not None:
-            render_change_panel(_load_all_contracts(), executor)
-
-        # ── Zone 3d5: 書籤 / 儲存檢視 (Round 061) ──────────────────────────
-        render_bookmark_panel(cache)
-
-        # ── Zone 3e: 提醒設定 (Round 048) ─────────────────────────────────
-        render_alert_manager(_load_all_contracts())
-
-        # ── Zone 3f: 業務摘要 (Round 050) ─────────────────────────────────
-        if executor is not None:
-            render_summary_panel(_load_all_contracts(), executor)
-
-        st.markdown("---")
-
-        # ── Zone 4a: 手動新增圖表（進階） ──────────────────────────────────
-        with st.expander("➕ 手動新增圖表", expanded=False):
-            st.caption("自訂指標、維度與圖表類型（進階使用者）。")
-            _render_add_visual_panel(report, cache)
-
-        # ── Zone 4b: 分享與發布 ──────────────────────────────────────────
-        with st.expander("📤 分享與發布", expanded=False):
-            st.caption("檢查報表是否符合發布條件，建立唯讀分享連結，或載入已發布版本。")
-            _render_publication_readiness(report)
-            st.markdown("---")
-            _render_published_snapshot_browser(report, cache)
-
-        # ── Zone 4b2: 排程摘要寄送 (Round 111) ───────────────────────────────
-        _render_digest_scheduler(report, executor)
-
-        # ── Zone 4c: 變更記錄 (Round 040) ───────────────────────────────────
-        render_audit_trail()
-
-        # ── Zone 4d: 系統工具 (hidden by default) ────────────────────────
-        with st.expander("🔧 系統工具", expanded=False):
-            st.caption("資料積木資訊與版本鎖定（進階使用者）。")
-            _render_pin_versions_panel(report)
-            st.markdown("---")
-            _render_block_library_panel()
 
         # ── Footer: status ───────────────────────────────────────────────
         st.markdown("---")
