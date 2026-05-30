@@ -1359,9 +1359,42 @@ def _render_identity_selector(report: ExecutableReportSpec, cache: QueryCache, e
     """
     if report.audit.report_id != "retail_demo_v1":
         return
-    cities = ["全部（管理者）", "台北", "台中", "高雄", "台南"]
-    with st.expander("🔐 檢視身分（資料權限示範）", expanded=False):
-        st.caption("切換門市身分：非「全部」時，所有圖表只會看到該門市所在城市的資料（列級安全 RLS）。")
+    from ai4bi.report.auth import authenticate, demo_users
+    with st.expander("🔐 檢視身分 / 登入（資料權限示範）", expanded=False):
+        logged_in = st.session_state.get("_auth_user")
+        if logged_in:
+            ident = st.session_state.get("_identity") or {}
+            scope = ident.get("city", "全部（管理者）")
+            st.success(f"已登入：{logged_in}（{ident.get('role','viewer')}）｜資料範圍：{scope}")
+            if st.button("登出", key="_auth_logout"):
+                st.session_state["_auth_user"] = None
+                st.session_state["_identity"] = None
+                if executor is not None:
+                    executor._identity = {}
+                cache.invalidate_all()
+                st.rerun()
+            return
+
+        st.caption("登入後依角色套用列級安全（RLS）：店長只看自己城市，管理者看全部。"
+                   "示範帳號：admin / taipei / taichung（密碼=帳號+123）。")
+        u = st.text_input("帳號", key="_auth_u")
+        p = st.text_input("密碼", type="password", key="_auth_p")
+        if st.button("登入", key="_auth_login"):
+            ident = authenticate(u, p, demo_users())
+            if ident is None:
+                st.error("帳號或密碼錯誤。")
+            else:
+                # admin's empty city scope → no row restriction
+                st.session_state["_auth_user"] = ident["username"]
+                st.session_state["_identity"] = (
+                    {"city": ident["city"]} if ident.get("city") else None)
+                if executor is not None:
+                    executor._identity = st.session_state["_identity"] or {}
+                cache.invalidate_all()
+                st.rerun()
+
+        st.markdown("—— 或快速切換（免登入示範）——")
+        cities = ["全部（管理者）", "台北", "台中", "高雄", "台南"]
         choice = st.selectbox("以此身分檢視", cities, key="_rls_choice")
         new_identity = None if choice.startswith("全部") else {"city": choice}
         if new_identity != st.session_state.get("_identity"):
