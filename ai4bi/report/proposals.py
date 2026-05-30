@@ -250,6 +250,7 @@ def prompt_to_proposal(
     semantic_model: "dict | None" = None,
     contracts: "dict | None" = None,
     executor: "object | None" = None,
+    conversation_state: "dict | None" = None,
 ) -> ProposalResult:
     """Convert a natural-language prompt to a reviewable proposal or plan.
 
@@ -257,6 +258,8 @@ def prompt_to_proposal(
     preserves the older demo control intents while returning richer plan/trust
     metadata to the Streamlit surface. When ``executor`` is supplied, metric
     *questions* are answered directly (Round 078) instead of producing edits.
+    ``conversation_state`` is a caller-owned dict (per session) that lets a
+    follow-up like "只看 ETCH" inherit the prior turn's scope (Round 136).
     """
     normalized = prompt.strip().upper()
     if not normalized:
@@ -265,6 +268,7 @@ def prompt_to_proposal(
     ai_result = NL2ProposalService().propose(
         prompt, report, selected_component_id,
         semantic_model=semantic_model, contracts=contracts, executor=executor,
+        conversation_state=conversation_state,
     )
     if ai_result.refusal is not None:
         return ProposalResult(

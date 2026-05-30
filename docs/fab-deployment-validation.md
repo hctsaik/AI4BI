@@ -151,4 +151,12 @@
 - **S10 加權良率白話確認**：ranking 用 weighted_yield 時，問「加權嗎」即白話確認「以晶粒數加權，非簡單平均」。
 - 非 e2e **1021 passed**。10 情境現況：S1~S2、S4~S10 皆達標；僅 **S3 對話 follow-up** 仍缺（下輪）。
 
+**Round 136**（test+commit+push）：**對話式 follow-up 語境繼承**（產品 lens #1）：
+- `propose()` 新增 `conversation_state` 參數（caller 持有的 per-session dict；測試/probe 因重用 service 實例改用 instance-level dict）。經 `prompt_to_proposal` 一路接到 `app.py` 的 `st.session_state["_convo_state"]`。
+- breakdown/ranking/metric 答完即 `self._remember(block/metric/alias/dim)`。
+- `_looks_like_followup_scope`（短句 + 「只看/那…呢/just/only」）+ `_extract_followup_value`（去除 cue 詞留下值），`_answer_followup_scope` 沿用上一輪 metric+dim、解析值屬哪個類別欄、加 eq FilterSpec 重跑。**排在 _keyword_propose 最前**（有前文時），否則「只看 ETCH」被 value_filter 攔。
+- 實測 S3：turn1「各區平均 queue time」→ turn2「只看 ETCH 呢？」回「（延續上一題）只看 ETCH：Avg Queue Time Hr 5.37」(rows=1)。無前文時不亂編（測試覆蓋）。
+- 新增 `tests/test_followup_scope.py`（3 測）。非 e2e **1024 passed**。
+- **10/10 情境皆達標 → 進入 multi-agent 重新打分（全新情境）。**
+
 

@@ -1485,7 +1485,12 @@ def _render_visual_assistant(report: ExecutableReportSpec, cache: QueryCache, ex
             _user_sm = get_user_semantic_model()
             _sm["relationships"] = _sm.get("relationships", []) + _user_sm.get("relationships", [])
             _contracts = _load_all_contracts()
-            result = prompt_to_proposal(prompt, report, selected, semantic_model=_sm, contracts=_contracts, executor=executor)
+            # Round 136: per-session conversation memory so a follow-up like
+            # "只看 ETCH" inherits the prior turn's metric + dimension scope.
+            _convo = st.session_state.setdefault("_convo_state", {})
+            result = prompt_to_proposal(prompt, report, selected, semantic_model=_sm,
+                                        contracts=_contracts, executor=executor,
+                                        conversation_state=_convo)
             _store_visual_assistant_context(result)
             _record_chat(prompt, selected, result)
             st.session_state["_disambiguation"] = getattr(result, "disambiguation", None)

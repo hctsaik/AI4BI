@@ -317,11 +317,20 @@ class NL2ProposalService:
         semantic_model: dict[str, Any] | None = None,
         contracts: dict[str, Any] | None = None,
         executor: Any = None,
+        conversation_state: dict[str, Any] | None = None,
     ) -> NL2ProposalResult:
         # Round 078: an executor lets the answer-engine compute a real number
         # through the governed query path. Stashed on self for the duration of
         # this call so the existing handler signatures stay untouched.
         self._executor = executor
+        # Round 136: conversation memory for follow-up scope ("只看 ETCH",
+        # "改成上週"). The app owns a per-session dict and passes it in; when none
+        # is supplied (e.g. a reused service instance in tests/probe) we keep an
+        # instance-level dict so multi-turn still works.
+        if conversation_state is not None:
+            self._convo_mem = conversation_state
+        elif not hasattr(self, "_convo_mem"):
+            self._convo_mem = {}
         normalized = _normalize(prompt)
         if not normalized:
             return self._unsupported(
@@ -659,6 +668,16 @@ class NL2ProposalService:
         # Round 086: route churn / declining-streak / basket questions to the
         # pre-built pandas analytics engines. Checked early — these are specific
         # named analyses, more specific than a plain metric question.
+        # Round 136: conversational follow-up — "只看 ETCH 呢？" continues the
+        # prior analysis by narrowing scope. Checked FIRST (when there is prior
+        # context) so a short refinement isn't stolen by value_filter routing.
+        mem = getattr(self, "_convo_mem", {})
+        if isinstance(mem, dict) and mem.get("last") and \
+                _looks_like_followup_scope(prompt, normalized):
+            fu = self._answer_followup_scope(prompt, normalized, report, contracts)
+            if fu is not None:
+                return fu
+
         if _detect_panel_analysis(prompt, normalized) is not None:
             panel = self._run_panel_analysis(prompt, normalized, contracts)
             if panel is not None:
@@ -2894,6 +2913,92 @@ class NL2ProposalService:
             sentence = (f"「{alias}」依「{dim_col}」分組（共 {len(df)} 組）："
                         f"最高 {top[dim_col]}（{tv}）。")
         notes = [f"依「{dim_col}」分組彙總「{alias}」（治理查詢路徑），來源：{block_id}。"]
+        self._remember(block_id=block_id, metric_name=metric_name, alias=alias,
+                       dim_col=dim_col, kind="breakdown")
+        intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                          trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=sentence, result_table=df,
+                                 trust_notes=notes, risk_level="low")
+
+    # ------------------------------------------------------------------ #
+    # Round 136: conversational follow-up (scope inheritance)
+    # ------------------------------------------------------------------ #
+
+    def _remember(self, **ctx) -> None:
+        """Stash the last resolved analysis so a follow-up can inherit its scope."""
+        mem = getattr(self, "_convo_mem", None)
+        if mem is not None:
+            mem["last"] = ctx
+
+    def _answer_followup_scope(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 136: a follow-up like "只看 ETCH 呢？" inherits the prior turn's
+        metric + dimension and just narrows the scope to one value. Without this,
+        the prompt is an island and falls through to "select a visual first"."""
+        executor = getattr(self, "_executor", None)
+        mem = getattr(self, "_convo_mem", {})
+        last = mem.get("last") if isinstance(mem, dict) else None
+        if executor is None or not contracts or not last:
+            return None
+        block_id = last.get("block_id")
+        metric_name, alias = last.get("metric_name"), last.get("alias")
+        dim_col = last.get("dim_col")
+        if not block_id or not metric_name or block_id not in contracts:
+            return None
+        # candidate value = the follow-up minus the refinement cue words
+        cand = _extract_followup_value(prompt)
+        if not cand:
+            return None
+        # resolve which categorical column holds the candidate (prefer prior dim)
+        from ai4bi.blocks.datastore import materialize_dataframe
+        try:
+            df0 = materialize_dataframe(contracts[block_id])
+        except Exception:  # noqa: BLE001
+            return None
+        col, value = None, None
+        search_cols = ([dim_col] if dim_col and dim_col in df0.columns else []) + \
+            [c for c in df0.columns if df0[c].dtype == object and c != dim_col]
+        for c in search_cols:
+            vals = {str(x) for x in df0[c].dropna().unique()}
+            hit = next((v for v in vals if v and (v.lower() == cand.lower()
+                        or cand.lower() in v.lower() or v.lower().startswith(cand.lower()))), None)
+            if hit:
+                col, value = c, hit
+                break
+        if col is None:
+            return None
+        from ai4bi.query_spec import (
+            BlockRef, DimensionRef, FilterOperator, FilterSpec, SortDirection,
+            SortSpec, VisualQuerySpec)
+        gdim = dim_col if dim_col and dim_col in df0.columns else col
+        spec = VisualQuerySpec(
+            spec_id=f"followup_{metric_name}", block_refs=[BlockRef(block_id)],
+            metrics=[MetricRef(block_id, metric_name, alias)],
+            dimensions=[DimensionRef(block_id, gdim, gdim)],
+            filters=[FilterSpec(block_id=block_id, column_name=col,
+                                operator=FilterOperator.eq, value=value)],
+            sort=[SortSpec(alias, SortDirection.desc)], inherit_global_filter=False)
+        try:
+            df = executor.run(spec)
+        except Exception:  # noqa: BLE001
+            return None
+        if df is None or df.empty:
+            return None
+        if alias in df.columns:
+            v = df.iloc[0][alias]
+            v = round(float(v), 2) if isinstance(v, (int, float)) else v
+            sentence = f"（延續上一題）只看「{value}」：「{alias}」為 {v}。"
+        else:
+            sentence = f"（延續上一題）已篩選 {col}={value}。"
+        notes = [f"沿用前一輪分析（{alias} 依 {gdim}），新增篩選 {col}={value}。來源：{block_id}。"]
+        # keep memory so a further follow-up still works
+        self._remember(block_id=block_id, metric_name=metric_name, alias=alias,
+                       dim_col=gdim, kind="followup")
         intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                           trust_notes=notes, risk_level="low")
         return NL2ProposalResult(intent=intent, message=sentence, result_table=df,
@@ -3018,6 +3123,8 @@ class NL2ProposalService:
             if any(t in f"{prompt.lower()} {normalized}" for t in (
                     "加權", "weighted", "晶圓數", "晶粒", "die", "平均", "怎麼算")):
                 sentence = f"{sentence} {wnote}"
+        self._remember(block_id=block_id, metric_name=metric_name, alias=alias,
+                       dim_col=dim_col, kind="ranking")
         intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                           trust_notes=notes, risk_level="low")
         return NL2ProposalResult(
@@ -3228,6 +3335,8 @@ class NL2ProposalService:
         # One-click "add as KPI" — reuse the governed add-visual proposal path.
         proposal = self._build_answer_kpi_proposal(report, block_id, metric_name, alias, period, date_col)
 
+        self._remember(block_id=block_id, metric_name=metric_name, alias=alias,
+                       dim_col=None, kind="metric")
         intent = AIIntent(
             intent_kind="analysis_request",
             target_scope="semantic_model",
@@ -4630,6 +4739,35 @@ def _provenance_note(contracts, block_id: str, date_col: str | None,
         method = "；方法＝SUM(良品)/SUM(受測晶粒)（以晶粒數加權，非各晶圓良率的簡單平均）"
     return (f"母體：N={n} {grain}（{block_id}）{span}{method}"
             f"；未套用額外排除規則，null 值不計入彙總。")
+
+
+# Round 136: follow-up scope refinement cues. A short prompt carrying one of
+# these is a continuation of the prior analysis, not a fresh question.
+_FOLLOWUP_CUES: tuple[str, ...] = (
+    "只看", "只要看", "只要", "看 ", "那 ", "改看", "改成只看", "換成", "改用",
+    "filter to", "just ", "only ", "what about", "how about", "限定", "聚焦",
+)
+_FOLLOWUP_STRIP = ("只看", "只要看", "只要", "改看", "改成只看", "換成看", "換成",
+                   "改用", "限定", "聚焦", "看", "那", "呢", "就好", "的話",
+                   "filter to", "just", "only", "what about", "how about",
+                   "?", "？", "、", "，", ",", "。", " 區", "區")
+
+
+def _looks_like_followup_scope(prompt: str, normalized: str) -> bool:
+    """A short continuation like "只看 ETCH 呢？" / "那 PHOTO 呢" / "just ETCH"."""
+    hay = f"{prompt.lower()} {normalized}"
+    if len(prompt.strip()) > 24:  # follow-ups are short; long prompts are fresh asks
+        return False
+    return any(c in hay for c in _FOLLOWUP_CUES)
+
+
+def _extract_followup_value(prompt: str) -> str | None:
+    """Strip the refinement cue words, leaving the value to scope to (e.g. ETCH)."""
+    s = prompt.strip()
+    for tok in _FOLLOWUP_STRIP:
+        s = s.replace(tok, " ")
+    s = " ".join(s.split())
+    return s or None
 
 
 def _ambiguous_clarification(prompt: str, normalized: str) -> str | None:
