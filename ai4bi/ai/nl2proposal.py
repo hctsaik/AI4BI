@@ -1710,10 +1710,13 @@ class NL2ProposalService:
         if not rows:
             return None
         df = pd.DataFrame(rows)
+        # Round 142: surface the top highlights inline, not just the title.
+        tops = "；".join(r["重點"] for r in rows[:3])
+        headline = f"{rep.title}：{tops}{'…（詳見下表）' if len(rows) > 3 else ''}"
         notes = ["整合期間重點、Top 排名與已觸發的提醒（與側欄『業務摘要』同源）。"]
         intent = AIIntent(intent_kind="analysis_request", target_scope="report",
                           trust_notes=notes, risk_level="low")
-        return NL2ProposalResult(intent=intent, message=rep.title, result_table=df,
+        return NL2ProposalResult(intent=intent, message=headline, result_table=df,
                                  trust_notes=notes, risk_level="low")
 
     def _answer_seasonality(
