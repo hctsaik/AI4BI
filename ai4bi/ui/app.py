@@ -1363,10 +1363,15 @@ def _render_visual_assistant(report: ExecutableReportSpec, cache: QueryCache, ex
             disabled=report.read_only,
         )
         selected = selected_raw or None
-        prompt = st.text_input(
+        # Round 102: a short, drag-resizable text_area — roomier than a single line
+        # while typing a longer NL request, but it doesn't permanently occupy the
+        # sidebar (user-reported sizing feedback). height≈3 lines; drag to grow.
+        prompt = st.text_area(
             "② 告訴我你想做什麼，或直接問問題",
             placeholder="例：上個月營收多少？／為什麼營收下降 依地區拆解／營收超過 10 萬的地區／加一張趨勢圖",
+            height=80,
             disabled=report.read_only,
+            help="輸入較長的句子時可拖曳右下角放大；按「送出請求」執行。",
         )
         with st.expander("💡 你可以這樣問（不只是改圖，也能直接得到答案）", expanded=False):
             st.markdown(

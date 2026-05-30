@@ -40,7 +40,7 @@
 
 > 此區收集使用者實際操作中回報的 UI/UX 摩擦，留待專門的 UI/UX 輪次集中處理（避免散在功能輪中分心）。
 
-1. **左側 NL 輸入框太小（2026-05-30 使用者回報）** — `app.py:_render_visual_assistant` 的「② 告訴我你想做什麼」是單行 `st.text_input`，打較長的自然語言指令時可視區域太窄、看不到全文；但使用者**不希望它常態性佔據大量側欄高度**。
+1. **✅ 已處理（R102）左側 NL 輸入框太小（2026-05-30 使用者回報）** — 原為單行 `st.text_input`。R102 改為 `st.text_area(height=80)`：約 3 行高、可拖曳右下角放大，比單行寬鬆但不常態佔據大量側欄高度。採用候選做法 (a)。`app.py:_render_visual_assistant`。
    - 候選做法（待討論）：(a) 改 `st.text_area` 但 `height` 設小（~68px）並可手動拖拉；(b) 維持單行，聚焦時才展開（需自訂 component / CSS，Streamlit 原生不支援 focus-grow）；(c) 把 NL 助理從側欄移到主畫面頂部的寬輸入列（更接近 Power BI Copilot 的位置），側欄只留快捷；(d) 增加「展開輸入」小按鈕切換 text_input↔text_area。
    - 傾向：(c) 長期最對標 Power BI；(a) 最低成本可先上。
 

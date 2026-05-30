@@ -42,7 +42,7 @@ def test_style_prompt_previews_applies_and_undoes_without_changing_metrics():
     original_metrics = [(metric.label, metric.value) for metric in app.metric]
 
     _visual_selectbox(app).set_value("line_revenue_trend").run(timeout=30)
-    app.text_input[0].set_value("make trend line red").run(timeout=30)
+    app.text_area[0].set_value("make trend line red").run(timeout=30)
 
     _click(app, "送出請求")
     report = app.session_state["report_spec"]
@@ -65,12 +65,12 @@ def test_unsupported_assistant_request_clears_stale_pending_proposal():
     """Unsupported request clears any previously staged proposal."""
     app = _new_app()
     _visual_selectbox(app).set_value("line_revenue_trend").run(timeout=30)
-    app.text_input[0].set_value("make trend line red").run(timeout=30)
+    app.text_area[0].set_value("make trend line red").run(timeout=30)
 
     _click(app, "送出請求")
     assert app.session_state["pending_patch"] is not None
 
-    app.text_input[0].set_value("write SQL to join raw orders to inventory raw detail rows").run(timeout=30)
+    app.text_area[0].set_value("write SQL to join raw orders to inventory raw detail rows").run(timeout=30)
     _click(app, "送出請求")
 
     assert app.session_state["pending_patch"] is None
@@ -87,7 +87,7 @@ def test_analysis_prompt_waits_for_apply_and_then_undo_restores_controls_and_num
     _load_semi_demo(app)
 
     _visual_selectbox(app).set_value("line_queue_by_day").run(timeout=30)
-    app.text_input[0].set_value("Only show Logic-B").run(timeout=30)
+    app.text_area[0].set_value("Only show Logic-B").run(timeout=30)
 
     _click(app, "送出請求")
     assert [(metric.label, metric.value) for metric in app.metric] == [
