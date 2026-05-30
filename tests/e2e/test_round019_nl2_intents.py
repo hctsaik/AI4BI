@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 from playwright.sync_api import Page, expect
 
-_PROMPT_PLACEHOLDER = "make this line chart red"
+_PROMPT_PLACEHOLDER = "上個月營收多少"  # R106: matches the R102 text_area placeholder
 
 
 def _load_app(page: Page, base_url: str) -> None:

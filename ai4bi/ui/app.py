@@ -859,6 +859,9 @@ def _render_draft_controls(
             _active_slicers = render_report_slicer(_load_all_contracts(), cache)
             st.session_state["_active_slicers"] = _active_slicers
 
+        # ── Row-level security demo (Round 106) ───────────────────────────
+        _render_identity_selector(report, cache, executor)
+
         st.markdown("---")
 
         # ── Zone 2: 對這張圖說話 ─────────────────────────────────────────
@@ -1345,6 +1348,27 @@ def _render_chat_history() -> None:
         if st.button("清除歷史", key="clear_chat_history"):
             st.session_state[_CHAT_HISTORY_KEY] = []
             st.rerun()
+
+
+def _render_identity_selector(report: ExecutableReportSpec, cache: QueryCache, executor=None) -> None:
+    """Round 106: a lightweight identity/scope selector to activate R103 RLS.
+
+    Only shown for the retail demo (whose policy scopes by city). Selecting a
+    city sets the session identity so the executor restricts every query to that
+    city — a live row-level-security demo without an external IdP.
+    """
+    if report.audit.report_id != "retail_demo_v1":
+        return
+    cities = ["全部（管理者）", "台北", "台中", "高雄", "台南"]
+    with st.expander("🔐 檢視身分（資料權限示範）", expanded=False):
+        st.caption("切換門市身分：非「全部」時，所有圖表只會看到該門市所在城市的資料（列級安全 RLS）。")
+        choice = st.selectbox("以此身分檢視", cities, key="_rls_choice")
+        new_identity = None if choice.startswith("全部") else {"city": choice}
+        if new_identity != st.session_state.get("_identity"):
+            st.session_state["_identity"] = new_identity
+            if executor is not None:
+                executor._identity = new_identity or {}
+            cache.invalidate_all()
 
 
 def _render_visual_assistant(report: ExecutableReportSpec, cache: QueryCache, executor=None) -> None:

@@ -184,7 +184,10 @@ def build_retail_sales_block() -> DataBlockContract:
             ),
         ],
         data_source=InlineDataSource(records=records),
-        policy=PolicySpec(data_classification=DataClassification.internal),
+        # Round 106: row-level-security demo — when the session identity carries a
+        # "city", the executor scopes every query to that city. No identity = all.
+        policy=PolicySpec(data_classification=DataClassification.internal,
+                          row_filter_column="city", row_filter_identity_key="city"),
     )
     _CACHED_BLOCK = block
     return block
