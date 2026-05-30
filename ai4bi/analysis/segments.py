@@ -45,6 +45,37 @@ def new_vs_returning_revenue(
     return out[["新客", "回頭客"]]
 
 
+def repeat_vs_onetime(
+    df: pd.DataFrame,
+    customer_col: str,
+    date_col: str,
+) -> pd.DataFrame:
+    """Round 098: customer *counts* — repeat (≥2 purchase days) vs one-time.
+
+    Returns a small DataFrame [客戶類型, 人數, 佔比%]. A "purchase occasion" is a
+    distinct purchase day (no order id needed). Empty DataFrame when columns are
+    missing or there are no customers.
+    """
+    if customer_col not in df.columns or date_col not in df.columns:
+        return pd.DataFrame()
+    w = df[[customer_col, date_col]].dropna().copy()
+    w[date_col] = pd.to_datetime(w[date_col], errors="coerce")
+    w = w.dropna(subset=[date_col])
+    if w.empty:
+        return pd.DataFrame()
+    occasions = w.groupby(customer_col)[date_col].apply(lambda s: s.dt.normalize().nunique())
+    total = int(len(occasions))
+    repeat = int((occasions >= 2).sum())
+    onetime = total - repeat
+    rows = [
+        {"客戶類型": "回頭客（≥2 次）", "人數": repeat,
+         "佔比%": round(repeat / total * 100, 1) if total else 0.0},
+        {"客戶類型": "一次性客", "人數": onetime,
+         "佔比%": round(onetime / total * 100, 1) if total else 0.0},
+    ]
+    return pd.DataFrame(rows)
+
+
 def value_tier_summary(
     df: pd.DataFrame,
     customer_col: str,

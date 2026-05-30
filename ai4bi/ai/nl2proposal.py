@@ -3282,7 +3282,11 @@ _PANEL_LABELS = {
     "churn": "客戶流失風險 / RFM",
     "decline": "連續下滑偵測",
     "basket": "商品關聯（常一起買）",
+    "repeat": "回頭客 vs 一次性客",
 }
+_REPEAT_TRIGGERS = ("回頭客", "回購客", "回頭率", "一次性客", "一次性顧客", "回頭還是",
+                    "多少回頭", "repeat customer", "repeat vs", "one-time", "one time customer",
+                    "repeat or", "returning vs")
 _CHURN_TRIGGERS = ("流失", "churn", "rfm", "快走", "要走", "好久沒來", "沉睡", "回購率", "誰快不來", "快不來")
 _DECLINE_TRIGGERS = ("連續下滑", "連續下跌", "一直下滑", "持續下滑", "持續下跌", "持續衰退",
                      "連續衰退", "一直在掉", "越來越差", "走弱", "連續成長", "持續成長",
@@ -3302,6 +3306,8 @@ _BASKET_KEY_HINTS = ("customer", "member", "date", "_at", "store", "客戶", "�
 
 def _detect_panel_analysis(prompt: str, normalized: str) -> str | None:
     hay = f"{prompt.lower()} {normalized}"
+    if any(t in hay for t in _REPEAT_TRIGGERS):
+        return "repeat"
     if any(t in hay for t in _CHURN_TRIGGERS):
         return "churn"
     if any(t in hay for t in _DECLINE_TRIGGERS):
@@ -3334,6 +3340,12 @@ def _pick_fact_for_analysis(facts: dict, kind: str):
                 "money": _guess_col(cols, _MONEY_HINTS),
             }
             required = ("customer", "date", "money")
+        elif kind == "repeat":
+            cmap = {
+                "customer": _guess_col(cols, _CUSTOMER_HINTS),
+                "date": _guess_col(cols, _DATE_COL_HINTS),
+            }
+            required = ("customer", "date")
         elif kind == "decline":
             entity = _guess_col(cols, _ENTITY_HINTS)
             date = _guess_col(cols, _DATE_COL_HINTS)
@@ -3365,6 +3377,15 @@ def _execute_panel_analysis(kind: str, df, cols_map: dict):
         sentence = (f"共 {len(table)} 位客戶，其中 ⚠️ {at_risk} 位有流失風險。"
                     + (f"最該優先聯繫（高價值且久未回購）：{names}。" if names else ""))
         return table.head(25), sentence
+    if kind == "repeat":
+        from ai4bi.analysis.segments import repeat_vs_onetime
+        table = repeat_vs_onetime(df, cols_map["customer"], cols_map["date"])
+        if table is None or table.empty:
+            return table, ""
+        rep_rows = table[table["客戶類型"].str.startswith("回頭")]
+        rep_pct = float(rep_rows["佔比%"].iloc[0]) if not rep_rows.empty else 0.0
+        sentence = f"回頭客佔 {rep_pct}%，共 {int(table['人數'].sum())} 位客戶。"
+        return table, sentence
     if kind == "decline":
         from ai4bi.analysis.trends import declining_streaks
         period = cols_map.get("period", "month")
