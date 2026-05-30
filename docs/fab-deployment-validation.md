@@ -90,6 +90,58 @@
 
 ---
 
+## 第 1 輪 — 實際 multi-agent 深讀程式碼後的發現（4 agent，各讀 ~50-100 檔次）
+> 上面的「立場/共識」是召集前的綜述；以下是 4 個 agent **實讀程式碼後**回報的具體發現（含真 bug），更鋒利、更可執行。
+
+### 良率工程師 agent — 找到的真問題
+- **真 bug：commonality/cohort 路徑對 `yield_pct` 用 `.mean()`（未加權）** — 與系統自己「禁止 AVG of rate」原則矛盾（50-die 與 50000-die 晶圓被等權）。demo 因每片 tested=1000 不顯現，真實資料會錯。
+- **真 bug：commonality 門檻用 `re.search(第一個數字)`** — 「ETCH-02 ... 良率<80%」可能誤抓 "02"。本輪 S1 因 80 在前未觸發，屬潛伏 bug。
+- commonality 只單欄、無顯著性檢定（無 Fisher/hypergeometric p 值），會在 n=2 失敗批上算 lift＝雜訊。
+- 「SPC」是跨機台 μ±kσ 離群，**不是時序管制圖**（無 Cpk/Ppk、無 Western Electric run rules、無 USL/LSL）。
+- 架構限制：executor 單一 fact、**永久拒絕 fact-to-fact detail join**（晶圓 genealogy join）→ 真正的 wafer 級 commonality 做不到；50k 列上限 + InlineDataSource in-memory。
+- **判決**：對良率工程師＝「有 fab 外觀的描述型 BI」，能快答良率/最差產品/缺陷占比；做不到診斷型工作（genealogy commonality、真 SPC、wafer map）。
+
+### 設備/IE agent — 找到的真問題
+- **OEE 是套套邏輯**：`fab_template._TOOL_CAP` 硬編 (util, uptime, ideal_min, perf)，再從這些常數**反推** run_hours/available_hours；`compute_oee` 算 A=run/avail 只是**還原它一開始塞的常數**。utilization 同理（capacity=actual/util）。→ 永遠只能回顯假設，無法揭露新問題。
+- Performance `min(p,1.0)` 會**裁掉 P>100%**（隱藏 ideal-rate 失準訊號）；Q 對非 etch 機台全給 fab-wide fallback（每台 Q 相同，一眼可疑）。
+- 無 SEMI E10 設備狀態、無 Little's Law（無 standing WIP、無 throughput rate）；產能 what-if 不模型化瓶頸轉移/重新路由。
+- **可信時間節省**：瓶頸辨識、queue Pareto（真）。OEE/availability＝demo 幻覺（指真實 MES extract 沒有這些欄位就跑不出來）。
+
+### 資料/IT agent — 找到的部署阻擋
+- **無生產資料路徑**：`ExternalDataSource` 定義了 execution_ref/data_ref 但**executor/loader 從不消費**（grep 0 次）→ 只跑 InlineDataSource/CachedDataSource。連接器是 import-once `SELECT * LIMIT 50000` 烤成 inline，不是 live 連線。
+- 規模：executor 每查 `duckdb.connect(:memory:)`，list[dict]→Arrow→DuckDB 全進記憶體；上限 ~數十萬列；fab move 是 10^8–10^9/月 → 差 4-6 個數量級。**freshness = contract JSON 檔 mtime**，不是資料新鮮度。
+- 安全：local SHA-256 帳密（admin/admin123），**無 SSO**；RLS 機制好（參數化、injection-safe）但**只接 retail city，fab 完全未設 row filter**；PG 密碼明文存 session_state。
+- 語意一致性：metric 定義散在 3 處（Python MetricDefinition / semantic_model.json / NL 的 `_DIM_KEYWORD_MAP` 等）會漂移；換 fab schema = 改 code 非改設定（6058 行硬編路由）。
+- **判決**：架構良好的 pilot-ware，非 fab-deployable 平台。語意 join planner（拒絕 prohibited 扇出 join）是值得保留的好骨架。
+
+### 產品/UX agent — 找到的體驗斷崖
+- **silent-wrong 是最嚴重風險**：30 段 `if _looks_like_X(): return` 子字串級聯，**無信心分數、無次佳比較、無澄清路徑**；第一個命中關鍵字者贏。模糊問句→自信錯答＋信任徽章＝對工程師致命。
+- **澄清 UX 是死碼**：`disambiguation` 只有 `LLM_MODE=anthropic`+API key 才會填；預設 mock → mock_passthrough → 直落 keyword router（從不設 disambiguation）。`routing/prompt_router.py` 有漂亮的信心門檻設計但**完全沒接進 propose()**（孤兒）。→ 回答了使用者的 LLM 問題：開 anthropic 模式才有反問。
+- **NL 無對話記憶**：`propose()` 無 prior-turn 參數；chat_history 只供顯示、從不回讀。「改成上週」「只看 ETCH」「比較大的那個」無前指代＝each question is an island。canvas 上的 drill/cross-filter/what-if/bookmark 很好但都是滑鼠驅動，非對話。
+- 上傳/ratio 偵測/上傳即異常偵測（無 LLM）是真 trust 亮點，值得保留。
+- **判決**：深的分析引擎穿著自助 BI 的外衣；自助探索體驗在 silent-wrong、無記憶、ask-box 埋在 30 個 expander 側欄三點落崖。
+
+### 跨 agent 收斂（更新後的開發優先序）
+1. **silent-wrong → clarify**（產品 #1；S9）：keyword router 需要信心門檻 + 澄清，而非只靠 LLM 模式。
+2. **忠實性**：母體 N + 方法 + 排除（已對 capacity 起頭）；commonality 加顯著性（S1）。
+3. **誠實標註**：OEE/utilization 標明「由參考表推導、非量測自 E10 狀態」（S4）；真 bug 修：commonality/cohort 加權 + 門檻解析。
+4. **對話記憶**：把上一輪 resolved query 當下一輪 context（S3）。
+5. 結構/基建（genealogy join、真 SPC、E10 OEE、scale 下推、SSO、語意層單一真相）＝**pilot 後**，非增量輪；但要在答案裡**誠實揭露限制**而非假裝。
+
+> 註：agent 也點出「自評只測 canned 問句的 router 命中率」這個盲點 → 本驗證刻意用**未見過的新 10 情境 + 多輪換題**對抗 overfit。
+
+---
+
 ## 第 2 輪起 — 開發歷程（每輪 test+commit+push）
+
+**Round 132**（已 commit+push）：新增 `analysis/capacity_dynamics.py`（bottleneck_over_time + wip_vs_cycle_time，純 pandas）。**Round 133**：修 capacity_dynamics 測試斷言（np.bool_）。
+
+**Round 134**（test+commit+push）：**修正 Round 132 的孤兒引擎** — 上輪宣稱「接上 NL」其實沒進 nl2proposal.py（grep 0 次），S5/S6 實測仍落到舊 handler（靜態利用率 / 平均 cycle time）。本輪真正接線：
+- 新 detector `_looks_like_bottleneck_drift`（瓶頸詞 + 時間漂移詞）、`_looks_like_wip_ct`（WIP詞 + cycle詞，或 Little's Law），**排在 capacity/metric 之前**（否則「瓶頸」被 capacity 攔、"cycle time" 被 metric 攔）。
+- 新 handler `_answer_bottleneck_drift`（每週取各 tool/area 的 queue 平均→當期瓶頸→是否換站，帶母體 footer）、`_answer_wip_ct`（每週 WIP=distinct lot、avg cycle time、Pearson r、Little's Law littles_law_ct 誠實對照欄；資料不足時誠實說「點不足」不亂給數）。
+- **S1 commonality 顯著性**：`crossfact.commonality` 加 Fisher 精確檢定 p_value + 顯著欄（2×2：失敗/通過 × 經過/未經過此機台），排序改 p 升冪；訊息帶 lift + p 值 + 白話顯著性判讀。
+- **S4 OEE 誠實化**：問「可靠嗎/準嗎/怎麼算」時，給數字 + 明確揭露「OEE 由 fab_tool_capacity 參考表推導、非量測自 SEMI E10 狀態；A/P 為規劃假設、僅 Q 實測；當相對比較可信、當絕對值需保留」。
+- 實測重跑：S5 偵測到瓶頸 ETCH-02→IMP-02 換站 1 次；S6 r=0.224(n=9週)；S1 lift 1.82 / Fisher p=0.0017 顯著；S4 數字+可靠性說明。非 e2e **1021 passed**。
+- 待辦（Round 135+）：S2 母體N+排除溯源、S3 對話 follow-up 語境繼承、S7 Pareto 惡化趨勢、S9 模糊→澄清、S10 加權良率白話確認。
 
 

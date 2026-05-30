@@ -682,6 +682,18 @@ class NL2ProposalService:
             if ac is not None:
                 return ac
 
+        # Round 134: bottleneck drift over time + WIP↔cycle-time (Little's Law).
+        # Checked BEFORE capacity/metric: "瓶頸…這幾週" trips capacity, and
+        # "cycle time" trips the plain metric answer — both must win here first.
+        if _looks_like_bottleneck_drift(prompt, normalized):
+            bd2 = self._answer_bottleneck_drift(prompt, normalized, report, contracts)
+            if bd2 is not None:
+                return bd2
+        if _looks_like_wip_ct(prompt, normalized):
+            wc = self._answer_wip_ct(prompt, normalized, report, contracts)
+            if wc is not None:
+                return wc
+
         # Round 128: capacity / OEE analytics (move fact × capacity reference).
         if _looks_like_oee(prompt, normalized):
             oee = self._answer_oee(prompt, normalized, report, contracts)
@@ -1997,6 +2009,35 @@ class NL2ProposalService:
         if tbl is None or tbl.empty:
             return None
         hay = f"{prompt.lower()} {normalized}"
+        # Round 134: reliability / honesty question ("這個數字可靠嗎 / 準不準 / 怎麼來的").
+        # OEE here is DERIVED from the fab_tool_capacity reference table, not measured
+        # from SEMI E10 equipment states — be explicit instead of implying precision.
+        asks_reliable = any(t in hay for t in (
+            "可靠", "準嗎", "準不準", "可信", "怎麼算", "怎麼來", "靠譜", "信得過",
+            "reliable", "accurate", "trust", "how is it", "資料夠"))
+        if asks_reliable and "oee" in hay:
+            tool = next((t for t in tbl["tool_id"].astype(str) if t.lower() in hay), None)
+            if tool is not None:
+                w = tbl[tbl["tool_id"].astype(str) == tool].iloc[0]
+                num = (f"{tool} 的 OEE 為 {w['OEE']}%（A {w['可用率A']}%、P {w['表現P']}%、"
+                       f"Q {w['良率Q']}%）。")
+                show = tbl[tbl["tool_id"].astype(str) == tool].reset_index(drop=True)
+            else:
+                avg = tbl[["可用率A", "表現P", "良率Q", "OEE"]].mean().round(1)
+                num = (f"全廠平均 OEE 為 {avg['OEE']}%（A {avg['可用率A']}%、P {avg['表現P']}%、"
+                       f"Q {avg['良率Q']}%）。")
+                show = tbl
+            honesty = (
+                "可靠性說明：此 OEE 由「機台產能參考表 (fab_tool_capacity)」推導，"
+                "非量測自 SEMI E10 設備狀態（PRD/SBY/DWN/ENG/UDT）。可用率A 來自參考表的"
+                " uptime、表現P 來自理想節拍假設、良率Q 才是實測良率。"
+                "因此 A、P 屬規劃/假設值，要量測級精度需接入 FDC/EAP 的 E10 狀態紀錄。"
+                "把它當「相對比較與趨勢」可信，當「絕對精確值」則需保留。")
+            notes = [honesty]
+            intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                              trust_notes=notes, risk_level="medium")
+            return NL2ProposalResult(intent=intent, message=num + honesty, result_table=show,
+                                     trust_notes=notes, risk_level="medium")
         # Round 131: OEE what-if — "把 X 的 OEE 拉到全廠平均/Y%，產能可多多少".
         if ("oee" in hay) and any(t in hay for t in ("拉到", "提升到", "改善到", "拉高到", "提高到", "升到")):
             tool = next((t for t in tbl["tool_id"].astype(str) if t.lower() in hay), None)
@@ -2105,6 +2146,108 @@ class NL2ProposalService:
         intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                           trust_notes=notes, risk_level="low")
         return NL2ProposalResult(intent=intent, message=msg, result_table=table,
+                                 trust_notes=notes, risk_level="low")
+
+    def _answer_bottleneck_drift(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 134: does the bottleneck station shift over time? Wires the
+        analysis/capacity_dynamics.bottleneck_over_time engine into NL."""
+        if not contracts or "fab_process_move" not in contracts:
+            return None
+        from ai4bi.analysis.capacity_dynamics import (
+            bottleneck_over_time, bottleneck_shift_summary)
+        from ai4bi.blocks.datastore import materialize_dataframe
+        hay = f"{prompt.lower()} {normalized}"
+        group_col = ("area" if any(t in hay for t in ("區", "area", "區域"))
+                     else "tool_id")
+        # value defining "the bottleneck" each period: queue time is the honest
+        # constraint signal; move_count when the prompt is about loading/throughput.
+        value_col = ("move_count" if any(t in hay for t in ("移動", "move", "產出", "吞吐", "loading", "負載"))
+                     else "queue_time_hr")
+        freq = ("M" if any(t in hay for t in ("每個月", "逐月", "月")) else "W")
+        try:
+            df = materialize_dataframe(contracts["fab_process_move"])
+        except Exception:  # noqa: BLE001
+            return None
+        res = bottleneck_over_time(df, "event_date", group_col, value_col, freq=freq, agg="mean")
+        if res is None or res.empty:
+            return None
+        summary = bottleneck_shift_summary(res)
+        unit = {"W": "週", "M": "月"}.get(freq, "期")
+        vlabel = "佇列時間" if value_col == "queue_time_hr" else "移動次數"
+        if summary["shifted"]:
+            ch000 = summary["shifts"]
+            parts = "；".join(f"{s['period']} {s['from']}→{s['to']}" for s in ch000[:4])
+            msg = (f"瓶頸（依{vlabel}最高的 {group_col}）在 {summary['n_periods']} 個{unit}內"
+                   f"換過 {len(ch000)} 次：{parts}。最常居首：{summary['dominant']}。")
+        else:
+            msg = (f"瓶頸（依{vlabel}最高的 {group_col}）在 {summary['n_periods']} 個{unit}內"
+                   f"沒有換站，始終是 {summary['dominant']}。")
+        notes = [f"瓶頸漂移：每{unit}取各 {group_col} 的{vlabel}平均，取最高者為當期瓶頸"
+                 f"（母體 {len(df)} 筆 move，期間欄 event_date）。"]
+        intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                          trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=msg, result_table=res,
+                                 trust_notes=notes, risk_level="low")
+
+    def _answer_wip_ct(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 134: WIP ↔ cycle-time relationship (Little's Law lens). Wires
+        analysis/capacity_dynamics.wip_vs_cycle_time into NL."""
+        if not contracts:
+            return None
+        from ai4bi.analysis.capacity_dynamics import wip_vs_cycle_time
+        from ai4bi.blocks.datastore import materialize_dataframe
+        # Cycle time lives on the yield fact (cycle_time_hr); pick whichever fact
+        # actually carries a cycle-time column.
+        target = None
+        for bid in ("fab_wafer_yield", "fab_process_move"):
+            c = contracts.get(bid)
+            if c is None:
+                continue
+            cols = {col.name for col in getattr(c, "columns", [])}
+            ct = next((x for x in cols if "cycle" in x.lower()), None)
+            if ct:
+                date_col = next((x for x in cols if x.lower() in ("test_date", "event_date", "date")), None)
+                lot_col = "lot_id" if "lot_id" in cols else None
+                if date_col:
+                    target = (bid, date_col, ct, lot_col)
+                    break
+        if target is None:
+            return None
+        bid, date_col, ct, lot_col = target
+        try:
+            df = materialize_dataframe(contracts[bid])
+        except Exception:  # noqa: BLE001
+            return None
+        per, summary = wip_vs_cycle_time(df, date_col, ct, lot_col=lot_col, freq="W")
+        if per is None or per.empty or summary.get("r") is None:
+            # honest "not enough data" rather than a wrong number
+            msg = ("資料的週期點不足以可靠估計 WIP 與 cycle time 的關係"
+                   f"（有效週數 {summary.get('n', 0)}）。")
+            notes = [msg]
+            intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                              trust_notes=notes, risk_level="low")
+            return NL2ProposalResult(intent=intent, message=msg,
+                                     result_table=per if per is not None and not per.empty else None,
+                                     trust_notes=notes, risk_level="low")
+        msg = (f"{summary['relationship']}；WIP 與 cycle time 的相關係數 r={summary['r']}"
+               f"（依週對齊，n={summary['n']} 週）。表中 littles_law_ct = WIP/throughput 為誠實對照。")
+        notes = [f"WIP↔cycle time：每週以 {lot_col or '列數'} 計 WIP、以 {ct} 取平均 cycle time，"
+                 f"Pearson r。Little's Law 對照欄非宣稱值。來源：{bid}。"]
+        intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                          trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=msg, result_table=per,
                                  trust_notes=notes, risk_level="low")
 
     def _answer_spc(
@@ -2224,9 +2367,14 @@ class NL2ProposalService:
             return None
         top = table.iloc[0]
         sentence = (f"{len(qualifying)} 個不良 {group_key} 中，最常共同經過的「{entity}」是 "
-                    f"{top[entity]}（{top['涉及批數']} 批，涵蓋率 {top['涵蓋率%']}%）。")
+                    f"{top[entity]}（{top['涉及批數']} 批，涵蓋率 {top['涵蓋率%']}%，lift {top.get('lift', '—')}）。")
+        if "p_value" in table.columns:
+            p = top["p_value"]
+            sig = ("統計上顯著（p<0.05，這個共同性不太可能是巧合）" if p < 0.05
+                   else f"但統計上不顯著（p={p}，可能是巧合，建議多收幾批再下結論）")
+            sentence += f"Fisher 精確檢定 p={p}，{sig}。"
         notes = [f"Commonality：先以 {measure_col} {'<' if op=='lt' else '>'} {threshold} 篩 {group_key}，"
-                 f"再於 {detail_block} 找共同 {entity}。"]
+                 f"再於 {detail_block} 找共同 {entity}；以 Fisher 精確檢定評估顯著性（失敗×經過此機台 2×2）。"]
         intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                           trust_notes=notes, risk_level="low")
         return NL2ProposalResult(intent=intent, message=sentence, result_table=table,
@@ -5053,6 +5201,35 @@ def _looks_like_oee(prompt: str, normalized: str) -> bool:
                                     "良率", "quality", "品質", "稼動"))
     lossword = any(w in hay for w in ("損失", "loss", "拖累", "六大損失"))
     return factor and lossword
+
+
+# Round 134: bottleneck-drift (over time) and WIP↔cycle-time (Little's Law).
+# Both wire the already-tested analysis/capacity_dynamics engine into NL routing.
+# They must be checked BEFORE _looks_like_capacity/_looks_like_metric, since
+# "瓶頸" trips capacity and "cycle time" trips the plain metric answer.
+_DRIFT_TIME_CUES: tuple[str, ...] = (
+    "換站", "換過", "漂移", "drift", "這幾週", "這幾周", "每週", "每周", "隨時間",
+    "over time", "轉移", "有沒有變", "有沒有換", "週週", "逐週", "逐周", "歷週",
+    "幾週下來", "近幾週", "近幾周", "每個月", "逐月", "隨週",
+)
+_BOTTLENECK_WORDS: tuple[str, ...] = ("瓶頸", "bottleneck", "最塞", "最卡", "卡關", "最忙的站")
+_WIP_CUES: tuple[str, ...] = ("wip", "在製", "在制", "在线", "在線品", "work in progress", "在製品", "在制品")
+_CT_CUES: tuple[str, ...] = (
+    "cycle time", "cycle_time", "週期時間", "周期時間", "製程週期", "在線時間",
+    "在制時間", "在製時間", "生產週期", "cycletime", "循環時間",
+)
+
+
+def _looks_like_bottleneck_drift(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    return any(b in hay for b in _BOTTLENECK_WORDS) and any(t in hay for t in _DRIFT_TIME_CUES)
+
+
+def _looks_like_wip_ct(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    if "little" in hay or "利特" in hay:
+        return True
+    return any(w in hay for w in _WIP_CUES) and any(c in hay for c in _CT_CUES)
 
 
 _SPC_CUES: tuple[str, ...] = (

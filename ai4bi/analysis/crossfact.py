@@ -76,21 +76,48 @@ def commonality(
     n_all = detail_df[group_col].nunique()
     fail_counts = sub.groupby(entity_col)[group_col].nunique()
     all_counts = detail_df.groupby(entity_col)[group_col].nunique()
+
+    # Round 134: statistical significance. lift alone can be noise at n=2 — a
+    # Fisher's exact test on the 2×2 (failing/passing × through/not-through this
+    # tool) gives a one-sided p-value for over-representation in failing lots.
+    try:
+        from scipy.stats import fisher_exact as _fisher
+    except Exception:  # noqa: BLE001
+        _fisher = None
+    n_pass = max(n_all - n_fail, 0)
+
     rows = []
     for ent, cnt in fail_counts.items():
         base = all_counts.get(ent, cnt)
         # lift = (share of failing lots through this tool) / (share of all lots)
         lift = (cnt / n_fail) / (base / n_all) if base and n_all else 0.0
-        rows.append({
+        row = {
             entity_col: ent,
             "涉及批數": int(cnt),
             "涵蓋率%": round(cnt / n_fail * 100, 1),
             "lift": round(lift, 2),  # >1 = over-represented in failing lots
-        })
-    # rank by lift first (the distinguishing tool), then coverage
-    return (pd.DataFrame(rows)
-            .sort_values(["lift", "涉及批數"], ascending=[False, False])
-            .reset_index(drop=True))
+        }
+        if _fisher is not None and n_pass >= 0:
+            a = int(cnt)                       # failing & through tool
+            b = int(n_fail - cnt)             # failing & not through tool
+            c = int(base - cnt)               # passing & through tool
+            d = int(n_pass - (base - cnt))    # passing & not through tool
+            if min(a, b, c, d) >= 0:
+                try:
+                    _, p = _fisher([[a, b], [c, d]], alternative="greater")
+                    row["p_value"] = round(float(p), 4)
+                    row["顯著"] = "✓" if p < 0.05 else ""
+                except Exception:  # noqa: BLE001
+                    pass
+        rows.append(row)
+    # rank by significance (p asc) when available, else lift; then coverage
+    df = pd.DataFrame(rows)
+    if "p_value" in df.columns:
+        df = df.sort_values(["p_value", "lift", "涉及批數"],
+                            ascending=[True, False, False])
+    else:
+        df = df.sort_values(["lift", "涉及批數"], ascending=[False, False])
+    return df.reset_index(drop=True)
 
 
 def cohort_by_quantile(
