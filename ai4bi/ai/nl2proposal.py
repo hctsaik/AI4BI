@@ -514,6 +514,11 @@ class NL2ProposalService:
             if seg is not None:
                 return seg
 
+        if intent == "calendar_yoy":  # Round 100
+            yoy = self._answer_calendar_yoy(prompt, normalized, report, contracts)
+            if yoy is not None:
+                return yoy
+
         if intent == "insights":  # Round 097
             ins = self._answer_insights(prompt, normalized, report, contracts)
             if ins is not None:
@@ -643,6 +648,13 @@ class NL2ProposalService:
             decomp = self._explain_change(prompt, normalized, report, contracts)
             if decomp is not None:
                 return decomp
+
+        # Round 100: calendar YoY ("本月 vs 去年同月") — checked before the plain
+        # answer engine so '去年同期' uses calendar boundaries, not a trailing year.
+        if _looks_like_calendar_yoy(prompt, normalized):
+            yoy = self._answer_calendar_yoy(prompt, normalized, report, contracts)
+            if yoy is not None:
+                return yoy
 
         if _looks_like_metric_question(prompt, normalized):
             answer = self._answer_metric(prompt, normalized, report, semantic_model, contracts)
@@ -1086,6 +1098,69 @@ class NL2ProposalService:
             trust_notes=notes,
             risk_level="low",
         )
+
+    def _answer_calendar_yoy(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 100: "本月 vs 去年同月" / "same month last year" — calendar YoY.
+
+        Compares period-to-date this year against the same dates last year
+        (calendar boundaries), unlike the trailing-window comparison. Returns
+        None to fall through.
+        """
+        executor = getattr(self, "_executor", None)
+        if executor is None or not contracts:
+            return None
+        hay = f"{prompt.lower()} {normalized}"
+        grain = ("year" if any(t in hay for t in ("今年", "年增", "全年", "ytd", "this year"))
+                 else "quarter" if any(t in hay for t in ("本季", "這季", "季")) else "month")
+
+        idx = SchemaIndex.build(contracts)
+        match = idx.best_metric_match(prompt, normalized)
+        if match is None:
+            return None
+        block_id, metric_name, alias = match.block_id, match.metric_name, match.alias
+        date_col = _find_date_column(contracts, block_id)
+        if date_col is None:
+            return None
+
+        from ai4bi.analysis.time_intelligence import compute_calendar_comparison
+        from ai4bi.query_spec import BlockRef, VisualQuerySpec
+
+        base = VisualQuerySpec(
+            spec_id=f"yoy_{metric_name}", block_refs=[BlockRef(block_id)],
+            metrics=[MetricRef(block_id, metric_name, alias)], inherit_global_filter=False)
+        comp = compute_calendar_comparison(
+            executor, base, date_block_id=block_id, date_column=date_col,
+            grain=grain, metric_col=alias)
+        if comp is None or comp.current is None:
+            return None
+
+        unit = _metric_unit(contracts, block_id, metric_name)
+        cur_txt = _format_metric_value(comp.current, unit)
+        sentence = f"{comp.current_label}「{alias}」為 {cur_txt}。"
+        if comp.delta_pct is not None and comp.previous is not None:
+            arrow = "↑" if comp.delta_pct >= 0 else "↓"
+            sentence += (f"　較{comp.previous_label} {_format_metric_value(comp.previous, unit)} "
+                         f"{arrow}{abs(comp.delta_pct):.1f}%（年增率）。")
+        else:
+            sentence += "　（去年同期無可比資料。）"
+        notes = [f"日曆同期比較（{comp.current_label} vs {comp.previous_label}），治理查詢路徑。",
+                 f"指標：{alias}（{metric_name} @ {block_id}）。"]
+        answer = DirectAnswer(
+            question=prompt.strip(), metric_block_id=block_id, metric_name=metric_name,
+            metric_alias=alias, sentence=sentence, value=comp.current, period=grain,
+            previous=comp.previous, delta_pct=comp.delta_pct,
+            current_label=comp.current_label, previous_label=comp.previous_label,
+            unit=unit, trust_notes=notes)
+        intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                          trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=sentence, direct_answer=answer,
+                                 trust_notes=notes, risk_level="low")
 
     def _answer_insights(
         self,
@@ -3086,6 +3161,20 @@ def _extract_rank_n(prompt: str, normalized: str, default: int = 5) -> int:
         except ValueError:
             pass
     return default
+
+
+# --- Round 100: calendar YoY (same period last year) -------------------------
+
+_CALENDAR_YOY_TRIGGERS: tuple[str, ...] = (
+    "同期", "去年同月", "去年同季", "去年同期", "同月去年", "年增率", "年增",
+    "same month last year", "same period last year", "same quarter last year",
+    "year over year", "year-over-year", "vs last year", "yoy vs",
+)
+
+
+def _looks_like_calendar_yoy(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    return any(t in hay for t in _CALENDAR_YOY_TRIGGERS)
 
 
 # --- Round 097: digest / anomaly insight routing -----------------------------

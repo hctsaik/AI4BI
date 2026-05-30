@@ -52,6 +52,7 @@ SUPPORTED_INTENTS = (
     "measure_filter",         # filter an existing visual on an aggregate
     "seasonality",            # busiest day-of-week / hour
     "insights",               # weekly digest / anomaly scan
+    "calendar_yoy",           # this month vs same month last year
     "unsupported",            # anything else
 )
 

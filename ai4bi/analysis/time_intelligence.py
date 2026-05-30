@@ -205,6 +205,88 @@ def compute_grouped_comparison(
     return merged.sort_values("delta").reset_index(drop=True)
 
 
+def _safe_replace_year(d: date, year: int) -> date:
+    """date.replace(year=…) that survives Feb 29 (→ Feb 28)."""
+    try:
+        return d.replace(year=year)
+    except ValueError:
+        return d.replace(year=year, day=28)
+
+
+def _calendar_window(anchor: date, grain: str) -> Optional[tuple[date, date, date, date]]:
+    """(cur_start, cur_end, prev_start, prev_end) for a calendar period vs last year.
+
+    Compares period-to-date this year against the *same* dates last year (so a
+    partial current month is fairly compared to the same partial month a year
+    ago — true calendar YoY, not a trailing window).
+    """
+    if grain == "month":
+        cur_start = anchor.replace(day=1)
+    elif grain == "quarter":
+        q0 = ((anchor.month - 1) // 3) * 3 + 1
+        cur_start = date(anchor.year, q0, 1)
+    elif grain == "year":
+        cur_start = date(anchor.year, 1, 1)
+    else:
+        return None
+    cur_end = anchor
+    prev_start = _safe_replace_year(cur_start, cur_start.year - 1)
+    prev_end = _safe_replace_year(anchor, anchor.year - 1)
+    return cur_start, cur_end, prev_start, prev_end
+
+
+_CALENDAR_LABELS = {
+    "month": ("本月至今", "去年同月同期"),
+    "quarter": ("本季至今", "去年同季同期"),
+    "year": ("今年至今", "去年同期"),
+}
+
+
+def compute_calendar_comparison(
+    executor,
+    base_spec: VisualQuerySpec,
+    *,
+    date_block_id: str,
+    date_column: str,
+    grain: str,
+    metric_col: str,
+    anchor: Optional[date] = None,
+) -> Optional[PeriodComparison]:
+    """Calendar YoY: period-to-date this year vs the same dates last year.
+
+    Unlike compute_period_comparison (trailing windows), this honours calendar
+    boundaries — "May 2026 MTD vs May 2025 MTD". Returns None when the grain is
+    unknown or no anchor/data can be resolved.
+    """
+    if anchor is None:
+        anchor = latest_date(executor, base_spec, date_block_id, date_column)
+    if anchor is None:
+        return None
+    window = _calendar_window(anchor, grain)
+    if window is None:
+        return None
+    cur_start, cur_end, prev_start, prev_end = window
+
+    cur_spec = _period_spec(base_spec, date_block_id, date_column, cur_start, cur_end, "cyr")
+    prev_spec = _period_spec(base_spec, date_block_id, date_column, prev_start, prev_end, "pyr")
+    try:
+        cur_df = executor.run(cur_spec)
+        prev_df = executor.run(prev_spec)
+    except Exception:  # noqa: BLE001
+        return None
+
+    current = _scalar(cur_df, metric_col)
+    previous = _scalar(prev_df, metric_col)
+    delta_pct: Optional[float] = None
+    if current is not None and previous not in (None, 0):
+        delta_pct = (current - previous) / abs(previous) * 100.0
+    cur_label, prev_label = _CALENDAR_LABELS.get(grain, (grain, f"prev {grain}"))
+    return PeriodComparison(
+        current=current, previous=previous, delta_pct=delta_pct,
+        current_label=cur_label, previous_label=prev_label,
+    )
+
+
 def _scalar(df: Optional[pd.DataFrame], col: str) -> Optional[float]:
     if df is None or df.empty:
         return None
