@@ -1655,9 +1655,13 @@ class NL2ProposalService:
 
         op_sym = {"gt": ">", "gte": "≥", "lt": "<", "lte": "≤", "eq": "=", "neq": "≠"}.get(
             operator.value, operator.value)
-        sentence = (f"「{entity_col}」中，{alias} {op_sym} {threshold} 的共 {len(df)} 筆。"
-                    if not df.empty else
-                    f"沒有「{entity_col}」符合 {alias} {op_sym} {threshold}。")
+        if df.empty:
+            sentence = f"沒有「{entity_col}」符合 {alias} {op_sym} {threshold}。"
+        else:
+            top = df.iloc[0]
+            tv = round(float(top[alias]), 2) if alias in df.columns else ""
+            sentence = (f"共 {len(df)} 個「{entity_col}」符合 {alias} {op_sym} {threshold}，"
+                        f"最高 {top[entity_col]}（{tv}）。")
         notes = [
             f"分組：{entity_col}；指標：{alias}；彙總後篩選 {alias} {op_sym} {threshold}（HAVING）。",
             f"治理查詢路徑（認證語意層），來源：{block_id}。",
@@ -2209,7 +2213,11 @@ class NL2ProposalService:
             sentence = (f"「{alias}」依「{dim_col}」占比：最高 {top[dim_col]}"
                         + (f"（{top['佔總比%']}%）。" if "佔總比%" in df.columns else "。"))
         else:
-            sentence = f"「{alias}」依「{dim_col}」分組（共 {len(df)} 組）。"
+            top = df.iloc[0]
+            tv = top[alias] if alias in df.columns else top.iloc[-1]
+            tv = round(float(tv), 2) if isinstance(tv, (int, float)) else tv
+            sentence = (f"「{alias}」依「{dim_col}」分組（共 {len(df)} 組）："
+                        f"最高 {top[dim_col]}（{tv}）。")
         notes = [f"依「{dim_col}」分組彙總「{alias}」（治理查詢路徑），來源：{block_id}。"]
         intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                           trust_notes=notes, risk_level="low")
