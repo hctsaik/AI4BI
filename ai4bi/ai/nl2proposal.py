@@ -1247,11 +1247,29 @@ class NL2ProposalService:
         from ai4bi.query_spec import (
             BlockRef, DimensionRef, FilterOperator, FilterSpec, VisualQuerySpec,
         )
+        # Round 119: apply any OTHER categorical value named in the prompt as a
+        # scope filter — "ETCH 區的 Hot vs Normal" compares within area=ETCH.
+        filters = [FilterSpec(block_id, col, FilterOperator.in_, [a, b], False)]
+        hay = f"{prompt} {normalized}"
+        from ai4bi.blocks.datastore import materialize_dataframe
+        try:
+            mdf = materialize_dataframe(contracts[block_id])
+        except Exception:  # noqa: BLE001
+            mdf = None
+        if mdf is not None:
+            for ccol in [cc.name for cc in contracts[block_id].columns
+                         if cc.data_type in ("string", "str", "object") and cc.name != col]:
+                if ccol not in mdf.columns:
+                    continue
+                for v in {str(x) for x in mdf[ccol].dropna().unique()}:
+                    if v and v not in (a, b) and v.lower() in hay.lower():
+                        filters.append(FilterSpec(block_id, ccol, FilterOperator.eq, v, False))
+                        break
         spec = VisualQuerySpec(
             spec_id=f"cmp_{metric_name}", block_refs=[BlockRef(block_id)],
             metrics=[MetricRef(block_id, metric_name, alias)],
             dimensions=[DimensionRef(block_id, col, col)],
-            filters=[FilterSpec(block_id, col, FilterOperator.in_, [a, b], False)],
+            filters=filters,
             inherit_global_filter=False)
         try:
             df = executor.run(spec)
@@ -3914,7 +3932,9 @@ def _extract_rank_n(prompt: str, normalized: str, default: int = 5) -> int:
 # --- Round 108: two-entity comparison ----------------------------------------
 
 # Unambiguous compare cues (so "營收和訂單" — a list, not a comparison — is ignored).
-_COMPARE_CUES = ("比較", "對比", "相比", "比一比", " vs ", " versus ", " v.s ", "對上", "比起")
+_COMPARE_CUES = ("比較", "對比", "相比", "比一比", " vs ", " versus ", " v.s ", "對上", "比起",
+                 "差多少", "相差", "差異", "快多少", "慢多少", "高多少", "低多少",
+                 "哪個比較", "誰比較", "哪個快", "哪個高", "哪個低")
 _COMPARE_CONNECTORS = (" vs ", " versus ", " v.s ", "對上", "對比", "相比", "比起",
                        "跟", "和", "與", "還是", "、", "對")
 
@@ -3924,12 +3944,22 @@ def _looks_like_entity_compare(prompt: str, normalized: str) -> bool:
     return any(c in hay for c in _COMPARE_CUES)
 
 
+# Chinese classifiers/units that trail an operand and should be dropped, so
+# "Hot 批" / "ETCH 站" → "Hot" / "ETCH". (Round 119)
+_OPERAND_CLASSIFIERS = frozenset({
+    "批", "批號", "個", "台", "站", "區", "顆", "片", "組", "群", "類", "種", "家", "間",
+    "的", "區的", "平均", "差", "差多少", "相差", "queue", "time", "良率", "rate",
+})
+
+
 def _clean_operand(s: str, side: str) -> str | None:
     s = s.strip(" ,。，?？!！的")
     for w in ("請比較", "幫我比較", "比較一下", "比一比", "比較", "看看", "對比一下",
               "對比", "誰的", "哪個", "哪一個", "compare", "誰", "的"):
         s = s.replace(w, " ")
     parts = [p for p in re.split(r"[的\s,，、]+", s) if p]
+    # drop trailing/leading classifier+unit tokens so the real operand surfaces
+    parts = [p for p in parts if p not in _OPERAND_CLASSIFIERS]
     if not parts:
         return None
     return parts[-1] if side == "left" else parts[0]
@@ -4552,13 +4582,15 @@ def _extract_target_value(prompt: str, normalized: str) -> float | None:
 _EXPLAIN_TRIGGERS: tuple[str, ...] = (
     "為何", "為什麼", "為甚麼", "原因", "怎麼會", "怎會",
     "變化分解", "拆解", "分解", "貢獻",
+    "造成", "主因", "歸因", "主要是哪", "元凶", "禍首", "誰造成", "哪個.*造成",
     "why did", "why is", "why has", "what caused", "what drove",
     "decompose", "break down", "breakdown", "contribut",
 )
 _CHANGE_WORDS: tuple[str, ...] = (
-    "變", "升", "降", "增", "減", "漲", "跌", "掉", "成長", "衰退",
+    "變", "升", "降", "增", "減", "漲", "跌", "掉", "成長", "衰退", "高", "低",
+    "上升", "下降", "變高", "變低", "惡化", "改善",
     "change", "changed", "dip", "drop", "fell", "fall", "rose", "rise",
-    "grew", "grow", "increase", "decrease", "decline", "down", "up",
+    "grew", "grow", "increase", "decrease", "decline", "down", "up", "higher", "lower",
 )
 # "by <dim>" / "依/按/照 <dim>" decomposition-axis markers.
 _DECOMP_BY_MARKERS: tuple[str, ...] = ("依", "按", "照", "以", "by ", "per ", "across ")

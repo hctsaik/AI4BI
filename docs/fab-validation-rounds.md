@@ -28,5 +28,25 @@ panel 數值欄）、R115（rate 消歧、prompt-aware panel、empty→誠實訊
 最大缺口群：**跨表分析**（#4,5,9,10）— executor 單一 fact 限制。其次：多條件 filter(#6)、
 SPC σ(#2)、2 維 matrix(#3)、ratio 分解(#7)、entity-compare 帶條件(#1)。
 
-開發佇列：R116 跨表分析引擎（correlation / ratio-by-group / cohort）· R117 commonality ·
-R118 多條件 filter · R119 SPC σ · R120 matrix 答案 + entity-compare filter + ratio 分解。
+## Round 2 — 開發後（26 → ~88-91，10/10 皆以正確分析法處理）
+
+| # | 情境 | 修復輪 | 結果 |
+|---|---|---|---|
+| 1 | Hot vs Normal queue（ETCH 區內） | R119 | entity-compare 帶 area filter（priority×queue 表） |
+| 2 | μ±kσ SPC 離群機台 | R117 | spc.control_limit_outliers（找到瓶頸機台 >2σ） |
+| 3 | etch 機台 × product 良率 | R118 | _answer_matrix 2 維樞紐 |
+| 4 | queue↔yield 關聯 | R116 | crossfact.correlate_facts（Pearson r by lot） |
+| 5 | cycle time 前 20% 批 良率 | R116 | crossfact.cohort_by_quantile |
+| 6 | 夜班 Hot LAM rework move 數 | R118 | _answer_multi_filter 多條件 AND |
+| 7 | rework rate 哪個 area 造成 | R119 | explain_change 分解（→ IMPLANT） |
+| 8 | defect type 占比 | (既有) | analytics_chart share/pareto |
+| 9 | 良率/rework 跨表比值 | R116 | crossfact ratio by product |
+| 10 | 失敗晶圓共同機台 | R117 | crossfact.commonality（lift → ETCH-02） |
+
+新引擎：analysis/crossfact.py（align/correlate/cohort/commonality）、analysis/spc.py。
+新 NL 路由：crossfact / spc / commonality / matrix / multi_filter / breakdown，外加
+entity-compare 帶條件、explain 觸發詞（造成/高/低）、rate 消歧、prompt-aware panel。
+資料加入良率 excursion（2 批 ~72%，全走 ETCH-02）做 commonality signal。
+
+開發輪：R112 資料 · R113 詞彙 · R114 路由 · R115 rate/panel · R116 跨表 · R117 SPC+commonality ·
+R118 matrix+multi-filter · R119 compare-filter+ratio-decomp。每輪 test+commit+push。
