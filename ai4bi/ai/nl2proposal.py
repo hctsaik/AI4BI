@@ -2671,8 +2671,10 @@ class NL2ProposalService:
                     if stat is None:
                         continue
                     sentence = (f"「{two[0]}」與「{two[1]}」（同表 {bid}，n={stat['n']}）"
-                                f"相關係數 r={stat['r']}（{stat['direction']}相關，{stat['strength']}）。")
-                    notes = [f"同表相關：直接以每列計算 Pearson 相關。來源：{bid}。"]
+                                f"相關係數 r={stat['r']}（{stat['direction']}相關，{stat['strength']}）。"
+                                f"註：相關不等於因果，可能有共同潛在因素（如同一機台/時段）；"
+                                f"要確認因果需控制其他變因或做實驗。")
+                    notes = [f"同表相關：直接以每列計算 Pearson 相關（相關≠因果）。來源：{bid}。"]
                     intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                                       trust_notes=notes, risk_level="low")
                     return NL2ProposalResult(intent=intent, message=sentence,

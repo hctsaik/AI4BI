@@ -226,4 +226,14 @@ T6 從 ~44 升到 ~91（真 commonality + 誠實顯著性）。剩餘扣分集�
 - **U2/U7/U8 本來就過**（同表相關 r=0.426、缺陷×產品 matrix、3 輪 drill IMPLANT=3.2）。
 - 新增 `tests/test_target_forecast_attribution.py`（5）。非 e2e **1044 passed**。
 
+## 第 4 輪 — multi-agent 打分（Round 142 後）＝ 83.5（A 83.3 / B 81.3 / C 85.9）
+U1 honest 92、U5 90、U10 90、U6 88。剩餘軟性扣分：U2 相關無因果註、U3 digest 偏窄（只 moves）、U7 counts 非 rate、U9 線性外推弱。
+
+**Round 142b/143**：U3 digest 改成內嵌前 3 重點；U2 同表相關加「相關≠因果、可能有共同潛在因素」註。
+
+### 階段性結論（誠實）
+- 五組獨立 fresh 情境經 multi-agent 嚴格打分，系統由 baseline ~52 提升到 **fresh set 平均 ~84–90**。所有真 bug（commonality 門檻、孤兒引擎、加權良率）已修，silent-wrong 大量轉為「正確分析」或「誠實婉拒」。
+- **≥95 平均在此評分標準下趨近漸近線**：評審把「95＝可信且零返工」保留給誠實婉拒與帶統計嚴謹度的答案；一般描述型答案（breakdown/cross-tab/digest）即使正確也常被扣到 ~85–90（評審總能要求更多正規化/caveat）。要全組 ≥95，幾乎需每題都是誠實婉拒或帶顯著性的答案。
+- 已全部 test+commit+push（R134–143，非 e2e 1044 passed）。
+
 
