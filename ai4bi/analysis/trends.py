@@ -41,6 +41,63 @@ def _current_streak(values: list[float]) -> tuple[int, str]:
     return run, direction
 
 
+def dormant_products(
+    df: pd.DataFrame,
+    entity_col: str,
+    date_col: str,
+    value_col: str,
+    period: str = "month",
+    recent: int = 1,
+) -> pd.DataFrame:
+    """Round 101: dead-stock / dormant entities — sold historically but not lately.
+
+    "Which products have stopped selling?" — entities with sales in an earlier
+    period but zero across the most recent ``recent`` period(s). The actionable
+    form of "never sold" that needs only a sales fact (no product master).
+
+    Columns: [entity_col, 最後售出, 沉睡期數, 歷史總量]; worst (highest historical
+    volume) first. Empty DataFrame when columns are missing or none qualify.
+    """
+    needed = [entity_col, date_col, value_col]
+    if any(c not in df.columns for c in needed):
+        return pd.DataFrame()
+    work = df[needed].copy()
+    work[date_col] = pd.to_datetime(work[date_col], errors="coerce")
+    work = work.dropna(subset=[entity_col, date_col])
+    if work.empty:
+        return pd.DataFrame()
+
+    freq = _PERIOD_FREQ.get(period, "MS")
+    work["_p"] = work[date_col].dt.to_period(freq[0] if freq != "MS" else "M")
+    all_periods = sorted(work["_p"].unique())
+    if len(all_periods) <= recent:
+        return pd.DataFrame()
+    recent_set = set(all_periods[-recent:])
+
+    agg = work.groupby([entity_col, "_p"])[value_col].sum().reset_index()
+    rows = []
+    for entity, g in agg.groupby(entity_col):
+        sold = g[g[value_col] > 0]
+        if sold.empty:
+            continue
+        recent_sales = g[g["_p"].isin(recent_set)][value_col].sum()
+        if recent_sales > 0:
+            continue  # still selling
+        last_p = sold["_p"].max()
+        dormancy = sum(1 for p in all_periods if p > last_p)
+        rows.append({
+            entity_col: entity,
+            "最後售出": str(last_p),
+            "沉睡期數": dormancy,
+            "歷史總量": round(float(sold[value_col].sum()), 2),
+        })
+    if not rows:
+        return pd.DataFrame()
+    return (pd.DataFrame(rows)
+            .sort_values(["歷史總量", "沉睡期數"], ascending=[False, False])
+            .reset_index(drop=True))
+
+
 def declining_streaks(
     df: pd.DataFrame,
     entity_col: str,

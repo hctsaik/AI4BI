@@ -1543,10 +1543,13 @@ class NL2ProposalService:
             return None
         block_id, contract, cols_map = best
 
-        if kind == "decline":
-            # Period: explicit word wins; default weekly (more periods available).
+        if kind in ("decline", "dormant"):
+            # Period: explicit word wins; default monthly for dormancy, weekly for
+            # streaks (more periods available).
             period = _extract_answer_period(normalized, prompt)
-            cols_map["period"] = {"all": "week", "year": "month"}.get(period, period)
+            default = "month" if kind == "dormant" else "week"
+            cols_map["period"] = {"all": default, "year": "month"}.get(period, period)
+        if kind == "decline":
             sm = re.search(r"連續\s*(\d+)|(\d+)\s*(?:期|個月|個週|週|周|months?)", f"{prompt} {normalized}")
             cols_map["min_streak"] = int(next(g for g in sm.groups() if g)) if sm else 3
 
@@ -3372,10 +3375,14 @@ _PANEL_LABELS = {
     "decline": "連續下滑偵測",
     "basket": "商品關聯（常一起買）",
     "repeat": "回頭客 vs 一次性客",
+    "dormant": "滯銷 / 停售商品",
 }
 _REPEAT_TRIGGERS = ("回頭客", "回購客", "回頭率", "一次性客", "一次性顧客", "回頭還是",
                     "多少回頭", "repeat customer", "repeat vs", "one-time", "one time customer",
                     "repeat or", "returning vs")
+_DORMANT_TRIGGERS = ("滯銷", "賣不動", "沒在賣", "停售", "停止銷售", "不再賣", "賣不出去",
+                     "沉睡商品", "呆料", "dead stock", "dormant", "stopped selling",
+                     "no longer selling", "slow-moving", "slow moving")
 _CHURN_TRIGGERS = ("流失", "churn", "rfm", "快走", "要走", "好久沒來", "沉睡", "回購率", "誰快不來", "快不來")
 _DECLINE_TRIGGERS = ("連續下滑", "連續下跌", "一直下滑", "持續下滑", "持續下跌", "持續衰退",
                      "連續衰退", "一直在掉", "越來越差", "走弱", "連續成長", "持續成長",
@@ -3395,6 +3402,8 @@ _BASKET_KEY_HINTS = ("customer", "member", "date", "_at", "store", "客戶", "�
 
 def _detect_panel_analysis(prompt: str, normalized: str) -> str | None:
     hay = f"{prompt.lower()} {normalized}"
+    if any(t in hay for t in _DORMANT_TRIGGERS):
+        return "dormant"
     if any(t in hay for t in _REPEAT_TRIGGERS):
         return "repeat"
     if any(t in hay for t in _CHURN_TRIGGERS):
@@ -3435,7 +3444,7 @@ def _pick_fact_for_analysis(facts: dict, kind: str):
                 "date": _guess_col(cols, _DATE_COL_HINTS),
             }
             required = ("customer", "date")
-        elif kind == "decline":
+        elif kind in ("decline", "dormant"):
             entity = _guess_col(cols, _ENTITY_HINTS)
             date = _guess_col(cols, _DATE_COL_HINTS)
             value = _guess_col(cols, _VALUE_HINTS, exclude={entity} if entity else set())
@@ -3465,6 +3474,18 @@ def _execute_panel_analysis(kind: str, df, cols_map: dict):
         names = "、".join(str(x) for x in top[cols_map["customer"]].tolist())
         sentence = (f"共 {len(table)} 位客戶，其中 ⚠️ {at_risk} 位有流失風險。"
                     + (f"最該優先聯繫（高價值且久未回購）：{names}。" if names else ""))
+        return table.head(25), sentence
+    if kind == "dormant":
+        from ai4bi.analysis.trends import dormant_products
+        period = cols_map.get("period", "month")
+        table = dormant_products(df, cols_map["entity"], cols_map["date"], cols_map["value"],
+                                 period=period)
+        if table is None or table.empty:
+            return table, ""
+        worst = table.iloc[0]
+        sentence = (f"{len(table)} 個對象已停止銷售（沉睡）。"
+                    f"最該注意：{worst[cols_map['entity']]}"
+                    f"（最後售出 {worst['最後售出']}，已沉睡 {worst['沉睡期數']} 期）。")
         return table.head(25), sentence
     if kind == "repeat":
         from ai4bi.analysis.segments import repeat_vs_onetime
