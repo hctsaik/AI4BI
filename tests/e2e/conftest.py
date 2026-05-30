@@ -12,18 +12,20 @@ import pytest
 import requests
 
 _APP_PATH = Path(__file__).parents[2] / "ai4bi" / "ui" / "app.py"
-_APP_PORT = 8502
 
 
-def _port_free(port: int) -> bool:
+def _free_port() -> int:
+    """Pick an OS-assigned free port so e2e never clashes with a running dev
+    server (e.g. a developer's GUI on 8502)."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex(("127.0.0.1", port)) != 0
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 @pytest.fixture(scope="session")
 def streamlit_server():
     """Start a Streamlit server for the session and yield the base URL."""
-    port = _APP_PORT
+    port = _free_port()
     proc = subprocess.Popen(
         [
             sys.executable, "-m", "streamlit", "run",
