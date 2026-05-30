@@ -88,6 +88,15 @@ _CHART_TYPE_KEYWORDS: dict[str, VisualType] = {
     "scatter chart": VisualType.scatter,
     "散點圖": VisualType.scatter,
     "散佈圖": VisualType.scatter,
+    # Round 151: table + pivot are renderable conversion targets too.
+    "table": VisualType.table,
+    "表格": VisualType.table,
+    "資料表": VisualType.table,
+    "pivot": VisualType.pivot,
+    "pivot table": VisualType.pivot,
+    "樞紐": VisualType.pivot,
+    "樞紐分析": VisualType.pivot,
+    "交叉表": VisualType.pivot,
 }
 
 # Round 067: keyword → type for the *add a new visual* path (superset of
@@ -4586,9 +4595,11 @@ class NL2ProposalService:
                 target_scope=f"visual:{visual_id}",
             )
 
-        # Safety: block kpi_card and table (require different query contracts)
-        _UNSUPPORTED_SOURCE = {VisualType.kpi_card, VisualType.table, VisualType.pivot, VisualType.map}
-        _UNSUPPORTED_TARGET = {VisualType.kpi_card, VisualType.table, VisualType.pivot, VisualType.map}
+        # Round 151: table ↔ chart conversions are now allowed (the data_table
+        # renderer accepts any query), as is converting to a pivot when the visual
+        # has ≥2 dimensions. kpi_card and map keep different contracts → blocked.
+        _UNSUPPORTED_SOURCE = {VisualType.kpi_card, VisualType.map}
+        _UNSUPPORTED_TARGET = {VisualType.kpi_card, VisualType.map}
         if current_type in _UNSUPPORTED_SOURCE:
             return self._unsupported(
                 f"Chart type change is not supported for {current_type.value} visuals.",
@@ -4596,7 +4607,12 @@ class NL2ProposalService:
             )
         if target_type in _UNSUPPORTED_TARGET:
             return self._unsupported(
-                "Cannot convert to table or kpi_card — they require different query contracts.",
+                "無法轉成 KPI 卡或地圖（需要不同的查詢結構）。",
+                target_scope=f"visual:{visual_id}",
+            )
+        if target_type == VisualType.pivot and len(visual.query.dimensions) < 2:
+            return self._unsupported(
+                "樞紐分析需要兩個維度（例如「各區 × 各班別」）；請先用分組加入第二個維度。",
                 target_scope=f"visual:{visual_id}",
             )
         if current_type == target_type:

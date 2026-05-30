@@ -1715,6 +1715,7 @@ def _render_visual_cell(
 _CHART_TYPE_LABELS = {
     "bar_chart": "長條圖", "line_chart": "折線圖",
     "pie_chart": "圓餅圖", "scatter": "散佈圖",
+    "table": "表格", "pivot": "樞紐分析",
 }
 
 
@@ -1768,15 +1769,19 @@ def _render_visual_field_well(component_id, visual, report, cache, contracts) ->
                         st.rerun()
 
         # ── chart-type switch ──
-        type_keys = list(_CHART_TYPE_LABELS.keys())
-        cur_idx = type_keys.index(vtype) if vtype in type_keys else 0
+        # Round 151: pivot only offered when the visual has ≥2 dimensions.
+        type_keys = [k for k in _CHART_TYPE_LABELS
+                     if k != "pivot" or len(visual.query.dimensions) >= 2]
+        if vtype not in type_keys:
+            type_keys.append(vtype)  # always include the current type
+        cur_idx = type_keys.index(vtype)
         new_label = st.selectbox(
             "圖表類型",
-            [_CHART_TYPE_LABELS[k] for k in type_keys],
+            [_CHART_TYPE_LABELS.get(k, k) for k in type_keys],
             index=cur_idx,
             key=f"fw_type_{component_id}",
         )
-        new_type = type_keys[[_CHART_TYPE_LABELS[k] for k in type_keys].index(new_label)]
+        new_type = type_keys[[_CHART_TYPE_LABELS.get(k, k) for k in type_keys].index(new_label)]
         if new_type != vtype:
             res = svc._build_single_proposal(
                 "chart_type_change", {"target_type": new_type}, "",
