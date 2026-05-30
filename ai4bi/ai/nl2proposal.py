@@ -564,6 +564,16 @@ class NL2ProposalService:
             if cf is not None:
                 return cf
 
+        if intent == "matrix":  # Round 118
+            mx = self._answer_matrix(prompt, normalized, report, contracts)
+            if mx is not None:
+                return mx
+
+        if intent == "multi_filter":  # Round 118
+            mf2 = self._answer_multi_filter(prompt, normalized, report, contracts)
+            if mf2 is not None:
+                return mf2
+
         if intent == "breakdown":  # Round 114
             bd = self._answer_breakdown(prompt, normalized, report, contracts)
             if bd is not None:
@@ -716,6 +726,16 @@ class NL2ProposalService:
             yoy = self._answer_calendar_yoy(prompt, normalized, report, contracts)
             if yoy is not None:
                 return yoy
+
+        # Round 118: 2-D cross-tab ("各 X 在不同 Y 上的 Z") + multi-condition filter.
+        if _looks_like_matrix(prompt, normalized):
+            mx = self._answer_matrix(prompt, normalized, report, contracts)
+            if mx is not None:
+                return mx
+        if _looks_like_multi_filter(prompt, normalized):
+            mf2 = self._answer_multi_filter(prompt, normalized, report, contracts)
+            if mf2 is not None:
+                return mf2
 
         # Round 114: plain "metric by dimension" breakdown ("各製程站的移動次數").
         # After ranking/decompose (so superlatives/why still win), before the
@@ -1889,6 +1909,156 @@ class NL2ProposalService:
                           trust_notes=notes, risk_level="low")
         return NL2ProposalResult(intent=intent, message=sentence, result_table=merged,
                                  trust_notes=notes, risk_level="low")
+
+    def _answer_matrix(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 118: 2-dimension cross-tab ("各 etch 機台在不同 product 上的良率").
+
+        Groups a metric by two categorical dimensions and pivots into a matrix
+        (dim1 rows × dim2 columns). Returns None to fall through.
+        """
+        executor = getattr(self, "_executor", None)
+        if executor is None or not contracts:
+            return None
+        idx = SchemaIndex.build(contracts)
+        match = idx.best_metric_match(prompt, normalized)
+        if match is None:
+            return None
+        block_id, metric_name, alias = match.block_id, match.metric_name, match.alias
+        dims = _resolve_n_dims(idx, prompt, normalized, contracts, block_id, n=2)
+        if len(dims) < 2:
+            return None
+        d1, d2 = dims[0], dims[1]
+
+        from ai4bi.query_spec import BlockRef, DimensionRef, VisualQuerySpec
+        spec = VisualQuerySpec(
+            spec_id=f"mtx_{metric_name}", block_refs=[BlockRef(block_id)],
+            metrics=[MetricRef(block_id, metric_name, alias)],
+            dimensions=[DimensionRef(block_id, d1, d1), DimensionRef(block_id, d2, d2)],
+            inherit_global_filter=False)
+        try:
+            df = executor.run(spec)
+        except Exception:  # noqa: BLE001
+            return None
+        if df is None or df.empty or alias not in df.columns:
+            return None
+        try:
+            import pandas as pd
+            pivot = pd.pivot_table(df, index=d1, columns=d2, values=alias, aggfunc="first").round(2)
+            pivot = pivot.reset_index()
+        except Exception:  # noqa: BLE001
+            return None
+        sentence = f"「{alias}」交叉表：{d1}（列）× {d2}（欄）。"
+        notes = [f"依「{d1}」×「{d2}」交叉彙總「{alias}」（治理查詢路徑），來源：{block_id}。"]
+        intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                          trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=sentence, result_table=pivot,
+                                 trust_notes=notes, risk_level="low")
+
+    def _answer_multi_filter(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 118: multi-condition filtered metric ("夜班 Hot 批 LAM 機台 rework 的 move 數").
+
+        Scans each fact for categorical VALUES (and boolean flags) named in the
+        prompt, ANDs them into filters, and returns the requested metric. Returns
+        None when fewer than two conditions resolve (let simpler intents handle).
+        """
+        executor = getattr(self, "_executor", None)
+        if executor is None or not contracts:
+            return None
+        from ai4bi.blocks.contracts import BlockType
+        from ai4bi.blocks.datastore import materialize_dataframe
+        from ai4bi.query_spec import BlockRef, FilterOperator, FilterSpec, VisualQuerySpec
+        idx = SchemaIndex.build(contracts)
+        hay = f"{prompt.lower()} {normalized}"
+        # ZH shift synonyms (values are Day/Night)
+        _SHIFT = {"夜班": "Night", "晚班": "Night", "日班": "Day", "白班": "Day"}
+
+        for bid, c in contracts.items():
+            if getattr(c, "block_type", None) not in (
+                    BlockType.fact, BlockType.snapshot_fact, BlockType.target_fact):
+                continue
+            metric = idx.best_metric_match(prompt, normalized)
+            if metric is None or metric.block_id != bid:
+                continue
+            try:
+                df = materialize_dataframe(c)
+            except Exception:  # noqa: BLE001
+                continue
+            filters = []
+            str_cols = [col.name for col in c.columns
+                        if col.data_type in ("string", "str", "object")]
+            for col in str_cols:
+                vals = {str(v) for v in df[col].dropna().unique()} if col in df.columns else set()
+                hit = None
+                for v in vals:
+                    if v and v.lower() in hay:
+                        hit = v
+                        break
+                if hit is None:  # ZH shift synonyms
+                    for zh, en in _SHIFT.items():
+                        if zh in hay and en in vals:
+                            hit = en
+                            break
+                if hit is not None:
+                    filters.append(FilterSpec(bid, col, FilterOperator.eq, hit, False))
+            # boolean flags
+            flag_cols = [col.name for col in c.columns if col.name.endswith("_flag")]
+            for fc in flag_cols:
+                word = fc.replace("_flag", "")
+                zh = {"rework": "重工", "hold": "保留"}.get(word, "")
+                if word in hay or (zh and zh in hay):
+                    filters.append(FilterSpec(bid, fc, FilterOperator.eq, 1, False))
+            if len(filters) < 2:
+                return None
+            # A flag word (rework/hold) used as a FILTER shouldn't also be the
+            # target metric — '...rework 的 move 數' wants move_count. Re-resolve
+            # the metric with filtered flag words stripped out. (Round 118)
+            flag_words = [f.column_name.replace("_flag", "") for f in filters
+                          if f.column_name.endswith("_flag")]
+            if flag_words and any(w in metric.metric_name for w in flag_words):
+                cleaned = hay
+                for w in flag_words:
+                    cleaned = cleaned.replace(w, " ").replace(
+                        {"rework": "重工", "hold": "保留"}.get(w, w), " ")
+                alt = idx.best_metric_match(cleaned, cleaned)
+                if alt is not None and alt.block_id == bid:
+                    metric = alt
+            spec = VisualQuerySpec(
+                spec_id=f"mf_{metric.metric_name}", block_refs=[BlockRef(bid)],
+                metrics=[MetricRef(bid, metric.metric_name, metric.alias)],
+                filters=filters, inherit_global_filter=False)
+            try:
+                res = executor.run(spec)
+            except Exception:  # noqa: BLE001
+                return None
+            val = _first_scalar(res, metric.alias)
+            conds = "、".join(f"{f.column_name}={f.value}" for f in filters)
+            if val is None:
+                sentence = f"在條件（{conds}）下沒有符合的資料（{metric.alias} = 0）。"
+                val = 0
+            else:
+                sentence = (f"在條件（{conds}）下，{metric.alias} = "
+                            f"{_format_metric_value(val, _metric_unit(contracts, bid, metric.metric_name))}。")
+            notes = [f"多條件 AND 篩選後彙總（治理查詢路徑），來源：{bid}。"]
+            intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                              trust_notes=notes, risk_level="low")
+            answer = DirectAnswer(question=prompt.strip(), metric_block_id=bid,
+                                  metric_name=metric.metric_name, metric_alias=metric.alias,
+                                  sentence=sentence, value=val, trust_notes=notes)
+            return NL2ProposalResult(intent=intent, message=sentence, direct_answer=answer,
+                                     trust_notes=notes, risk_level="low")
+        return None
 
     def _answer_breakdown(
         self,
@@ -3668,6 +3838,50 @@ def _looks_like_breakdown(prompt: str, normalized: str) -> bool:
     if any(v in hay for v in _EDIT_VERBS):
         return False  # "改成依月份" is an edit, not a breakdown answer
     return any(m in hay for m in _BREAKDOWN_MARKERS)
+
+
+_MATRIX_CUES: tuple[str, ...] = (
+    "在不同", "交叉", "矩陣", "樞紐", "cross", "matrix", "pivot", "×", " x ",
+    "對照", "各...在", "依...與", "兩個維度",
+)
+_MULTI_FILTER_CUES: tuple[str, ...] = (
+    "且", "並且", "而且", "同時", " and ", "又", "兼",
+)
+
+
+def _looks_like_matrix(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    if any(c in hay for c in _MATRIX_CUES):
+        return True
+    # "各 X ... 不同 Y" pattern (two dimension words around 不同)
+    return "各" in hay and "不同" in hay
+
+
+def _looks_like_multi_filter(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    return any(c in hay for c in _MULTI_FILTER_CUES)
+
+
+def _resolve_n_dims(idx, prompt: str, normalized: str, contracts, block_id: str, n: int = 2) -> list:
+    """Resolve up to ``n`` DISTINCT categorical columns on ``block_id`` that the
+    prompt references, longest keyword first."""
+    hay = f"{prompt.lower()} {normalized}"
+
+    def _is_cat(col: str) -> bool:
+        return _is_categorical_col(contracts, block_id, col)
+
+    scored: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for kw, entry in idx._dims.items():
+        col = entry.column_name
+        if kw in hay and _is_cat(col) and col not in seen:
+            scored.append((len(kw), col))
+    # keep the longest-keyword match per column, then take top n distinct columns
+    best_per_col: dict[str, int] = {}
+    for ln, col in scored:
+        best_per_col[col] = max(best_per_col.get(col, 0), ln)
+    ordered = sorted(best_per_col.items(), key=lambda kv: kv[1], reverse=True)
+    return [col for col, _ in ordered[:n]]
 
 
 def _looks_like_ranking(prompt: str, normalized: str) -> bool:
