@@ -773,6 +773,14 @@ class NL2ProposalService:
             if bd is not None:
                 return bd
 
+        # Round 129: compare a metric across a fab category (重工 vs 非重工,
+        # Hot vs 一般) when the category values aren't both literally named — after
+        # breakdown (so "各班別…" plain breakdowns still win), before the scalar answer.
+        if _looks_like_category_compare(prompt, normalized):
+            cc = self._answer_category_compare(prompt, normalized, report, contracts)
+            if cc is not None:
+                return cc
+
         if _looks_like_metric_question(prompt, normalized):
             answer = self._answer_metric(prompt, normalized, report, semantic_model, contracts)
             if answer is not None:
@@ -1657,6 +1665,27 @@ class NL2ProposalService:
         if metric_match is not None:
             block_id = metric_match.block_id
             metric_name, alias = metric_match.metric_name, metric_match.alias
+            # Round 129: a threshold expressed in hours ("卡關超過 4 小時") wants an
+            # hour-unit measure, not a count. If the resolved metric isn't in hours,
+            # switch to the best hour-unit sibling on the same block by keyword overlap
+            # (卡關/卡住/停留→hold_age, 等待→queue_time).
+            thay = f"{prompt.lower()} {normalized}"
+            if any(t in thay for t in ("小時", "hours", "hour", " hr", "鐘頭")) and \
+                    _metric_unit(contracts, block_id, metric_name) != "hr":
+                pref = ("hold_age" if any(t in thay for t in ("卡關", "卡住", "停留", "滯留", "保留", "hold"))
+                        else "queue" if any(t in thay for t in ("等待", "queue", "等候")) else "")
+                best = None
+                for mm in idx._metrics.values():
+                    if mm.block_id != block_id:
+                        continue
+                    if _metric_unit(contracts, block_id, mm.metric_name) != "hr":
+                        continue
+                    score = (2 if pref and pref in mm.metric_name.lower() else 0) + \
+                            (1 if mm.metric_name.lower().startswith("max_") else 0)
+                    if best is None or score > best[0]:
+                        best = (score, mm.metric_name, mm.alias)
+                if best is not None and best[0] > 0:
+                    metric_name, alias = best[1], best[2]
             entity_col = _entity_col_on_block(idx, prompt, normalized, contracts, block_id)
         else:
             entity_col, block_id = _resolve_entity_dimension(idx, prompt, normalized, contracts)
@@ -2090,6 +2119,14 @@ class NL2ProposalService:
             from ai4bi.blocks.datastore import materialize_dataframe as _mat
             for bid, c in facts.items():
                 two = _resolve_two_numeric_cols(prompt, normalized, c)
+                # Round 129: two columns that share a token (capacity_moves vs
+                # actual_moves_ref) aren't two distinct concepts — skip so a genuinely
+                # cross-fact question (cycle@yield vs move@move) reaches the join path.
+                if len(two) == 2:
+                    t0 = set(re.split(r"[_\s]+", two[0].lower())) - _GENERIC_NUM_TOKENS
+                    t1 = set(re.split(r"[_\s]+", two[1].lower())) - _GENERIC_NUM_TOKENS
+                    if t0 & t1:
+                        continue
                 if len(two) == 2:
                     try:
                         df1 = _mat(c)
@@ -2106,6 +2143,46 @@ class NL2ProposalService:
                     return NL2ProposalResult(intent=intent, message=sentence,
                                              result_table=df1[two].head(50),
                                              trust_notes=notes, risk_level="low")
+        # Round 129: same-fact cohort — bucket rows by one column's quantile and
+        # compare another column across buckets when BOTH live in one fact
+        # ("cycle time 最久的前 20% 批號的良率掉多少" → cycle & yield, both in yield).
+        is_cohort0 = bool(re.search(r"前\s*\d+\s*%|後\s*\d+\s*%|\d+\s*%|分位|cohort|quantile|四分位", hay0))
+        if is_cohort0:
+            from ai4bi.analysis.crossfact import cohort_by_quantile as _cohort
+            from ai4bi.blocks.datastore import materialize_dataframe as _mat
+            _OUTCOME = ("yield", "良率", "pct", "rate", "defect", "缺陷", "good", "bad", "報廢")
+            for bid, c in facts.items():
+                two = _resolve_two_numeric_cols(prompt, normalized, c)
+                if len(two) != 2:
+                    continue
+                t0 = set(re.split(r"[_\s]+", two[0].lower())) - _GENERIC_NUM_TOKENS
+                t1 = set(re.split(r"[_\s]+", two[1].lower())) - _GENERIC_NUM_TOKENS
+                if t0 & t1:
+                    continue
+                outcome = next((x for x in two if any(o in x.lower() for o in _OUTCOME)), None)
+                bucket = next((x for x in two if x != outcome), None)
+                if outcome is None or bucket is None:
+                    bucket, outcome = two[0], two[1]
+                try:
+                    df1 = _mat(c)
+                except Exception:  # noqa: BLE001
+                    continue
+                table = _cohort(df1, bucket, outcome, q=5)
+                if table is None or table.empty:
+                    continue
+                ocol = next((cc for cc in table.columns if cc.startswith("平均")), None)
+                if ocol is not None and len(table) >= 2:
+                    worst, best = float(table.iloc[-1][ocol]), float(table.iloc[0][ocol])
+                    sentence = (f"依「{bucket}」分位分 {len(table)} 組（同表 {bid}）："
+                                f"{bucket} 最高組平均{outcome} {worst} vs 最低組 {best}"
+                                f"（差 {round(best - worst, 2)}）。")
+                else:
+                    sentence = f"依「{bucket}」分位分組，比較各組「{outcome}」（同表 {bid}）。"
+                notes = [f"同表 cohort：以 {bucket} 分位分桶，平均 {outcome}。來源：{bid}。"]
+                intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                                  trust_notes=notes, risk_level="low")
+                return NL2ProposalResult(intent=intent, message=sentence, result_table=table,
+                                         trust_notes=notes, risk_level="low")
         if len(facts) < 2:
             return None
         # A numeric column the prompt references, per fact.
@@ -2144,6 +2221,19 @@ class NL2ProposalService:
         if is_corr and not is_cohort:
             stat = correlate_facts(merged, ca, cb)
             if stat is None:
+                # degenerate: a constant column has no variance to correlate. Report
+                # it honestly (with the aligned table) instead of declining silently.
+                const = next((col for col in (ca, cb)
+                              if col in merged.columns and merged[col].nunique(dropna=True) < 2), None)
+                if const is not None:
+                    sentence = (f"無法計算相關：「{const}」在每個 {key} 上皆相同"
+                                f"（值={merged[const].dropna().iloc[0] if not merged[const].dropna().empty else 'NA'}，"
+                                f"無變異），因此與「{cb if const == ca else ca}」無相關性可言。")
+                    notes = [f"跨表分析：各自彙總到 {key} 後對齊；{const} 無變異。"]
+                    intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                                      trust_notes=notes, risk_level="low")
+                    return NL2ProposalResult(intent=intent, message=sentence, result_table=merged,
+                                             trust_notes=notes, risk_level="low")
                 return None
             sentence = (f"「{ca}」與「{cb}」（依 {key} 對齊，n={stat['n']}）相關係數 r={stat['r']}"
                         f"（{stat['direction']}相關，{stat['strength']}）。")
@@ -2381,15 +2471,31 @@ class NL2ProposalService:
         # share question resolved a rate/pct/density metric, switch to the additive
         # sibling (defect_density_pct → defect_die) so the % column is meaningful.
         hay0 = f"{prompt.lower()} {normalized}"
-        if any(t in hay0 for t in ("占比", "佔比", "比重", "占總", "佔總")) and \
-                any(t in metric_name.lower() for t in ("rate", "pct", "ratio", "density")):
-            base = set(re.split(r"[_\s]+", metric_name.lower())) - {"pct", "rate", "ratio", "density"}
+        is_share0 = any(t in hay0 for t in ("占比", "佔比", "比重", "占總", "佔總", "佔全", "占全", "佔多少", "佔了"))
+        # A share resolved on a non-additive metric (rate/pct OR avg_/max_/min_) must
+        # switch to its additive sibling so the % column is meaningful:
+        #   defect_density_pct → defect_die,  avg_queue_time_hr → total_queue_hr.
+        non_additive = any(t in metric_name.lower() for t in ("rate", "pct", "ratio", "density")) or \
+            metric_name.lower().startswith(("avg_", "max_", "min_", "mean_"))
+        if is_share0 and non_additive:
+            drop = {"pct", "rate", "ratio", "density", "avg", "max", "min", "mean", "total"}
+            base = set(re.split(r"[_\s]+", metric_name.lower())) - drop
+            best_sib = None
             for mm in idx._metrics.values():
                 nm = mm.metric_name.lower()
-                if (mm.block_id == block_id and base & set(re.split(r"[_\s]+", nm))
-                        and not any(t in nm for t in ("rate", "pct", "ratio", "density"))):
-                    metric_name, alias = mm.metric_name, mm.alias
-                    break
+                if mm.block_id != block_id or nm == metric_name.lower():
+                    continue
+                if any(t in nm for t in ("rate", "pct", "ratio", "density")):
+                    continue
+                overlap = base & (set(re.split(r"[_\s]+", nm)) - drop)
+                if not overlap:
+                    continue
+                # prefer an explicit total_/sum sibling
+                score = len(overlap) + (1 if nm.startswith(("total_", "sum_")) else 0)
+                if best_sib is None or score > best_sib[0]:
+                    best_sib = (score, mm.metric_name, mm.alias)
+            if best_sib is not None:
+                metric_name, alias = best_sib[1], best_sib[2]
 
         from ai4bi.query_spec import BlockRef, DimensionRef, SortDirection, SortSpec, VisualQuerySpec
         spec = VisualQuerySpec(
@@ -2405,7 +2511,8 @@ class NL2ProposalService:
             return None
         # Round 120: a "占比/share" breakdown gets an inline 佔總比% column.
         hay = f"{prompt.lower()} {normalized}"
-        is_share = any(t in hay for t in ("占比", "佔比", "比重", "占總", "佔總", "share", "%", "百分比"))
+        is_share = any(t in hay for t in ("占比", "佔比", "比重", "占總", "佔總", "佔全", "占全",
+                                          "佔多少", "占多少", "佔了", "share", "%", "百分比"))
         if is_share and alias in df.columns:
             total = float(df[alias].sum())
             if total:
@@ -2424,6 +2531,57 @@ class NL2ProposalService:
         intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                           trust_notes=notes, risk_level="low")
         return NL2ProposalResult(intent=intent, message=sentence, result_table=df,
+                                 trust_notes=notes, risk_level="low")
+
+    def _answer_category_compare(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 129: compare a metric across a fab category (rework vs non-rework,
+        Hot vs Normal priority, day vs night) when the column's values are not both
+        literally named — keyword maps to the column, then breaks the metric down."""
+        executor = getattr(self, "_executor", None)
+        if executor is None or not contracts:
+            return None
+        idx = SchemaIndex.build(contracts)
+        match = idx.best_metric_match(prompt, normalized)
+        if match is None:
+            return None
+        block_id, metric_name, alias = match.block_id, match.metric_name, match.alias
+        col = _keyword_category_column(prompt, normalized, contracts, block_id)
+        if col is None:
+            return None
+        from ai4bi.query_spec import BlockRef, DimensionRef, SortDirection, SortSpec, VisualQuerySpec
+        spec = VisualQuerySpec(
+            spec_id=f"catcmp_{metric_name}_{col}", block_refs=[BlockRef(block_id)],
+            metrics=[MetricRef(block_id, metric_name, alias)],
+            dimensions=[DimensionRef(block_id, col, col)],
+            sort=[SortSpec(alias, SortDirection.desc)], inherit_global_filter=False)
+        try:
+            df = executor.run(spec)
+        except Exception:  # noqa: BLE001
+            return None
+        if df is None or df.empty or col not in df.columns or alias not in df.columns:
+            return None
+        disp = df.copy()
+        # readable labels for boolean flag columns (0/1 → 否/是)
+        uniq = {str(v) for v in disp[col].unique()}
+        if uniq <= {"0", "1", "0.0", "1.0", "True", "False"}:
+            lab = {"1": "是", "1.0": "是", "True": "是", "0": "否", "0.0": "否", "False": "否"}
+            disp[col] = disp[col].astype(str).map(lambda v: lab.get(v, v))
+        hi, lo = disp.iloc[0], disp.iloc[-1]
+        hv, lv = float(hi[alias]), float(lo[alias])
+        diff = ((hv - lv) / abs(lv) * 100) if lv else None
+        msg = (f"「{alias}」依「{col}」比較（共 {len(disp)} 組）：{hi[col]} {round(hv, 2)} 最高、"
+               f"{lo[col]} {round(lv, 2)} 最低"
+               + (f"，相差 {diff:.1f}%。" if diff is not None else "。"))
+        notes = [f"依「{col}」分組比較「{alias}」（治理查詢路徑），來源：{block_id}。"]
+        intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                          trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=msg, result_table=disp,
                                  trust_notes=notes, risk_level="low")
 
     def _answer_ranking(
@@ -4152,6 +4310,7 @@ _BREAKDOWN_MARKERS: tuple[str, ...] = (
     "各", "每個", "每一", "每種", "每類", "依", "按", "照", "分布", "分佈", "分組",
     " by ", " per ", "breakdown", "group by", "分別",
     "占比", "佔比", "比重", "占總", "佔總",  # Round 127: share questions
+    "佔全", "占全", "佔多少", "占多少", "佔了",  # Round 129: 佔全廠 share
 )
 _EDIT_VERBS: tuple[str, ...] = ("改成", "換成", "改為", "改用", "變成", "change to", "switch to")
 
@@ -4207,8 +4366,15 @@ def _resolve_n_dims(idx, prompt: str, normalized: str, contracts, block_id: str,
     return [col for col, _ in ordered[:n]]
 
 
+_SHARE_MARKERS = ("佔總", "占總", "比重", "佔全", "占全", "佔多少", "占多少", "佔了")
+
+
 def _looks_like_ranking(prompt: str, normalized: str) -> bool:
     hay = f"{prompt.lower()} {normalized}"
+    # Round 129: a "...佔總比重" question is about share-of-total, not a Top-N cut —
+    # let breakdown (which adds the 佔總比% column) handle it.
+    if any(s in hay for s in _SHARE_MARKERS):
+        return False
     if any(t in hay for t in _RANK_TRIGGERS):
         return True
     # "前 5 名 / top 5" expressed with a number.
@@ -4511,6 +4677,46 @@ def _column_holding_values(prompt: str, normalized: str, contracts, block_id: st
     return best
 
 
+# Round 129: fab categorical keywords → a low-cardinality column, so a
+# compare-by-category question ("重工 vs 非重工", "Hot lot 比一般") can group by it
+# even when the column's VALUES (0/1) are not literally named in the prompt.
+_FAB_CATEGORY_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("重工", "返工", "rework"), "rework_flag"),
+    (("優先", "priority", "hot", "急件", "趕貨", "一般批", "normal"), "priority"),
+    (("hold", "保留", "扣留", "held", "卡住"), "hold_flag"),
+    (("日班", "夜班", "白班", "晚班", "班別", "shift"), "shift"),
+)
+_ALL_FAB_CAT_KW = tuple(k for kws, _ in _FAB_CATEGORY_KEYWORDS for k in kws)
+_CATEGORY_COMPARE_CUES = (
+    " vs ", "v.s", "versus", "差異", "差別", "比較", "對比", "相比", "比一般",
+    "短嗎", "長嗎", "高嗎", "低嗎", "快嗎", "慢嗎", "多嗎", "少嗎", "有沒有差", "對照")
+
+
+def _keyword_category_column(prompt: str, normalized: str, contracts, block_id: str) -> str | None:
+    """Round 129: map a fab category keyword (rework/priority/hold/shift) to its
+    column on block_id, for compare-by-category breakdowns."""
+    from ai4bi.blocks.datastore import materialize_dataframe
+    contract = (contracts or {}).get(block_id)
+    if contract is None:
+        return None
+    try:
+        df = materialize_dataframe(contract)
+    except Exception:  # noqa: BLE001
+        return None
+    cols = {c.name for c in getattr(contract, "columns", []) or []}
+    hay = f"{prompt.lower()} {normalized}"
+    for kws, col in _FAB_CATEGORY_KEYWORDS:
+        if col in cols and col in df.columns and any(k in hay for k in kws):
+            return col
+    return None
+
+
+def _looks_like_category_compare(prompt: str, normalized: str) -> bool:
+    hay = f" {prompt.lower()} {normalized} "
+    return (any(c in hay for c in _CATEGORY_COMPARE_CUES)
+            and any(k in hay for k in _ALL_FAB_CAT_KW))
+
+
 def _is_pk_like(col: str) -> bool:
     """Round 127: a row-identifier column that must never be a grouping dimension
     (move_id, yield_event_id, …) even though it's categorical."""
@@ -4680,8 +4886,16 @@ _CAPACITY_CUES: tuple[str, ...] = (
 _OEE_CUES: tuple[str, ...] = ("oee", "設備總合效率", "設備綜合效率", "綜合效率", "總合效率")
 
 
+# a wait/queue share-of-total question ("ETCH 等待佔全廠多少%") is about queue time,
+# not capacity — even though "瓶頸" trips a capacity cue. Let breakdown handle it.
+_CAPACITY_VETO = ("等待", "queue", "佇列", "wait time", "等候")
+_SHARE_WORDS = ("佔總", "占總", "佔全", "占全", "比重", "佔多少", "占多少", "佔了", "share of")
+
+
 def _looks_like_capacity(prompt: str, normalized: str) -> bool:
     hay = f"{prompt.lower()} {normalized}"
+    if any(v in hay for v in _CAPACITY_VETO) and any(s in hay for s in _SHARE_WORDS):
+        return False
     return any(c in hay for c in _CAPACITY_CUES)
 
 
@@ -4746,6 +4960,15 @@ def _pick_join_key(prompt: str, normalized: str, shared: set) -> str | None:
     return sorted(shared)[0]
 
 
+# Round 129: generic numeric-suffix tokens that must NOT alone bind a column —
+# "cycle time" should not match queue_time/process_time via the shared "time".
+_GENERIC_NUM_TOKENS = frozenset({
+    "time", "時間", "hr", "hour", "hours", "min", "mins", "minute", "minutes", "鐘頭",
+    "count", "cnt", "次數", "rate", "ratio", "pct", "percent", "百分比", "num", "value",
+    "amount", "total", "qty", "age", "id", "date", "日期", "數",
+})
+
+
 def _resolve_two_numeric_cols(prompt: str, normalized: str, contract) -> list:
     """Round 121: up to 2 DISTINCT numeric columns the prompt references (for
     same-fact correlation), longest keyword first."""
@@ -4761,10 +4984,11 @@ def _resolve_two_numeric_cols(prompt: str, normalized: str, contract) -> list:
             continue
         kws: set[str] = set()
         for tok in re.split(r"[_\s]+", low):
-            if tok:
+            if tok and tok not in _GENERIC_NUM_TOKENS:
                 kws.add(tok)
                 for zh in _EN_TO_ZH.get(tok, []):
-                    kws.add(zh)
+                    if zh not in _GENERIC_NUM_TOKENS:
+                        kws.add(zh)
         for kw in kws:
             if len(kw) >= 2 and kw in hay:
                 best_per_col[c.name] = max(best_per_col.get(c.name, 0), len(kw))
@@ -4791,10 +5015,11 @@ def _resolve_numeric_column(prompt: str, normalized: str, contract) -> str | Non
             continue
         kws: set[str] = set()
         for tok in re.split(r"[_\s]+", low):
-            if tok:
+            if tok and tok not in _GENERIC_NUM_TOKENS:
                 kws.add(tok)
                 for zh in _EN_TO_ZH.get(tok, []):
-                    kws.add(zh)
+                    if zh not in _GENERIC_NUM_TOKENS:
+                        kws.add(zh)
         for kw in kws:
             if len(kw) >= 2 and kw in hay and len(kw) > best_len:
                 best, best_len = c.name, len(kw)

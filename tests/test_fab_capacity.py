@@ -164,3 +164,56 @@ def test_C10_which_tool_to_fix_first(env):
     r = _ask(env, "如果要提升整廠 OEE，最該先處理哪一台？")
     assert r.result_table is not None and "tool_id" in r.result_table.columns
     assert r.result_table.iloc[0]["tool_id"] == "ETCH-02"  # worst, not fab-average
+
+
+# --- Round D: WIP / queue dynamics (R129) --------------------------------
+def test_D2_wip_move_by_step(env):
+    r = _ask(env, "各製程站的在製品（WIP）移動量分布")
+    assert r.result_table is not None and "step_id" in r.result_table.columns
+
+
+def test_D3_priority_compare(env):
+    r = _ask(env, "Hot（高優先）lot 的等待時間有比一般 lot 短嗎？")
+    assert r.result_table is not None and "priority" in r.result_table.columns
+    assert set(r.result_table["priority"]) >= {"Hot", "Normal"}  # 2-group compare
+
+
+def test_D4_queue_share_by_step(env):
+    r = _ask(env, "等待時間最長的前五站，各佔總等待多少比重？")
+    assert r.result_table is not None
+    assert "佔總比%" in r.result_table.columns  # share, not a Top-N cut
+    assert r.result_table.iloc[0]["step_id"] == "ETCH"
+
+
+def test_D5_etch_queue_share(env):
+    r = _ask(env, "瓶頸站 ETCH 的等待時間佔全廠等待的多少？")
+    assert r.result_table is not None and "佔總比%" in r.result_table.columns
+    assert r.result_table.iloc[0]["step_id"] == "ETCH"  # ETCH dominates total wait
+
+
+def test_D7_cycle_vs_move_degenerate(env):
+    # move_count per lot is uniform → correlation undefined; must say so honestly,
+    # aligning cycle (yield) and move (move) cross-fact, not silently fall through.
+    r = _ask(env, "cycle time 跟移動次數有沒有相關性？")
+    assert r.result_table is not None
+    assert "move_count" in r.result_table.columns and "cycle_time_hr" in r.result_table.columns
+
+
+def test_D9_rework_compare(env):
+    r = _ask(env, "重工 vs 非重工的移動量差異")
+    assert r.result_table is not None and "rework_flag" in r.result_table.columns
+    assert len(r.result_table) == 2  # rework vs non-rework
+
+
+def test_D10_hold_age_hours_threshold(env):
+    r = _ask(env, "卡關超過 4 小時的 lot 有哪些？")
+    assert r.result_table is not None and "lot_id" in r.result_table.columns
+    # hour-unit measure, not a count: every qualifying lot exceeds 4 hours
+    hrcol = next(c for c in r.result_table.columns if "Hold Age" in c or "hold_age" in c.lower())
+    assert all(v > 4 for v in r.result_table[hrcol])
+
+
+def test_D_same_fact_cohort(env):
+    r = _ask(env, "cycle time 最久的前 20% 批號的良率掉多少？")
+    assert r.result_table is not None
+    assert any("平均" in c for c in r.result_table.columns)  # cohort outcome column

@@ -229,6 +229,15 @@ def build_process_move_block() -> DataBlockContract:
             MetricDefinition(name="avg_process_time_min", formula="AVG(process_time_min)",
                              disaggregation_method=DisaggregationMethod.none, unit="min",
                              description="平均製程時間"),
+            # additive totals → enable share-of-total ("ETCH 等待佔全廠多少%").
+            # disagg=none (derived) so the planner evaluates the SUM() formula rather
+            # than treating the metric name as a native column.
+            MetricDefinition(name="total_queue_hr", formula="SUM(queue_time_hr)",
+                             disaggregation_method=DisaggregationMethod.none, unit="hr",
+                             description="總等待時間"),
+            MetricDefinition(name="total_process_min", formula="SUM(process_time_min)",
+                             disaggregation_method=DisaggregationMethod.none, unit="min",
+                             description="總製程時間"),
             MetricDefinition(name="rework_count", formula="SUM(rework_flag)",
                              disaggregation_method=DisaggregationMethod.none, description="重工次數"),
             MetricDefinition(name="hold_count", formula="SUM(hold_flag)",
