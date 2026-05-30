@@ -159,4 +159,21 @@
 - 新增 `tests/test_followup_scope.py`（3 測）。非 e2e **1024 passed**。
 - **10/10 情境皆達標 → 進入 multi-agent 重新打分（全新情境）。**
 
+---
+
+## 第 2 輪 — 全新 10 情境 multi-agent 打分（反 overfit）
+為避免「對著第一組 10 題開發」的 overfit，用 `_probe_deploy2.py` 出**全新 10 題**（更深的多輪、跨表子群、模糊、誠實性陷阱），實跑後召集 **3 個 lens agent**（良率／IE／產品信任）獨立打分。
+
+**baseline（Round 136 後、Round 137 前）平均 ≈ 51.8**（良率 50.3、IE 53.3、產品 51.8）。失敗叢集（共識）：
+- **N3＝真 bug**：commonality 門檻 `re.search` 抓到「ETCH-02」的「02」當門檻（2.0）→ 自信回「沒有」。silent-wrong。
+- **N6/N7/N8＝子群比較 silent-wrong**：「有重工的批/Day班Night班/被hold的批…是不是比較X」→ 回**全期間單一數字**，沒做分組比較。其中 N6/N8 還是跨表（flag 在 move、measure 在 yield）。
+- N4 SPC 沒回「這算不算管制圖」、N5 沒明說加權 vs 簡單、N10 沒回母體 N、N2 異常掃描只說「2 個重點」無內容。
+
+**Round 137**（test+commit+push）— 依量出的失敗修：
+- **N3**：`_parse_threshold` — 優先抓比較詞/％ 後的數字，最後才抓「未黏在字母/連字號上」的裸數字，"ETCH-02" 不再被誤抓。實測回 ETCH-02 lift 1.82 / p=0.0017。
+- **N6/N7/N8**：`_answer_subgroup_compare` — flag 與 measure 同表則 group-by；**跨表則以 lot 對齊**（flag.max / measure.mean）。實測 N6 有重工 91.99% vs 無 92.42%「較差」、N7 Day 2.52 vs Night 2.89、N8 有 hold 280.29 vs 無 245.44「較長」。
+- **N4**：SPC 誠實註記（μ±kσ 離群非時序管制圖、無 Cpk/Western Electric）。**N5**：加權問句觸發 provenance（N=100 片＋加權公式）。**N10**：ranking 問「幾筆」回母體 N=600。**N2**：異常掃描列出實際 headline。
+- 新增 `tests/test_subgroup_and_threshold.py`（5）+ `test_followup_scope.py`。非 e2e **1029 passed**。
+- 下一步：fresh set #3 multi-agent 重打分驗證是否達 ≥95。
+
 

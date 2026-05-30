@@ -734,6 +734,14 @@ class NL2ProposalService:
             if sp is not None:
                 return sp
 
+        # Round 137: subgroup comparison ("有重工的批 良率是不是比較差", "Day班 vs
+        # Night班 queue time", "被hold的批 cycle time 比較長嗎"). Checked before
+        # crossfact/category/metric so it isn't answered with an overall number.
+        if _looks_like_subgroup_compare(prompt, normalized):
+            sg = self._answer_subgroup_compare(prompt, normalized, report, contracts)
+            if sg is not None:
+                return sg
+
         # Round 116: cross-fact analytics (correlation/cohort/ratio across two
         # facts). Checked before ranking/seasonality so "最長...有關聯" and "前 20%
         # ...良率" route to the cross-fact engine, not single-fact ranking.
@@ -1638,7 +1646,9 @@ class NL2ProposalService:
                                          trust_notes=notes, risk_level="low")
             df = pd.DataFrame([{"嚴重度": {"high": "🔴 高", "medium": "🟡 中"}.get(o.severity, "ℹ️"),
                                 "重點": f"{o.icon} {o.headline}", "說明": o.detail} for o in obs])
-            sentence = f"發現 {len(obs)} 個值得注意的重點。"
+            # Round 137: name the actual findings inline (was a vague "發現 N 個重點").
+            tops = "；".join(o.headline for o in obs[:3])
+            sentence = f"掃描後發現 {len(obs)} 個值得注意的點：{tops}{'…' if len(obs) > 3 else ''}（詳見下表）。"
             notes = ["以離群（z-score）、波動（變異係數）等檢查掃描各資料集。"]
             intent = AIIntent(intent_kind="analysis_request", target_scope="report",
                               trust_notes=notes, risk_level="low")
@@ -2385,6 +2395,15 @@ class NL2ProposalService:
                 msg = (f"{len(table)} 個「{ent}」超出管制界限 μ±{k:g}σ：{names}"
                        f"（μ={limits['mean']}, UCL={limits['ucl']}, LCL={limits['lcl']}）。")
             notes = [f"SPC：依 {ent} 取平均後，以全體 μ±{k:g}σ 為管制界限。來源：{bid}。"]
+            # Round 137: SPC honesty — answer "這算管制圖嗎 / Cpk" honestly. This is a
+            # cross-entity μ±kσ outlier scan, NOT a time-ordered control chart.
+            if any(t in hay for t in ("管制圖", "control chart", "cpk", "ppk", "spc 嗎",
+                                      "算 spc", "算spc", "是 spc", "西電", "western electric", "管制圖嗎")):
+                honest = ("說明：這是「跨機台 μ±kσ 離群掃描」，非嚴格的時序管制圖——"
+                          "未做合理分組(rational subgrouping)、無 I-MR/X̄-R 圖、無 Western Electric 連串判讀、"
+                          "也未對規格上下限算 Cpk/Ppk。當「相對離群篩選」可用；要正式 SPC/製程能力需時序樣本與規格界限。")
+                msg = msg + honest
+                notes.append(honest)
             intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                               trust_notes=notes, risk_level="low")
             return NL2ProposalResult(intent=intent, message=msg,
@@ -2408,9 +2427,11 @@ class NL2ProposalService:
         idx = SchemaIndex.build(contracts)
         hay = f"{prompt.lower()} {normalized}"
 
-        # threshold metric (yield) + value, e.g. 良率 < 80
-        thr_m = re.search(r"(\d+(?:\.\d+)?)\s*%?", hay)
-        threshold = float(thr_m.group(1)) if thr_m else None
+        # threshold metric (yield) + value, e.g. 良率 < 80.
+        # Round 137 fix: must NOT grab digits embedded in a tool name ("ETCH-02"
+        # → 2.0). Prefer a number adjacent to a comparison cue or a % sign; only
+        # then a standalone number not glued to letters/hyphens.
+        threshold = _parse_threshold(hay)
         op = "lt" if any(t in hay for t in ("以下", "低於", "小於", "<", "below", "under", "掉到")) else "gt"
 
         facts = {b: c for b, c in contracts.items()
@@ -3055,6 +3076,103 @@ class NL2ProposalService:
         return NL2ProposalResult(intent=intent, message=msg, result_table=disp,
                                  trust_notes=notes, risk_level="low")
 
+    def _answer_subgroup_compare(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 137: compare a MEASURE across a binary/categorical FLAG, aligning
+        by lot when the flag and the measure live in different facts (rework/hold
+        in moves, yield/cycle in yield). Prevents the silent-wrong overall number."""
+        if not contracts:
+            return None
+        from ai4bi.blocks.datastore import materialize_dataframe
+        import pandas as _pd
+        hay = f" {prompt.lower()} {normalized} "
+        # resolve flag column + which fact holds it
+        flag_col = flag_block = None
+        for kws, col in _SUBGROUP_FLAGS:
+            if any(k in hay for k in kws):
+                for bid, c in contracts.items():
+                    if col in {x.name for x in getattr(c, "columns", [])}:
+                        flag_col, flag_block = col, bid
+                        break
+            if flag_col:
+                break
+        # resolve measure column + which fact holds it (first preference that exists)
+        meas_col = meas_block = None
+        for kws, cands in _SUBGROUP_MEASURES:
+            if any(k in hay for k in kws):
+                for cand in cands:
+                    for bid, c in contracts.items():
+                        if cand in {x.name for x in getattr(c, "columns", [])}:
+                            meas_col, meas_block = cand, bid
+                            break
+                    if meas_col:
+                        break
+            if meas_col:
+                break
+        if not flag_col or not meas_col:
+            return None
+        try:
+            fdf = materialize_dataframe(contracts[flag_block])
+            mdf = materialize_dataframe(contracts[meas_block])
+        except Exception:  # noqa: BLE001
+            return None
+        is_binary = flag_col in ("rework_flag", "hold_flag")
+        higher_better = "yield" in meas_col.lower()
+
+        if flag_block == meas_block:
+            work = fdf[[flag_col, meas_col]].copy()
+        else:
+            if "lot_id" not in fdf.columns or "lot_id" not in mdf.columns:
+                return None
+            agg_flag = fdf.groupby("lot_id")[flag_col].max() if is_binary \
+                else fdf.groupby("lot_id")[flag_col].agg(lambda s: s.mode().iloc[0] if len(s.mode()) else s.iloc[0])
+            agg_meas = mdf.groupby("lot_id")[meas_col].mean()
+            work = _pd.concat([agg_flag, agg_meas], axis=1, join="inner").reset_index()
+        work = work.dropna(subset=[flag_col, meas_col])
+        if work.empty:
+            return None
+        if is_binary:
+            work[flag_col] = work[flag_col].map(lambda v: "有" if float(v) > 0 else "無")
+        grp = work.groupby(flag_col)[meas_col].agg(["mean", "count"]).reset_index()
+        if len(grp) < 2:
+            return None
+        grp = grp.sort_values("mean", ascending=not higher_better).reset_index(drop=True)
+        grp["mean"] = grp["mean"].round(2)
+        a, b = grp.iloc[0], grp.iloc[-1]
+        unit = "%" if "yield" in meas_col.lower() or "pct" in meas_col.lower() else ""
+        diff = round(abs(float(a["mean"]) - float(b["mean"])), 2)
+        worse_word = "差" if higher_better else "高/長"
+        # the flagged subgroup ("有") — does it do worse?
+        flagged = grp[grp[flag_col].astype(str).isin(["有", "Day", "Night"])]
+        out = grp.rename(columns={flag_col: flag_col, "mean": f"平均{meas_col}", "count": "lot數"})
+        msg = (f"依「{flag_col}」比較「{meas_col}」：{a[flag_col]} {a['mean']}{unit}"
+               f"（{int(a['count'])} lot）vs {b[flag_col]} {b['mean']}{unit}"
+               f"（{int(b['count'])} lot），相差 {diff}{unit}。")
+        if is_binary:
+            hv = grp[grp[flag_col] == "有"]["mean"]
+            nv = grp[grp[flag_col] == "無"]["mean"]
+            if not hv.empty and not nv.empty:
+                hv0, nv0 = float(hv.iloc[0]), float(nv.iloc[0])
+                if higher_better:
+                    verdict = "較差" if hv0 < nv0 else "沒有比較差，反而較好"
+                else:
+                    verdict = "較高/較長" if hv0 > nv0 else "沒有比較高/長"
+                msg = (f"有{flag_col.replace('_flag','')} 的批「{meas_col}」為 {round(hv0,2)}{unit}、"
+                       f"無的為 {round(nv0,2)}{unit}（相差 {round(abs(hv0-nv0),2)}{unit}）"
+                       f"→ 有此狀況者{verdict}。")
+        method = ("同表分組比較" if flag_block == meas_block
+                  else f"以 lot 對齊跨表（{flag_block} 的 {flag_col} × {meas_block} 的 {meas_col}）")
+        notes = [f"子群比較：{method}；各組以平均彙總並列出 lot 數。"]
+        intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                          trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=msg, result_table=out,
+                                 trust_notes=notes, risk_level="low")
+
     def _answer_ranking(
         self,
         prompt: str,
@@ -3114,6 +3232,13 @@ class NL2ProposalService:
             f"依「{alias}」對「{dim_col}」排序取前 {n}（治理查詢 sort+limit，認證語意層）。",
             f"來源：{block_id}。",
         ]
+        # Round 137: provenance on ranking when asked ("用幾筆資料算的").
+        if any(t in f"{prompt.lower()} {normalized}" for t in (
+                "幾筆", "幾片", "母體", "幾個資料", "用幾", "how many", "population", "based on")):
+            prov = _provenance_note(contracts, block_id, _find_date_column(contracts, block_id), metric_name)
+            if prov:
+                sentence = f"{sentence} {prov}"
+                notes.append(prov)
         # Round 135: when ranking by a weighted-yield metric and the user asks about
         # weighting ("是用晶圓數加權的嗎"), confirm the method explicitly in plain words.
         if "weighted_yield" in metric_name.lower():
@@ -3312,7 +3437,8 @@ class NL2ProposalService:
             notes.append(prov)
             asks_prov = any(t in f"{prompt.lower()} {normalized}" for t in (
                 "幾片", "幾筆", "母體", "排除", "怎麼算", "用什麼算", "幾個", "幾批",
-                "how many", "population", "exclud", "based on"))
+                "how many", "population", "exclud", "based on",
+                "加權", "簡單平均", "weighted", "simple average", "怎麼來"))
             if asks_prov:
                 sentence = f"{sentence} {prov}"
 
@@ -4708,6 +4834,22 @@ _AMBIGUOUS_TERMS: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 
+def _parse_threshold(hay: str) -> float | None:
+    """Round 137: extract a numeric threshold from a prompt, ignoring digits that
+    are part of an identifier like "ETCH-02". Priority: number after a comparison
+    cue, then number before %, then a bare number not glued to letters/hyphens."""
+    cues = r"(?:低於|小於|以下|大於|高於|超過|至少|不到|below|under|above|over|less than|<|>|=)"
+    m = re.search(cues + r"\s*(\d+(?:\.\d+)?)\s*%?", hay)
+    if m:
+        return float(m.group(1))
+    m = re.search(r"(\d+(?:\.\d+)?)\s*%", hay)  # "80%" / "80 %"
+    if m:
+        return float(m.group(1))
+    # bare number, but not one preceded by a letter/hyphen (so "etch-02" is skipped)
+    m = re.search(r"(?<![\w-])(\d+(?:\.\d+)?)(?![\w-])", hay)
+    return float(m.group(1)) if m else None
+
+
 def _provenance_note(contracts, block_id: str, date_col: str | None,
                      metric_name: str = "") -> str | None:
     """Round 135: build a population/method/exclusions provenance line for an
@@ -5306,6 +5448,39 @@ def _looks_like_category_compare(prompt: str, normalized: str) -> bool:
     hay = f" {prompt.lower()} {normalized} "
     return (any(c in hay for c in _CATEGORY_COMPARE_CUES)
             and any(k in hay for k in _ALL_FAB_CAT_KW))
+
+
+# Round 137: subgroup comparison — "有重工的批，良率是不是比較差" / "Day班和Night班
+# queue time 有差嗎" / "被hold的批 cycle time 比較長嗎". The grouping FLAG and the
+# MEASURE may live in different facts (rework_flag/hold_flag in moves, yield/cycle
+# in yield), so this aligns by lot when needed. Fixes the silent-wrong where an
+# overall single number was returned instead of the subgroup comparison.
+_SUBGROUP_FLAGS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("重工", "返工", "rework"), "rework_flag"),
+    (("被hold", "被 hold", "hold 住", "hold住", "hold", "保留", "扣留", "held", "卡住"), "hold_flag"),
+    (("日班", "夜班", "白班", "晚班", "早班", "班別", "shift", "day班", "night班",
+      "day 班", "night 班"), "shift"),
+    (("優先", "priority", "hot", "急件", "趕貨"), "priority"),
+)
+_SUBGROUP_MEASURES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("良率", "yield", "良品率"), ("weighted_yield_pct", "yield_pct")),
+    (("cycle", "週期", "周期", "在線時間", "在製時間"), ("cycle_time_hr",)),
+    (("queue", "等待", "佇列", "排隊"), ("queue_time_hr",)),
+    (("缺陷", "defect"), ("defect_die", "defect_density_pct")),
+    (("加工", "process time", "處理時間"), ("process_time_min",)),
+)
+_SUBGROUP_CMP_CUES = (
+    "比較", "有差", "有沒有差", "差異", "差別", "是不是", "會不會", "vs", "versus",
+    "對比", "相比", "比一般", "短嗎", "長嗎", "高嗎", "低嗎", "快嗎", "慢嗎",
+    "多嗎", "少嗎", "更差", "更好", "更高", "更低", "更長", "更短")
+
+
+def _looks_like_subgroup_compare(prompt: str, normalized: str) -> bool:
+    hay = f" {prompt.lower()} {normalized} "
+    has_flag = any(k in hay for kws, _ in _SUBGROUP_FLAGS for k in kws)
+    has_measure = any(k in hay for kws, _ in _SUBGROUP_MEASURES for k in kws)
+    has_cmp = any(c in hay for c in _SUBGROUP_CMP_CUES)
+    return has_flag and has_measure and has_cmp
 
 
 def _is_pk_like(col: str) -> bool:
