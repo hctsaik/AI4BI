@@ -549,6 +549,11 @@ class NL2ProposalService:
             if ranked is not None:
                 return ranked
 
+        if intent == "crossfact":  # Round 116
+            cf = self._answer_crossfact(prompt, normalized, report, contracts)
+            if cf is not None:
+                return cf
+
         if intent == "breakdown":  # Round 114
             bd = self._answer_breakdown(prompt, normalized, report, contracts)
             if bd is not None:
@@ -646,6 +651,14 @@ class NL2ProposalService:
             ac = self._answer_analytics_chart(prompt, normalized, report, contracts)
             if ac is not None:
                 return ac
+
+        # Round 116: cross-fact analytics (correlation/cohort/ratio across two
+        # facts). Checked before ranking/seasonality so "最長...有關聯" and "前 20%
+        # ...良率" route to the cross-fact engine, not single-fact ranking.
+        if _looks_like_crossfact(prompt, normalized):
+            cf = self._answer_crossfact(prompt, normalized, report, contracts)
+            if cf is not None:
+                return cf
 
         # Round 096: "哪幾天最忙 / busiest day of week / 哪個時段" → weekday/hour
         # seasonality. Checked before ranking since it carries a date-bucket cue.
@@ -1643,6 +1656,93 @@ class NL2ProposalService:
         intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                           trust_notes=notes, risk_level="low")
         return NL2ProposalResult(intent=intent, message=sentence, result_table=table,
+                                 trust_notes=notes, risk_level="low")
+
+    def _answer_crossfact(
+        self,
+        prompt: str,
+        normalized: str,
+        report: ExecutableReportSpec,
+        contracts: dict[str, Any] | None,
+    ) -> "NL2ProposalResult | None":
+        """Round 116: cross-fact analytics (correlation / cohort / ratio).
+
+        Aligns two facts on a shared key and answers questions that span them —
+        "is high queue time linked to low yield (by lot)?", "worst-cycle-time 20%
+        of lots — yield drop?", "yield per rework by product". Returns None when
+        it isn't a resolvable two-fact question.
+        """
+        if not contracts:
+            return None
+        from ai4bi.blocks.contracts import BlockType
+        facts = {b: c for b, c in contracts.items()
+                 if getattr(c, "block_type", None) in (
+                     BlockType.fact, BlockType.snapshot_fact, BlockType.target_fact)}
+        if len(facts) < 2:
+            return None
+        # A numeric column the prompt references, per fact.
+        cols = {}
+        for bid, c in facts.items():
+            col = _resolve_numeric_column(prompt, normalized, c)
+            if col:
+                cols[bid] = col
+        if len(cols) < 2:
+            return None
+        (ba, ca), (bb, cb) = list(cols.items())[:2]
+        shared = ({x.name for x in facts[ba].columns}
+                  & {x.name for x in facts[bb].columns})
+        key = _pick_join_key(prompt, normalized, shared)
+        if key is None:
+            return None
+
+        def _agg(col: str) -> str:
+            low = col.lower()
+            return "AVG" if any(t in low for t in ("pct", "rate", "ratio", "_hr", "_min", "avg", "yield", "density")) else "SUM"
+
+        from ai4bi.analysis.crossfact import align_two_facts, cohort_by_quantile, correlate_facts
+        try:
+            merged = align_two_facts(
+                contracts, block_a=ba, col_a=ca, agg_a=_agg(ca), alias_a=ca,
+                block_b=bb, col_b=cb, agg_b=_agg(cb), alias_b=cb, join_key=key)
+        except Exception:  # noqa: BLE001
+            return None
+        if merged is None or merged.empty:
+            return None
+
+        hay = f"{prompt.lower()} {normalized}"
+        is_cohort = bool(re.search(r"前\s*\d+\s*%|\d+\s*%|分位|cohort|quantile|四分位", hay))
+        is_corr = any(t in hay for t in ("關聯", "相關", "關係", "correlat", "linked", "有沒有關"))
+
+        if is_corr and not is_cohort:
+            stat = correlate_facts(merged, ca, cb)
+            if stat is None:
+                return None
+            sentence = (f"「{ca}」與「{cb}」（依 {key} 對齊，n={stat['n']}）相關係數 r={stat['r']}"
+                        f"（{stat['direction']}相關，{stat['strength']}）。")
+            notes = [f"跨表分析：各自彙總到 {key} 後對齊計算 Pearson 相關（非明細 join）。"]
+            intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                              trust_notes=notes, risk_level="low")
+            return NL2ProposalResult(intent=intent, message=sentence, result_table=merged,
+                                     trust_notes=notes, risk_level="low")
+        if is_cohort:
+            # bucket by the move-side metric (cycle/queue proxy), outcome = the other
+            table = cohort_by_quantile(merged, ca, cb, q=5)
+            if table is None or table.empty:
+                return None
+            sentence = f"依「{ca}」分位分組，看各組「{cb}」（共 {len(table)} 組）。"
+            notes = [f"跨表 cohort：依 {key} 對齊後，用 {ca} 分位分桶，平均 {cb}。"]
+            intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                              trust_notes=notes, risk_level="low")
+            return NL2ProposalResult(intent=intent, message=sentence, result_table=table,
+                                     trust_notes=notes, risk_level="low")
+        # default: ratio A/B per key
+        merged = merged.copy()
+        merged[f"{ca}/{cb}"] = (merged[ca] / merged[cb].replace(0, float("nan"))).round(3)
+        sentence = f"依「{key}」計算「{ca} ÷ {cb}」（跨表比值，共 {len(merged)} 列）。"
+        notes = [f"跨表比值：各自彙總到 {key} 後相除（非明細 join）。"]
+        intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                          trust_notes=notes, risk_level="low")
+        return NL2ProposalResult(intent=intent, message=sentence, result_table=merged,
                                  trust_notes=notes, risk_level="low")
 
     def _answer_breakdown(
@@ -3796,6 +3896,42 @@ def _detect_panel_analysis(prompt: str, normalized: str) -> str | None:
     if any(t in hay for t in _BASKET_TRIGGERS):
         return "basket"
     return None
+
+
+_CROSSFACT_CUES: tuple[str, ...] = (
+    "關聯", "相關", "關係", "有沒有關", "correlat", "linked",
+    "比值", "換來", "每次", "分位", "四分位", "cohort", "quantile",
+    "前20%", "前 20%", "前10%", "前 10%", "前30%", "前 30%",
+)
+
+
+def _looks_like_crossfact(prompt: str, normalized: str) -> bool:
+    hay = f"{prompt.lower()} {normalized}"
+    if any(c in hay for c in _CROSSFACT_CUES):
+        return True
+    return bool(re.search(r"前\s*\d+\s*%", hay))
+
+
+def _pick_join_key(prompt: str, normalized: str, shared: set) -> str | None:
+    """Pick a shared join key, preferring one the prompt mentions."""
+    if not shared:
+        return None
+    hay = f"{prompt.lower()} {normalized}"
+    # prompt-mentioned key wins (lot/批, product/產品, week/週, wafer/晶圓)
+    pref = [
+        (("lot", "批", "批號"), "lot_id"),
+        (("product", "產品", "品項", "family"), "product_family"),
+        (("week", "週", "周"), "week"),
+        (("wafer", "晶圓"), "wafer_id"),
+    ]
+    for words, col in pref:
+        if col in shared and any(w in hay for w in words):
+            return col
+    # sensible defaults present in both facts
+    for col in ("lot_id", "product_family", "wafer_id", "week"):
+        if col in shared:
+            return col
+    return sorted(shared)[0]
 
 
 def _resolve_numeric_column(prompt: str, normalized: str, contract) -> str | None:
