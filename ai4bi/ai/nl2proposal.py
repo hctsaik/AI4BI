@@ -2188,7 +2188,11 @@ class NL2ProposalService:
         if match is None:
             return None
         block_id, metric_name, alias = match.block_id, match.metric_name, match.alias
-        dim_col = _resolve_decomp_dimension(idx, prompt, normalized, contracts, block_id)
+        # Round 127: if the prompt explicitly names categorical VALUES (Hot/Normal),
+        # group by the column that holds them — a stronger signal than a classifier
+        # keyword ('批' would otherwise resolve lot_id). Else resolve by keyword.
+        dim_col = (_column_holding_values(prompt, normalized, contracts, block_id)
+                   or _resolve_decomp_dimension(idx, prompt, normalized, contracts, block_id))
         if dim_col is None:
             return None
         # Round 120: share-of-total only makes sense on an ADDITIVE measure; if a
@@ -3965,6 +3969,7 @@ _RANK_ASC_WORDS: tuple[str, ...] = (
 _BREAKDOWN_MARKERS: tuple[str, ...] = (
     "各", "每個", "每一", "每種", "每類", "依", "按", "照", "分布", "分佈", "分組",
     " by ", " per ", "breakdown", "group by", "分別",
+    "占比", "佔比", "比重", "占總", "佔總",  # Round 127: share questions
 )
 _EDIT_VERBS: tuple[str, ...] = ("改成", "換成", "改為", "改用", "變成", "change to", "switch to")
 
@@ -4037,7 +4042,7 @@ def _extract_rank_n(prompt: str, normalized: str, default: int = 5) -> int:
     hay = f"{prompt.lower()} {normalized}"
     m = re.search(r"(?:前|top|bottom|前面|頭)\s*(\d+)", hay)
     if m is None:
-        m = re.search(r"(\d+)\s*(?:個|名|筆|項|大|個商品|個地區)", hay)
+        m = re.search(r"(\d+)\s*(?:個|名|筆|項|大|台|家|站|種|款|支|組|個商品|個地區|台機台)", hay)
     if m:
         try:
             n = int(m.group(1))
@@ -4104,7 +4109,7 @@ _PARETO_TRIGGERS = ("pareto", "柏拉圖", "柏拉图", "abc 分析", "abc分析
 _SHARE_TRIGGERS = ("佔總比", "占總比", "佔比", "占比", "百分比", "% of total", "share of total",
                    "占總", "佔總", "比重", "佔多少比例", "占多少比例")
 _MOVING_AVG_TRIGGERS = ("移動平均", "移动平均", "moving average", "moving avg", "平滑", "smooth",
-                        "均線", "ma 線", "ma線")
+                        "均線", "ma 線", "ma線", "走勢")
 _FORECAST_TRIGGERS = ("預測", "预测", "forecast", "未來幾", "未来几", "推估", "外推",
                       "下個月會", "預估", "project")
 
@@ -4115,10 +4120,16 @@ _CHART_VERBS: tuple[str, ...] = ("圖", "chart", "視覺", "畫", "plot", "graph
 def _detect_analytics_chart(hay: str) -> str | None:
     if any(t in hay for t in _PARETO_TRIGGERS):
         return "pareto"
-    if any(t in hay for t in _MOVING_AVG_TRIGGERS):
-        return "moving_avg"
+    # forecast before moving_avg so '趨勢並預測' is a forecast, not just smoothing.
     if any(t in hay for t in _FORECAST_TRIGGERS):
         return "forecast"
+    if any(t in hay for t in _MOVING_AVG_TRIGGERS):
+        return "moving_avg"
+    # '趨勢/走勢' over time → smoothed trend, but NOT '趨勢線' (an overlay edit) and
+    # NOT when a forecast was asked. Require a time word so it's a time trend.
+    if (("趨勢" in hay or "trend" in hay) and "趨勢線" not in hay and "trend line" not in hay
+            and any(t in hay for t in ("週", "周", "日", "月", "每", "天", "daily", "weekly", "monthly"))):
+        return "moving_avg"
     # Round 120: a plain "占比/share" question is answered inline (breakdown +
     # share %); only build a chart proposal when a chart is explicitly asked for.
     if any(t in hay for t in _SHARE_TRIGGERS) and any(v in hay for v in _CHART_VERBS):
@@ -4289,7 +4300,46 @@ def _looks_like_grouped_topn(prompt: str, normalized: str) -> bool:
             or bool(re.search(r"(前\s*\d+|top\s*\d+)", hay)))
 
 
+def _column_holding_values(prompt: str, normalized: str, contracts, block_id: str) -> str | None:
+    """Round 127: find the categorical column whose VALUES the prompt names most
+    (e.g. 'Hot 與 Normal' → priority), so a share/breakdown can group by it."""
+    from ai4bi.blocks.contracts import BlockType
+    from ai4bi.blocks.datastore import materialize_dataframe
+    contract = (contracts or {}).get(block_id)
+    if getattr(contract, "block_type", None) not in (
+            BlockType.fact, BlockType.snapshot_fact, BlockType.target_fact):
+        return None
+    try:
+        df = materialize_dataframe(contract)
+    except Exception:  # noqa: BLE001
+        return None
+    hay = f"{prompt.lower()} {normalized}"
+    best, best_hits = None, 0
+    for c in getattr(contract, "columns", []) or []:
+        if c.data_type not in ("string", "str", "object") or _is_pk_like(c.name):
+            continue
+        if c.name not in df.columns:
+            continue
+        vals = {str(v) for v in df[c.name].dropna().unique()}
+        if len(vals) > 20:  # skip high-cardinality columns
+            continue
+        hits = sum(1 for v in vals if v and v.lower() in hay)
+        if hits >= 2 and hits > best_hits:
+            best, best_hits = c.name, hits
+    return best
+
+
+def _is_pk_like(col: str) -> bool:
+    """Round 127: a row-identifier column that must never be a grouping dimension
+    (move_id, yield_event_id, …) even though it's categorical."""
+    low = col.lower()
+    return any(t in low for t in ("move_id", "_event_id", "event_id", "record_id",
+                                  "row_id", "_uid", "txn_id", "transaction_id"))
+
+
 def _is_categorical_col(contracts, block_id: str, col: str) -> bool:
+    if _is_pk_like(col):  # Round 127: row PKs are not grouping dimensions
+        return False
     contract = (contracts or {}).get(block_id)
     for c in getattr(contract, "columns", None) or []:
         if c.name == col:
@@ -4804,6 +4854,8 @@ def _resolve_decomp_dimension(idx, prompt: str, normalized: str, contracts, bloc
     hay = f"{prompt.lower()} {normalized}"
 
     def _is_categorical(col: str) -> bool:
+        if _is_pk_like(col):  # Round 127: never group by a row PK (move_id …)
+            return False
         contract = contracts.get(block_id)
         for c in getattr(contract, "columns", None) or []:
             if c.name == col:
@@ -4832,15 +4884,17 @@ def _resolve_decomp_dimension(idx, prompt: str, normalized: str, contracts, bloc
     # take best_dim_match's single longest — that can be a non-categorical column
     # like a duration measure, causing the resolver to give up instead of falling
     # back to a real categorical dimension like step_name.)
-    # Round 126: prefer an explicitly-named ENTITY column (lot/wafer/tool/product
-    # — *_id or known entity tokens) over a descriptive ATTRIBUTE column
-    # (reason/status/type/bin) when both match, since '依...lot 排序' names lot as
-    # the grouping entity even though 'hold' (→hold_reason) is a longer keyword.
+    # Round 126/127: prefer an explicitly-named ENTITY column (lot/wafer/tool/
+    # product/step/area …) over a descriptive ATTRIBUTE column (reason/status/
+    # type/bin). Use entity TOKENS, NOT the '_id' suffix — a row-PK like move_id /
+    # yield_event_id ends in _id but is not a grouping entity and must not win.
     def _is_entity_col(col: str) -> bool:
         low = col.lower()
-        return (low.endswith("_id")
-                or any(t in low for t in ("lot", "wafer", "tool", "product", "customer",
-                                          "store", "item", "sku", "member")))
+        if any(t in low for t in ("move_id", "event_id", "record_id", "row_id", "_uid")):
+            return False
+        return any(t in low for t in ("lot", "wafer", "tool", "product", "customer",
+                                      "store", "item", "sku", "member", "step", "area",
+                                      "category", "family", "vendor", "group", "machine"))
 
     ent_col, ent_len, any_col, any_len = None, 0, None, 0
     for kw, entry in idx._dims.items():
