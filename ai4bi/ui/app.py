@@ -1727,7 +1727,10 @@ def _render_visual_field_well(component_id, visual, report, cache, contracts) ->
     from ai4bi.ai import NL2ProposalService  # noqa: PLC0415
     svc = NL2ProposalService()
 
-    with st.expander("✏️ 編輯這張圖（圖表類型 / 分組）", expanded=False):
+    # Power BI behaviour: the Fields/Visualizations well for the SELECTED visual is
+    # open; others stay collapsed so the canvas isn't cluttered.
+    _is_selected = st.session_state.get("selected_component_id") == component_id
+    with st.expander("✏️ 編輯這張圖（圖表類型 / 分組）", expanded=_is_selected):
         # ── chart-type switch ──
         type_keys = list(_CHART_TYPE_LABELS.keys())
         cur_idx = type_keys.index(vtype) if vtype in type_keys else 0
