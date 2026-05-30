@@ -2825,7 +2825,28 @@ class NL2ProposalService:
                 zh = {"rework": "重工", "hold": "保留"}.get(word, "")
                 if word in hay or (zh and zh in hay):
                     filters.append(FilterSpec(bid, fc, FilterOperator.eq, 1, False))
-            if len(filters) < 2:
+            # Round 139: honest partial filtering. If only one condition resolves
+            # on the metric's fact but the prompt clearly named another that maps
+            # to a column NOT on this fact (e.g. "ETCH 區" → area lives in moves,
+            # not in the yield fact), apply what we can and DISCLOSE the gap,
+            # rather than silently returning an unfiltered overall number.
+            unresolved_note = None
+            if len(filters) == 1:
+                this_cols = {col.name for col in c.columns}
+                area_vals = set()
+                for bb, cc in contracts.items():
+                    if "area" in {x.name for x in getattr(cc, "columns", [])}:
+                        try:
+                            area_vals |= {str(v).lower() for v in
+                                          materialize_dataframe(cc)["area"].dropna().unique()}
+                        except Exception:  # noqa: BLE001
+                            pass
+                named_area = any(a in hay for a in area_vals) or "區" in hay
+                if named_area and "area" not in this_cols:
+                    unresolved_note = ("註：『區/area』欄位在 move fact，不在良率資料"
+                                       f"（{bid}），無法依區別篩選；已套用其餘條件。"
+                                       "若要依區看，請改問 move 類指標或 etch 機台別。")
+            if len(filters) < 2 and unresolved_note is None:
                 return None
             # A flag word (rework/hold) used as a FILTER shouldn't also be the
             # target metric — '...rework 的 move 數' wants move_count. Re-resolve
@@ -2856,6 +2877,8 @@ class NL2ProposalService:
             else:
                 sentence = (f"在條件（{conds}）下，{metric.alias} = "
                             f"{_format_metric_value(val, _metric_unit(contracts, bid, metric.metric_name))}。")
+            if unresolved_note:
+                sentence = f"{sentence}{unresolved_note}"
             notes = [f"多條件 AND 篩選後彙總（治理查詢路徑），來源：{bid}。"]
             intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                               trust_notes=notes, risk_level="low")
@@ -2954,6 +2977,24 @@ class NL2ProposalService:
             tv = round(float(tv), 2) if isinstance(tv, (int, float)) else tv
             sentence = (f"「{alias}」依「{dim_col}」分組（共 {len(df)} 組）："
                         f"最高 {top[dim_col]}（{tv}）。")
+        # Round 139: per-group population when asked ("各產品的良率，分別用幾片算的").
+        if any(t in f"{prompt.lower()} {normalized}" for t in (
+                "幾片", "幾筆", "幾個", "分別", "母體", "幾批", "how many", "based on")):
+            try:
+                from ai4bi.blocks.datastore import materialize_dataframe
+                raw = materialize_dataframe(contracts[block_id])
+                if dim_col in raw.columns:
+                    keycol = "wafer_id" if "wafer_id" in raw.columns else None
+                    if keycol:
+                        cnt = raw.groupby(dim_col)[keycol].nunique().rename("片數")
+                        unit_lbl = "片數"
+                    else:
+                        cnt = raw.groupby(dim_col).size().rename("筆數")
+                        unit_lbl = "筆數"
+                    df = df.merge(cnt, left_on=dim_col, right_index=True, how="left")
+                    sentence = f"{sentence}（已附各組{unit_lbl}；母體 {len(raw)} 列 @ {block_id}）"
+            except Exception:  # noqa: BLE001
+                pass
         notes = [f"依「{dim_col}」分組彙總「{alias}」（治理查詢路徑），來源：{block_id}。"]
         self._remember(block_id=block_id, metric_name=metric_name, alias=alias,
                        dim_col=dim_col, kind="breakdown")
@@ -5231,12 +5272,23 @@ def _looks_like_matrix(prompt: str, normalized: str) -> bool:
     if any(c in hay for c in _MATRIX_CUES):
         return True
     # "各 X ... 不同 Y" pattern (two dimension words around 不同)
-    return "各" in hay and "不同" in hay
+    if "各" in hay and "不同" in hay:
+        return True
+    # Round 139: "各X、各Y" / "每X每Y" — two grouped dimensions = a cross-tab.
+    return prompt.count("各") >= 2 or prompt.count("每") >= 2
+
+
+_MF_AREA_WORDS = ("etch", "litho", "cmp", "implant", "thinfilm", "photo", "區")
+_MF_COND_WORDS = ("hot", "normal", "急件", "趕貨", "一般批", "重工", "rework",
+                  "hold", "保留", "夜班", "日班", "白班", "晚班", "優先", "priority")
 
 
 def _looks_like_multi_filter(prompt: str, normalized: str) -> bool:
     hay = f"{prompt.lower()} {normalized}"
-    return any(c in hay for c in _MULTI_FILTER_CUES)
+    if any(c in hay for c in _MULTI_FILTER_CUES):
+        return True
+    # Round 139: implicit two-condition scope ("ETCH 區 Hot 批的…") with no 且.
+    return any(a in hay for a in _MF_AREA_WORDS) and any(c in hay for c in _MF_COND_WORDS)
 
 
 def _resolve_n_dims(idx, prompt: str, normalized: str, contracts, block_id: str, n: int = 2) -> list:

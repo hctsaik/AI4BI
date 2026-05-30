@@ -189,4 +189,11 @@
 - 新增 `tests/test_honest_limits_and_trend.py`（4）。非 e2e **1033 passed**。
 - 仍待（Round 139）：T1 多條件篩選（部分是 area 不在 yield fact 的資料限制）、T2 cross-tab、T6 缺陷 commonality 路由、T7 breakdown 母體。
 
+**Round 139**（test+commit+push）：
+- **T2 cross-tab**：`_looks_like_matrix` 加「各X、各Y / 每X每Y」偵測（≥2 個「各」或「每」）。實測回 shift×area 交叉表。
+- **T7 breakdown 母體**：問「分別幾片/幾筆」時 breakdown 附各組片數欄 + 母體 N。
+- **T1 多條件篩選**：`_looks_like_multi_filter` 加隱含雙條件偵測（area 詞 + 條件詞，無「且」）；`_answer_multi_filter` 當僅一條件可套用、另一條件對應欄位不在該 fact（area 在 move、不在 yield）時，**套用可套用者並誠實揭露資料限制**，不再回未篩選的整體值。實測回「priority=Hot 良率 95.0%＋area 不在良率資料」說明。
+- T6（缺陷 commonality）目前以 ranking 命中正確答案 ETCH-02，暫可接受。新增 `tests/test_crosstab_and_multifilter.py`（4）。非 e2e **1037 passed**。
+- 下一步：對 set #3 跑 multi-agent 重打分，確認是否 ≥95。
+
 
