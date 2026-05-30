@@ -27,7 +27,8 @@ def test_bottleneck_over_time_detects_shift():
     assert len(res) == 2
     assert res.iloc[0]["bottleneck"] == "ETCH"
     assert res.iloc[1]["bottleneck"] == "PHOTO"
-    assert res.iloc[1]["changed"] is True
+    assert bool(res.iloc[1]["changed"]) is True
+    assert bool(res.iloc[0]["changed"]) is False
 
 
 def test_bottleneck_shift_summary():
