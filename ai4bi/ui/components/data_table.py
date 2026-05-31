@@ -91,7 +91,10 @@ def _build_column_config(
         header = metric.alias or metric.metric_name
         config[col] = NumberColumn(
             label=header,
-            format=",d",          # integer thousands separator; handles floats too
+            # Round 159: Streamlit NumberColumn wants a printf/preset format, not a
+            # Python spec — ",d" rendered literally as ",d". "localized" gives
+            # locale thousands separators and keeps decimals for floats.
+            format="localized",
         )
 
     return config
