@@ -134,6 +134,18 @@ def validate_db_target(conn_info: dict) -> tuple[bool, str]:
     return True, ""
 
 
+def _pg_dsn(conn_info: dict) -> str:
+    """Build a libpq DSN with every value single-quoted, so a value containing a
+    space or '=' (e.g. host="localhost sslmode=disable") can't inject extra
+    connection parameters. Values containing a single quote are already rejected
+    upstream by validate_db_target, so the quoting can't be broken out of."""
+    return (
+        f"host='{conn_info['host']}' port='{conn_info['port']}' "
+        f"dbname='{conn_info['dbname']}' user='{conn_info['user']}' "
+        f"password='{conn_info['password']}'"
+    )
+
+
 def _execute_with_timeout(conn, query: str, timeout: int = 30):
     """Run conn.execute(query).df() with a wall-clock timeout; on timeout,
     interrupt the connection so a slow query can't freeze the whole session."""
@@ -170,12 +182,7 @@ def _execute_duckdb_query(conn_info: dict, query: str) -> "pd.DataFrame":
     elif conn_type == "postgresql":
         conn = duckdb.connect(":memory:")
         conn.execute("INSTALL postgres; LOAD postgres;")
-        pg_dsn = (
-            f"host={conn_info['host']} port={conn_info['port']} "
-            f"dbname={conn_info['dbname']} user={conn_info['user']} "
-            f"password={conn_info['password']}"
-        )
-        conn.execute(f"ATTACH '{pg_dsn}' AS pg (TYPE postgres, READ_ONLY);")
+        conn.execute(f"ATTACH '{_pg_dsn(conn_info)}' AS pg (TYPE postgres, READ_ONLY);")
         return _execute_with_timeout(conn, query)
     elif conn_type == "url":
         conn = duckdb.connect(":memory:")
@@ -206,12 +213,7 @@ def _list_tables(conn_info: dict) -> list[str]:
         elif conn_type == "postgresql":
             conn = duckdb.connect(":memory:")
             conn.execute("INSTALL postgres; LOAD postgres;")
-            pg_dsn = (
-                f"host={conn_info['host']} port={conn_info['port']} "
-                f"dbname={conn_info['dbname']} user={conn_info['user']} "
-                f"password={conn_info['password']}"
-            )
-            conn.execute(f"ATTACH '{pg_dsn}' AS pg (TYPE postgres, READ_ONLY);")
+            conn.execute(f"ATTACH '{_pg_dsn(conn_info)}' AS pg (TYPE postgres, READ_ONLY);")
             tables = conn.execute(
                 "SELECT table_name FROM information_schema.tables WHERE table_schema='public'"
             ).fetchdf()

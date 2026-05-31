@@ -12,7 +12,7 @@ import pytest
 
 from ai4bi.ui.connector_panel import (
     _ip_is_blocked, validate_fetch_url, safe_fetch_json, _parse_headers,
-    validate_db_target, _execute_with_timeout,
+    validate_db_target, _execute_with_timeout, _pg_dsn,
 )
 
 
@@ -132,3 +132,12 @@ def test_execute_with_timeout_interrupts_slow_query():
     with pytest.raises(TimeoutError):
         _execute_with_timeout(conn, "SELECT 1", timeout=1)
     assert conn.interrupted is True
+
+
+def test_pg_dsn_quotes_values_to_block_param_injection():
+    # A host with a space must be contained inside quotes, not become extra
+    # libpq params (e.g. sslmode=disable). Quoting neutralizes the injection.
+    dsn = _pg_dsn({"host": "localhost sslmode=disable", "port": "5432",
+                   "dbname": "d", "user": "u", "password": "p"})
+    assert dsn.startswith("host='localhost sslmode=disable'")
+    assert "dbname='d'" in dsn and "password='p'" in dsn
