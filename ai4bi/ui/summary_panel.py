@@ -59,17 +59,8 @@ def render_summary_panel(
             )
             st.session_state["_summary_md"] = report.to_markdown()
 
-        md = st.session_state.get("_summary_md")
-        if md:
-            st.markdown("---")
-            st.markdown(md)
-            st.download_button(
-                "⬇️ 下載摘要 (.md)",
-                data=md.encode("utf-8"),
-                file_name="business_summary.md",
-                mime="text/markdown",
-                key="summary_dl_btn",
-            )
+        if st.session_state.get("_summary_md"):
+            st.caption("✅ 結果顯示在右側主畫面")
 
         # ── Schedule preference (saved, delivery is manual in the MVP) ─────────
         st.markdown("---")
@@ -88,3 +79,19 @@ def render_summary_panel(
                 "✅ 已記錄排程偏好。目前版本請於此面板手動產生並下載；"
                 "自動寄送將於連接後端後啟用。"
             )
+
+
+def render_summary_results() -> bool:
+    """Render the business-summary digest in the main canvas. Returns True if rendered."""
+    md = st.session_state.get("_summary_md")
+    if not md:
+        return False
+    st.markdown(md)
+    st.download_button(
+        "⬇️ 下載摘要 (.md)",
+        data=md.encode("utf-8"),
+        file_name="business_summary.md",
+        mime="text/markdown",
+        key="summary_dl_btn",
+    )
+    return True

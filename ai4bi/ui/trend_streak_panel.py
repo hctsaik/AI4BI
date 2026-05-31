@@ -86,13 +86,21 @@ def render_trend_streak_panel(blocks: dict | None = None) -> None:
             except Exception as exc:  # noqa: BLE001
                 st.error(f"無法計算：{exc}")
 
-        res = st.session_state.get("_streak_result")
-        if res is not None:
-            if res.empty:
-                st.info("沒有符合條件的連續趨勢。")
-            else:
-                st.markdown(f"**{len(res)} 個對象符合條件**")
-                st.dataframe(res, width="stretch", hide_index=True)
-                csv = res.to_csv(index=False).encode("utf-8-sig")
-                st.download_button("⬇ 下載名單 CSV", data=csv,
-                                   file_name="trend_streaks.csv", key="streak_csv")
+        if st.session_state.get("_streak_result") is not None:
+            st.caption("✅ 結果顯示在右側主畫面")
+
+
+def render_trend_streak_results() -> bool:
+    """Render trend-streak result in the main canvas. Returns True if rendered."""
+    res = st.session_state.get("_streak_result")
+    if res is None:
+        return False
+    if res.empty:
+        st.info("沒有符合條件的連續趨勢。")
+    else:
+        st.markdown(f"**{len(res)} 個對象符合條件**")
+        st.dataframe(res, width="stretch", hide_index=True)
+        csv = res.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("⬇ 下載名單 CSV", data=csv,
+                           file_name="trend_streaks.csv", key="streak_csv")
+    return True

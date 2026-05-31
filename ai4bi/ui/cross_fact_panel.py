@@ -95,14 +95,27 @@ def render_cross_fact_panel(blocks: dict | None = None) -> None:
                     join_key=join_key, ratio_alias=ratio_name or "結果", op=op,
                 )
                 st.session_state["_xf_result"] = df
+                # Round 134: stash render hints so the main-canvas results
+                # function can rebuild the chart (presentation moved out of sidebar).
+                st.session_state["_xf_ratio_name"] = ratio_name or "比率"
+                st.session_state["_xf_join_key"] = join_key
             except CompositionPlanningError as exc:
                 st.error(f"無法計算：{exc}")
             except Exception as exc:  # noqa: BLE001
                 st.error(f"計算失敗：{exc}")
 
-        df = st.session_state.get("_xf_result")
-        if df is not None and not df.empty:
-            st.dataframe(df, width="stretch", hide_index=True)
-            ratio_col = ratio_name or "比率"
-            if join_key in df.columns and ratio_col in df.columns:
-                st.bar_chart(df.set_index(join_key)[ratio_col])
+        if st.session_state.get("_xf_result") is not None:
+            st.caption("✅ 結果顯示在右側主畫面")
+
+
+def render_cross_fact_results() -> bool:
+    """Render cross-fact composition result in the main canvas. Returns True if rendered."""
+    df = st.session_state.get("_xf_result")
+    if df is None or df.empty:
+        return False
+    st.dataframe(df, width="stretch", hide_index=True)
+    ratio_col = st.session_state.get("_xf_ratio_name") or "比率"
+    join_key = st.session_state.get("_xf_join_key")
+    if join_key and join_key in df.columns and ratio_col in df.columns:
+        st.bar_chart(df.set_index(join_key)[ratio_col])
+    return True

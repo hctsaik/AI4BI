@@ -51,16 +51,16 @@ from ai4bi.ui.alert_panel import render_alert_manager, render_alert_banner  # Ro
 from ai4bi.ui.drilldown import (  # Round 049
     apply_drill, process_pending_drill, render_drill_controls, hierarchy_of,
 )
-from ai4bi.ui.summary_panel import render_summary_panel  # Round 050
+from ai4bi.ui.summary_panel import render_summary_panel, render_summary_results  # Round 050
 from ai4bi.ui.calc_metric_panel import render_calc_metric_panel  # Round 052
-from ai4bi.ui.cross_fact_panel import render_cross_fact_panel  # Round 055
+from ai4bi.ui.cross_fact_panel import render_cross_fact_panel, render_cross_fact_results  # Round 055
 from ai4bi.ui.what_if_panel import render_what_if_panel, get_parameters  # Round 060
 from ai4bi.ui.bookmark_panel import render_bookmark_panel  # Round 061
-from ai4bi.ui.cohort_panel import render_cohort_panel  # Round 062
-from ai4bi.ui.change_panel import render_change_panel  # Round 071
-from ai4bi.ui.basket_panel import render_basket_panel  # Round 077
-from ai4bi.ui.rfm_panel import render_rfm_panel  # Round 082
-from ai4bi.ui.trend_streak_panel import render_trend_streak_panel  # Round 085
+from ai4bi.ui.cohort_panel import render_cohort_panel, render_cohort_results  # Round 062
+from ai4bi.ui.change_panel import render_change_panel, render_change_results  # Round 071
+from ai4bi.ui.basket_panel import render_basket_panel, render_basket_results  # Round 077
+from ai4bi.ui.rfm_panel import render_rfm_panel, render_rfm_results  # Round 082
+from ai4bi.ui.trend_streak_panel import render_trend_streak_panel, render_trend_streak_results  # Round 085
 from ai4bi.report.share_auth import hash_password, verify_password  # Round 064
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
@@ -2302,16 +2302,56 @@ def main() -> None:
         with st.expander("Why this result is trusted"):
             st.markdown(_trusted_markdown)
     else:
-        # Round 153: Power BI-style layout — report canvas on the left, a
-        # persistent 🎨 視覺化 (Visualizations) pane on the right that edits the
-        # currently-selected visual (chosen via the ask box's chart selector).
-        canvas_col, pane_col = st.columns([4, 1.4], gap="medium")
-        with canvas_col:
+        _nav_mode = st.session_state.get("_nav_mode", "")
+        if "分析" in _nav_mode:
+            # Round 134: 分析 mode — full-width canvas, then analysis RESULTS in the
+            # wide main area (controls stay in the sidebar). No right pane.
             _render_canvas(report, cache, executor, active_filters)
             with st.expander("Why this result is trusted"):
                 st.markdown(_trusted_markdown)
-        with pane_col:
-            _render_visualizations_pane(report, cache, _load_all_contracts())
+            st.markdown("---")
+            st.subheader("分析結果")
+            _hint = "在左側「分析」面板選好選項並執行，結果會顯示在這裡。"
+            _tabs = st.tabs(["客戶留存", "常一起購買", "RFM", "連續下滑", "變化分解", "業務摘要"])
+            with _tabs[0]:
+                if not render_cohort_results():
+                    st.caption(_hint)
+            with _tabs[1]:
+                if not render_basket_results():
+                    st.caption(_hint)
+            with _tabs[2]:
+                if not render_rfm_results():
+                    st.caption(_hint)
+            with _tabs[3]:
+                if not render_trend_streak_results():
+                    st.caption(_hint)
+            with _tabs[4]:
+                if not render_change_results():
+                    st.caption(_hint)
+            with _tabs[5]:
+                if not render_summary_results():
+                    st.caption(_hint)
+        elif "模型" in _nav_mode:
+            # Round 134: 模型 mode — full-width canvas, then cross-fact results in
+            # the wide main area (controls stay in the sidebar). No right pane.
+            _render_canvas(report, cache, executor, active_filters)
+            with st.expander("Why this result is trusted"):
+                st.markdown(_trusted_markdown)
+            st.markdown("---")
+            if st.session_state.get("_xf_result") is not None and not st.session_state["_xf_result"].empty:
+                st.subheader("跨資料表計算結果")
+                render_cross_fact_results()
+        else:
+            # Round 153: Power BI-style layout — report canvas on the left, a
+            # persistent 🎨 視覺化 (Visualizations) pane on the right that edits the
+            # currently-selected visual (chosen via the ask box's chart selector).
+            canvas_col, pane_col = st.columns([4, 1.4], gap="medium")
+            with canvas_col:
+                _render_canvas(report, cache, executor, active_filters)
+                with st.expander("Why this result is trusted"):
+                    st.markdown(_trusted_markdown)
+            with pane_col:
+                _render_visualizations_pane(report, cache, _load_all_contracts())
 
 
 def _render_visualizations_pane(report: ExecutableReportSpec, cache: QueryCache, contracts) -> None:

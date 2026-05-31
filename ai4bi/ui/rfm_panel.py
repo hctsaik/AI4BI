@@ -82,14 +82,22 @@ def render_rfm_panel(blocks: dict | None = None) -> None:
             except Exception as exc:  # noqa: BLE001
                 st.error(f"無法計算：{exc}")
 
-        res = st.session_state.get("_rfm_result")
-        if res is not None:
-            if res.empty:
-                st.info("資料不足以計算 RFM（請確認客戶、日期、金額欄位）。")
-            else:
-                at_risk = int(res["流失風險"].sum())
-                st.markdown(f"**{len(res)} 位客戶｜⚠️ {at_risk} 位有流失風險**")
-                st.dataframe(res, width="stretch", hide_index=True)
-                csv = res.to_csv(index=False).encode("utf-8-sig")
-                st.download_button("⬇ 下載流失風險名單 CSV", data=csv,
-                                   file_name="rfm_churn_risk.csv", key="rfm_csv")
+        if st.session_state.get("_rfm_result") is not None:
+            st.caption("✅ 結果顯示在右側主畫面")
+
+
+def render_rfm_results() -> bool:
+    """Render RFM result in the main canvas. Returns True if rendered."""
+    res = st.session_state.get("_rfm_result")
+    if res is None:
+        return False
+    if res.empty:
+        st.info("資料不足以計算 RFM（請確認客戶、日期、金額欄位）。")
+    else:
+        at_risk = int(res["流失風險"].sum())
+        st.markdown(f"**{len(res)} 位客戶｜⚠️ {at_risk} 位有流失風險**")
+        st.dataframe(res, width="stretch", hide_index=True)
+        csv = res.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("⬇ 下載流失風險名單 CSV", data=csv,
+                           file_name="rfm_churn_risk.csv", key="rfm_csv")
+    return True

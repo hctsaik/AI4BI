@@ -99,38 +99,55 @@ def render_cohort_panel(blocks: dict | None = None) -> None:
             except Exception as exc:  # noqa: BLE001
                 st.error(f"無法計算：{exc}")
 
-        retention = st.session_state.get("_cohort_result")
-        if retention is not None and not retention.empty:
-            sizes = st.session_state.get("_cohort_sizes")
-            st.caption("留存率 %（列＝首購週期，欄＝之後第幾期）")
-            st.dataframe(retention, width="stretch")
-            if sizes is not None and not sizes.empty:
-                st.caption(
-                    "各 cohort 人數：" + "、".join(f"{k}={int(v)}" for k, v in sizes.items())
-                )
+        if st.session_state.get("_cohort_result") is not None:
+            st.caption("✅ 結果顯示在右側主畫面")
 
-        # Round 063: repeat-purchase funnel
-        funnel = st.session_state.get("_funnel_result")
-        if funnel is not None and not funnel.empty:
-            st.markdown("---")
-            st.caption("回購漏斗：購買達 N 次的客戶數")
-            try:
-                import plotly.express as px
-                fig = px.funnel(funnel, x="customers", y="stage", template="plotly_white")
-                fig.update_layout(height=260, margin=dict(l=40, r=20, t=20, b=20))
-                st.plotly_chart(fig, width="stretch", key="cohort_funnel_chart")
-            except Exception:  # noqa: BLE001
-                st.dataframe(funnel, width="stretch", hide_index=True)
 
-        # Round 073: new vs returning revenue + value tiers
-        nvr = st.session_state.get("_nvr_result")
-        if nvr is not None and not nvr.empty:
-            st.markdown("---")
-            st.caption("新客 vs 回頭客 營收（每期）")
-            st.bar_chart(nvr)
-        tiers = st.session_state.get("_tier_result")
-        if tiers is not None and not tiers.empty:
-            st.caption("客戶價值分層")
-            st.dataframe(tiers.rename(columns={
-                "tier": "分層", "customers": "人數", "revenue": "營收", "revenue_pct": "營收占比%"}),
-                width="stretch", hide_index=True)
+def render_cohort_results() -> bool:
+    """Render cohort/funnel/new-vs-returning/tier results in the main canvas.
+
+    Reads session_state keys written by render_cohort_panel. Returns True if any
+    result was rendered, else False."""
+    rendered = False
+
+    retention = st.session_state.get("_cohort_result")
+    if retention is not None and not retention.empty:
+        rendered = True
+        sizes = st.session_state.get("_cohort_sizes")
+        st.caption("留存率 %（列＝首購週期，欄＝之後第幾期）")
+        st.dataframe(retention, width="stretch")
+        if sizes is not None and not sizes.empty:
+            st.caption(
+                "各 cohort 人數：" + "、".join(f"{k}={int(v)}" for k, v in sizes.items())
+            )
+
+    # Round 063: repeat-purchase funnel
+    funnel = st.session_state.get("_funnel_result")
+    if funnel is not None and not funnel.empty:
+        rendered = True
+        st.markdown("---")
+        st.caption("回購漏斗：購買達 N 次的客戶數")
+        try:
+            import plotly.express as px
+            fig = px.funnel(funnel, x="customers", y="stage", template="plotly_white")
+            fig.update_layout(height=260, margin=dict(l=40, r=20, t=20, b=20))
+            st.plotly_chart(fig, width="stretch", key="cohort_funnel_chart")
+        except Exception:  # noqa: BLE001
+            st.dataframe(funnel, width="stretch", hide_index=True)
+
+    # Round 073: new vs returning revenue + value tiers
+    nvr = st.session_state.get("_nvr_result")
+    if nvr is not None and not nvr.empty:
+        rendered = True
+        st.markdown("---")
+        st.caption("新客 vs 回頭客 營收（每期）")
+        st.bar_chart(nvr)
+    tiers = st.session_state.get("_tier_result")
+    if tiers is not None and not tiers.empty:
+        rendered = True
+        st.caption("客戶價值分層")
+        st.dataframe(tiers.rename(columns={
+            "tier": "分層", "customers": "人數", "revenue": "營收", "revenue_pct": "營收占比%"}),
+            width="stretch", hide_index=True)
+
+    return rendered

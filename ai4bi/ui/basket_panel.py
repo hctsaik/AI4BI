@@ -71,10 +71,18 @@ def render_basket_panel(blocks: dict | None = None) -> None:
             except Exception as exc:  # noqa: BLE001
                 st.error(f"無法計算：{exc}")
 
-        res = st.session_state.get("_basket_result")
-        if res is not None:
-            if res.empty:
-                st.info("找不到明顯的商品關聯（可能每籃只有單一商品）。")
-            else:
-                st.caption("提升度 > 1 表示兩商品正相關（常一起買）。")
-                st.dataframe(res, width="stretch", hide_index=True)
+        if st.session_state.get("_basket_result") is not None:
+            st.caption("✅ 結果顯示在右側主畫面")
+
+
+def render_basket_results() -> bool:
+    """Render market-basket result in the main canvas. Returns True if rendered."""
+    res = st.session_state.get("_basket_result")
+    if res is None:
+        return False
+    if res.empty:
+        st.info("找不到明顯的商品關聯（可能每籃只有單一商品）。")
+    else:
+        st.caption("提升度 > 1 表示兩商品正相關（常一起買）。")
+        st.dataframe(res, width="stretch", hide_index=True)
+    return True

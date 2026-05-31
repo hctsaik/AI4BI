@@ -63,16 +63,24 @@ def render_change_panel(contracts: dict[str, DataBlockContract], executor) -> No
             )
             st.session_state["_chg_result"] = df
 
-        df = st.session_state.get("_chg_result")
-        if df is not None and not df.empty:
-            total = float(df["delta"].sum())
-            arrow = "▲ 成長" if total >= 0 else "▼ 下降"
-            st.markdown(f"**整體{arrow} {total:,.0f}**")
-            worst = df.iloc[0]
-            if worst["delta"] < 0:
-                st.caption(f"最大跌幅：{worst[df.columns[0]]}（{worst['delta']:,.0f}，"
-                           f"佔整體變化 {worst['contribution_pct']:.0f}%）")
-            show = df.rename(columns={df.columns[0]: "維度", "current": "本期",
-                                      "previous": "上期", "delta": "變化",
-                                      "delta_pct": "變化%", "contribution_pct": "佔變化%"})
-            st.dataframe(show, width="stretch", hide_index=True)
+        if st.session_state.get("_chg_result") is not None:
+            st.caption("✅ 結果顯示在右側主畫面")
+
+
+def render_change_results() -> bool:
+    """Render change-decomposition result in the main canvas. Returns True if rendered."""
+    df = st.session_state.get("_chg_result")
+    if df is None or df.empty:
+        return False
+    total = float(df["delta"].sum())
+    arrow = "▲ 成長" if total >= 0 else "▼ 下降"
+    st.markdown(f"**整體{arrow} {total:,.0f}**")
+    worst = df.iloc[0]
+    if worst["delta"] < 0:
+        st.caption(f"最大跌幅：{worst[df.columns[0]]}（{worst['delta']:,.0f}，"
+                   f"佔整體變化 {worst['contribution_pct']:.0f}%）")
+    show = df.rename(columns={df.columns[0]: "維度", "current": "本期",
+                              "previous": "上期", "delta": "變化",
+                              "delta_pct": "變化%", "contribution_pct": "佔變化%"})
+    st.dataframe(show, width="stretch", hide_index=True)
+    return True
