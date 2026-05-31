@@ -57,74 +57,110 @@ def _friendly_time(ts: "str | None") -> "str | None":
         return ts
 
 
-def render_data_source_manager(report_sources: "dict | None" = None) -> None:
-    """Round 147 / 166: unified data-source manager — one list of EVERY source
-    powering the current report, so the user can always see how many there are.
+def _source_entries(report_sources: dict, meta: dict, uploads: dict) -> dict:
+    """Round 176: unified {block_id: entry} of EVERY source powering the report.
 
-    Shows two groups:
-      * 內建／示範資料 — blocks the current report uses that the user didn't upload
-        (e.g. the retail / semiconductor demo). Read-only (they ARE the report).
-      * 你載入的資料 — files/DB imports the user added (meta-tracked, removable).
+    entry = {contract, name, icon, origin, subtitle, removable}. Metadata only —
+    builds no frames. Built-in/demo blocks (report blocks the user didn't upload)
+    come first, then user-loaded (upload / DB import, meta-tracked, removable).
+    """
+    entries: dict = {}
+    builtin = {bid: c for bid, c in report_sources.items() if bid not in meta}
+    for bid, c in builtin.items():
+        entries[bid] = {
+            "contract": c, "name": getattr(c, "description", None) or bid,
+            "icon": "📊", "origin": "📊 內建／示範資料",
+            "subtitle": None, "removable": False,
+        }
+    for bid, c in uploads.items():
+        m = meta.get(bid, {})
+        origin = _SOURCE_BADGE.get(str(m.get("source", "")).lower(), "📄 上傳檔案")
+        up = _friendly_time(m.get("uploaded_at"))
+        entries[bid] = {
+            "contract": c, "name": m.get("display_name", bid),
+            "icon": origin.split()[0] if origin else "📄", "origin": origin,
+            "subtitle": f"🕒 載入於 {up}" if up else None, "removable": True,
+        }
+    return entries
+
+
+def render_data_source_manager(report_sources: "dict | None" = None) -> None:
+    """Round 147/166/176: unified data-source workspace — a master-detail view of
+    EVERY source powering the current report.
+
+    Left = a single source list whose selection is **remembered across reruns**
+    (you never lose your place); right = the chosen source's schema (shown
+    immediately) + an opt-in, resource-safe sampled preview. Replaces the old
+    "one expander per source, tick-to-preview" layout where re-previewing meant
+    hunting for the card, expanding it, and re-ticking the box every rerun.
 
     ``report_sources`` is ``{block_id: contract}`` for the blocks the current
-    report references (passed from app._report_block_contracts). When omitted we
-    fall back to just the user-loaded sources (old behaviour).
+    report references (passed from app._report_block_contracts).
     """
     meta: dict = st.session_state.get(_USER_BLOCK_META_KEY, {})
     uploads = _user_loaded_blocks()  # genuinely user-loaded (meta-tracked)
     report_sources = dict(report_sources or {})
-    # built-in / demo = report blocks the user didn't upload themselves
-    builtin = {bid: c for bid, c in report_sources.items() if bid not in meta}
+    entries = _source_entries(report_sources, meta, uploads)
 
-    total = len(builtin) + len(uploads)
+    total = len(entries)
     if total == 0:
         st.info(
-            "目前沒有資料來源。用下方「上傳檔案」或「連接資料庫」加入第一份資料；"
-            "加入 2 份以上後，可到 **🔗 模型** 模式把它們關聯起來。",
+            "目前沒有資料來源。用「➕ 新增」上傳檔案或連接資料庫加入第一份資料；"
+            "加入 2 份以上後，可在「🔗 關聯」把它們關聯起來。",
             icon="📂",
         )
         return
 
-    n_rel = len(get_user_semantic_model().get("relationships", []))
-    # Round 167: total rows is metadata-only (CachedDataSource.row_count) — we
-    # never load or scan any frame just to summarize.
+    # Totals are metadata-only (CachedDataSource.row_count) — never load a frame.
     from ai4bi.blocks.datastore import source_row_count
-    from ai4bi.ui.data_inspector import render_source_inspector
+    from ai4bi.ui.data_inspector import render_source_inspector, source_shape
+
+    n_rel = len(get_user_semantic_model().get("relationships", []))
     total_rows, any_known = 0, False
-    for c in list(builtin.values()) + list(uploads.values()):
-        rc = source_row_count(c)
+    for e in entries.values():
+        rc = source_row_count(e["contract"])
         if rc is not None:
             total_rows += rc
             any_known = True
     rows_txt = f" · 約 {total_rows:,} 列" if any_known else ""
     st.caption(f"**這份報表使用 {total} 個資料來源 · {n_rel} 個關聯{rows_txt}**")
-    st.caption("展開任一來源即可看欄位結構（schema）；資料預覽採**取樣、需手動展開**,大型資料不會整表載入或掃描。")
 
-    # ── built-in / demo sources (read-only) ─────────────────────────────
-    if builtin:
-        st.markdown("**📊 內建／示範資料**")
-        for bid, contract in builtin.items():
-            label = getattr(contract, "description", None) or bid
-            render_source_inspector(contract, display_name=label,
-                                    origin="📊 內建／示範資料", key_prefix=f"dsm_b_{bid}")
+    ids = list(entries.keys())
+    # Remember the selected source across reruns (set the widget default BEFORE
+    # the radio instantiates; never write its key afterwards).
+    if st.session_state.get("_ws_source_sel") not in ids:
+        st.session_state["_ws_source_sel"] = ids[0]
 
-    # ── user-loaded sources (removable) ─────────────────────────────────
-    if uploads:
-        st.markdown("**📥 你載入的資料**")
-        for bid, contract in uploads.items():
-            m = meta.get(bid, {})
-            origin = _SOURCE_BADGE.get(str(m.get("source", "")).lower(), "📄 上傳檔案")
-            _uploaded = _friendly_time(m.get("uploaded_at"))
-            render_source_inspector(contract, display_name=m.get("display_name", bid),
-                                    origin=origin, key_prefix=f"dsm_u_{bid}",
-                                    subtitle=f"🕒 載入於 {_uploaded}" if _uploaded else None)
-            if st.button("🗑 移除此來源", key=f"dsm_remove_{bid}"):
-                st.session_state.get(_USER_BLOCKS_KEY, {}).pop(bid, None)
-                st.session_state.get(_USER_BLOCK_META_KEY, {}).pop(bid, None)
+    _DOT = {"small": "🟢", "medium": "🟡", "large": "🔴", "unknown": "⚪"}
+
+    def _fmt(bid: str) -> str:
+        e = entries[bid]
+        sh = source_shape(e["contract"])  # metadata only — no rows loaded
+        rc = "?" if sh.row_count is None else f"{sh.row_count:,}"
+        return f"{e['icon']} {e['name']}　{_DOT[sh.cost_tier]} {sh.n_cols}欄·{rc}列"
+
+    left, right = st.columns([1, 2.4], gap="medium")
+    with left:
+        st.caption("📂 選擇資料來源")
+        chosen = st.radio(
+            "資料來源", ids, format_func=_fmt, key="_ws_source_sel",
+            label_visibility="collapsed",
+        )
+    with right:
+        e = entries[chosen]
+        render_source_inspector(
+            e["contract"], display_name=e["name"], origin=e["origin"],
+            key_prefix=f"ws_{chosen}", subtitle=e.get("subtitle"), embedded=True,
+        )
+        if e.get("removable"):
+            if st.button("🗑 移除此來源", key=f"ws_remove_{chosen}"):
+                st.session_state.get(_USER_BLOCKS_KEY, {}).pop(chosen, None)
+                st.session_state.get(_USER_BLOCK_META_KEY, {}).pop(chosen, None)
+                st.session_state.pop("_ws_source_sel", None)
                 st.rerun()
 
     if total >= 2:
-        st.caption("💡 想把多份資料合併分析？到 **🔗 模型** 模式建立關聯（join）。")
+        st.caption("💡 想把多份資料合併分析？到「🔗 關聯」建立關聯（join）。")
     st.divider()
 
 

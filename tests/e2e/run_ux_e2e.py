@@ -79,6 +79,24 @@ def _open_expander(pg, text: str):
         pass
 
 
+# Round 176: data management moved into the main-canvas 🗂️ 資料 workspace tabs.
+def _main_text(pg) -> str:
+    return pg.get_by_test_id("stMain").inner_text()
+
+
+def _click_tab(pg, text: str):
+    pg.get_by_role("tab", name=text).first.click()
+    pg.wait_for_timeout(1_500)
+
+
+def _open_main_expander(pg, text: str):
+    try:
+        pg.get_by_test_id("stMain").get_by_text(text, exact=False).first.click()
+        pg.wait_for_timeout(800)
+    except Exception:
+        pass
+
+
 def _select_first_visual(pg):
     """Pick the first real visual in the canvas-top '① 選擇圖表' selector."""
     lbl = pg.get_by_text("選擇圖表").first
@@ -98,11 +116,11 @@ def main() -> int:
             br = p.chromium.launch()
             pg = br.new_page()
 
-            # S1 — app loads with 5 view modes
+            # S1 — app loads with 4 view modes (Round 176: 模型 merged into 資料)
             _load(pg)
             sb = _sidebar_text(pg)
-            check("S1 five view modes present",
-                  all(m in sb for m in ["探索", "資料", "模型", "分析", "分享"]))
+            check("S1 four view modes present",
+                  all(m in sb for m in ["探索", "資料", "分析", "分享"]))
 
             # S2 — NL ask box at canvas top, data-driven placeholder (retail)
             ta = pg.locator("textarea").first
@@ -118,12 +136,13 @@ def main() -> int:
                   all(x in sb for x in retail_six),
                   ", ".join(x for x in retail_six if x not in sb) or "all present")
 
-            # S4 — retail 模型: calc dataset = retail_sales, no fab leak
-            _set_mode(pg, "模型")
-            _open_expander(pg, "新增計算欄位")
-            sb = _sidebar_text(pg)
-            check("S4 retail model: retail_sales present, no fab leak",
-                  ("retail_sales" in sb) and ("process_move_fact" not in sb))
+            # S4 — retail 資料工作區 → 新增資料 tab: calc dataset = retail_sales, no fab leak
+            _set_mode(pg, "資料")
+            _click_tab(pg, "新增資料")
+            _open_main_expander(pg, "新增計算欄位")
+            mt = _main_text(pg)
+            check("S4 retail workspace: retail_sales present, no fab leak",
+                  ("retail_sales" in mt) and ("process_move_fact" not in mt))
 
             # switch to semiconductor demo
             _set_mode(pg, "探索")
@@ -138,13 +157,14 @@ def main() -> int:
             check("S6 semi keeps applicable analyses (連續下滑/變化分解/業務摘要)",
                   all(x in sb for x in ["連續下滑", "變化分解", "業務摘要"]))
 
-            # S7 — semi 模型: calc dataset = fab blocks, no retail leak
-            _set_mode(pg, "模型")
-            _open_expander(pg, "新增計算欄位")
-            sb = _sidebar_text(pg)
-            check("S7 semi model: fab blocks present, no retail leak",
-                  (("process_move_fact" in sb) or ("tool_dim" in sb))
-                  and ("retail_sales" not in sb) and ("store_staffing" not in sb))
+            # S7 — semi 資料工作區 → 新增資料 tab: calc dataset = fab blocks, no retail leak
+            _set_mode(pg, "資料")
+            _click_tab(pg, "新增資料")
+            _open_main_expander(pg, "新增計算欄位")
+            mt = _main_text(pg)
+            check("S7 semi workspace: fab blocks present, no retail leak",
+                  (("process_move_fact" in mt) or ("tool_dim" in mt))
+                  and ("retail_sales" not in mt) and ("store_staffing" not in mt))
 
             # S8 — semi ask box placeholder is fab-flavoured (no retail terms)
             _set_mode(pg, "探索")

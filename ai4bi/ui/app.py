@@ -515,6 +515,30 @@ def _render_block_library_panel(contracts: "dict | None" = None) -> None:
                         st.caption(f"→ `{rel.target_block_id}` ({rel.status})")
 
 
+def _render_create_report_from_loaded(cache: QueryCache) -> None:
+    """Build a fresh report from a single user-loaded source. Round 176: moved
+    out of the 資料 sidebar into the Data Workspace's ➕ 新增資料 tab."""
+    _user_meta: dict = st.session_state.get(_USER_BLOCK_META_KEY, {})
+    _all_blocks: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
+    _user_blocks = {b: c for b, c in _all_blocks.items() if b in _user_meta}
+    if not _user_blocks:
+        return
+    with st.expander("📊 從這份資料建立新報表", expanded=False):
+        bid_choice = st.selectbox(
+            "選擇已匯入的資料", list(_user_blocks.keys()),
+            key="create_report_block_sel",
+        )
+        if st.button("建立新報表", key="create_report_from_upload", type="primary"):
+            _meta = _user_meta.get(bid_choice, {})
+            _contract = _user_blocks[bid_choice]
+            _new_report = build_report_from_block(
+                _contract, _meta.get("metric_names", []), _meta.get("dim_names", []),
+            )
+            workspace.replace_with_loaded(_new_report)
+            cache.invalidate_all()
+            st.rerun()
+
+
 def _render_published_snapshot_browser(
     report: ExecutableReportSpec,
     cache: QueryCache,
@@ -1157,7 +1181,9 @@ def _render_draft_controls(
             st.session_state["_nav_mode"] = _pending_mode
         mode = st.radio(
             "模式",
-            ["🔍 探索", "🗂️ 資料", "🔗 模型", "📊 分析", "📤 分享"],
+            # Round 176: 🔗 模型 merged into 🗂️ 資料 (now a unified Data Workspace
+            # whose 🔗 關聯 sub-tab owns relationships) — 4 top-level modes.
+            ["🔍 探索", "🗂️ 資料", "📊 分析", "📤 分享"],
             horizontal=True, label_visibility="collapsed", key="_nav_mode",
         )
         st.markdown("---")
@@ -1171,50 +1197,16 @@ def _render_draft_controls(
             render_bookmark_panel(cache)
 
         elif "資料" in mode:
-            # Add-data controls stay in the sidebar; the data-source overview
-            # (schema + sampled preview) renders WIDE in the main canvas
-            # (Round 168r: the preview was cramped in the narrow sidebar).
-            st.subheader("資料來源")
-            st.caption("在這裡上傳檔案、連接資料庫。👉 已載入來源的欄位結構與取樣預覽顯示在右側主畫布。")
-            render_upload_panel()
-            render_connector_panel()
-            _user_meta: dict = st.session_state.get(_USER_BLOCK_META_KEY, {})
-            # Round 155: only genuinely uploaded/connected blocks (meta-tracked),
-            # not the demo seed lingering in user_blocks.
-            _all_blocks: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
-            _user_blocks = {b: c for b, c in _all_blocks.items() if b in _user_meta}
-            if _user_blocks:
-                with st.expander("📊 從這份資料建立報表", expanded=False):
-                    bid_choice = st.selectbox(
-                        "選擇已匯入的資料",
-                        list(_user_blocks.keys()),
-                        key="create_report_block_sel",
-                    )
-                    if st.button("建立新報表", key="create_report_from_upload", type="primary"):
-                        _meta = _user_meta.get(bid_choice, {})
-                        _contract = _user_blocks[bid_choice]
-                        _new_report = build_report_from_block(
-                            _contract,
-                            _meta.get("metric_names", []),
-                            _meta.get("dim_names", []),
-                        )
-                        workspace.replace_with_loaded(_new_report)
-                        cache.invalidate_all()
-                        st.rerun()
-            _render_block_library_panel(_report_block_contracts(report))
-
-        elif "模型" in mode:
-            # Relationships + semantic layer — JOIN is the FIRST thing here.
-            st.subheader("資料模型")
-            st.caption("把多份資料用共同欄位關聯起來，並定義計算欄位（類似 Power BI 的模型檢視）。")
-            render_join_builder(expanded=True)
-            render_data_model_view()
-            render_calc_metric_panel(_report_block_contracts(report))
-            render_cross_fact_panel(_report_block_contracts(report))
-            render_what_if_panel()
-            with st.expander("➕ 手動新增圖表", expanded=False):
-                st.caption("自訂指標、維度與圖表類型（進階使用者）。")
-                _render_add_visual_panel(report, cache)
+            # Round 176: all data management lives in the wide main-canvas Data
+            # Workspace (來源與預覽 / 關聯 / 新增資料), so it gets full width. The
+            # sidebar just signposts it (absorbs the old 🔗 模型 mode too).
+            st.subheader("🗂️ 資料工作區")
+            st.caption("資料的管理都在右側主畫布：")
+            st.markdown(
+                "📋 **來源與預覽** — 看每份資料的欄位與內容　\n"
+                "🔗 **關聯** — 把多份資料用共同欄位連起來　\n"
+                "➕ **新增資料** — 上傳／連接資料庫／新產生資料"
+            )
 
         elif "分析" in mode:
             st.subheader("進階分析")
@@ -2702,25 +2694,36 @@ def main() -> None:
                 with _to:
                     if not _fn():
                         st.caption(_hint)
-        elif "模型" in _nav_mode:
-            # Round 134: 模型 mode — full-width canvas, then cross-fact results in
-            # the wide main area (controls stay in the sidebar). No right pane.
-            _render_canvas(report, cache, executor, active_filters)
-            with st.expander("Why this result is trusted"):
-                st.markdown(_trusted_markdown)
-            st.markdown("---")
-            if st.session_state.get("_xf_result") is not None and not st.session_state["_xf_result"].empty:
-                st.subheader("跨資料表計算結果")
-                render_cross_fact_results()
         elif "資料" in _nav_mode:
-            # Round 168r/173: data-source overview + staged-upload preview in the
-            # WIDE canvas — preview tables were cramped in the sidebar.
-            _render_canvas(report, cache, executor, active_filters)
-            st.markdown("---")
-            if render_staged_upload_preview():  # just-uploaded file (pre-import)
-                st.markdown("---")
-            st.subheader("資料來源")
-            render_data_source_manager(_report_block_contracts(report))
+            # Round 176: unified Data Workspace — sources/preview, relationships
+            # and "create new data" in one place (absorbs the old 🔗 模型 mode).
+            # Wide sub-tabs; the report's own charts stay in 探索, so this view is
+            # dedicated to data management.
+            st.subheader("🗂️ 資料工作區")
+            st.caption("看內容、建立關聯、新增／合併資料 — 都在這裡。")
+            _ws_src, _ws_rel, _ws_new = st.tabs(["📋 來源與預覽", "🔗 關聯", "➕ 新增資料"])
+            with _ws_src:
+                if render_staged_upload_preview():  # just-uploaded file (pre-import)
+                    st.markdown("---")
+                render_data_source_manager(_report_block_contracts(report))
+            with _ws_rel:
+                st.caption("把多份資料用共同欄位關聯起來（類似 Power BI 的關係檢視）。")
+                render_join_builder(expanded=True)
+                render_data_model_view()
+                render_cross_fact_panel(_report_block_contracts(report))
+                if (st.session_state.get("_xf_result") is not None
+                        and not st.session_state["_xf_result"].empty):
+                    st.subheader("跨資料表計算結果")
+                    render_cross_fact_results()
+            with _ws_new:
+                st.caption("上傳檔案、連接資料庫，或從既有資料新產生欄位／資料表。")
+                render_upload_panel()
+                render_connector_panel()
+                render_calc_metric_panel(_report_block_contracts(report))
+                _render_create_report_from_loaded(cache)
+                with st.expander("⚙️ 進階：情境參數（What-if）與手動新增圖表", expanded=False):
+                    render_what_if_panel()
+                    _render_add_visual_panel(report, cache)
         else:
             # Round 153: Power BI-style layout — report canvas on the left, a
             # persistent 🎨 視覺化 (Visualizations) pane on the right that edits the

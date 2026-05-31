@@ -170,19 +170,31 @@ def _cached_sample_profile(version: str, n: int, _contract):  # noqa: ARG001 - v
 
 def render_source_inspector(contract, *, display_name: str, origin: str,
                             key_prefix: str, default_sample: int = 20,
-                            subtitle: Optional[str] = None) -> None:
+                            subtitle: Optional[str] = None,
+                            embedded: bool = False) -> None:
     """Render one source's schema (free) + an opt-in sampled preview.
 
     Nothing expensive runs until the user ticks 預覽 — schema and shape come
     from metadata only. ``subtitle`` adds an optional line (e.g. upload time).
+    ``embedded`` (Round 176) drops the outer expander so the schema shows
+    immediately — used by the workspace master-detail detail pane, where the
+    source is already chosen on the left, so re-previewing is a single click.
     """
+    import contextlib
     import streamlit as st
 
     shape = source_shape(contract)
     rc = "未知" if shape.row_count is None else f"{shape.row_count:,}"
     badge = {"small": "🟢", "medium": "🟡", "large": "🔴", "unknown": "⚪"}[shape.cost_tier]
+    header = f"🔎 {display_name} · {shape.n_cols} 欄 · {rc} 列"
 
-    with st.expander(f"🔎 {display_name} · {shape.n_cols} 欄 · {rc} 列", expanded=False):
+    if embedded:
+        st.markdown(f"#### {header}")
+        ctx = contextlib.nullcontext()
+    else:
+        ctx = st.expander(header, expanded=False)
+
+    with ctx:
         line = f"{origin}　|　`{shape.block_id}`　|　{badge} {shape.cost_label}"
         if subtitle:
             line += f"　|　{subtitle}"

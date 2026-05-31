@@ -48,6 +48,25 @@ def _open_expander(page: Page, text: str) -> None:
         pass
 
 
+# Round 176: data management moved from the 🔗 模型 sidebar into the main-canvas
+# 🗂️ 資料 workspace tabs, so these read the main area, not the sidebar.
+def _main_text(page: Page) -> str:
+    return page.get_by_test_id("stMain").inner_text()
+
+
+def _click_tab(page: Page, text: str) -> None:
+    page.get_by_role("tab", name=text).first.click()
+    page.wait_for_timeout(1_500)
+
+
+def _open_main_expander(page: Page, text: str) -> None:
+    try:
+        page.get_by_test_id("stMain").get_by_text(text, exact=False).first.click()
+        page.wait_for_timeout(800)
+    except Exception:
+        pass
+
+
 def _select_first_visual(page: Page) -> None:
     lbl = page.get_by_text("選擇圖表").first
     box = lbl.locator(
@@ -64,10 +83,11 @@ def _select_first_visual(page: Page) -> None:
 # tests
 # --------------------------------------------------------------------------- #
 
-def test_five_view_modes(page: Page, app_url: str):
+def test_four_view_modes(page: Page, app_url: str):
+    # Round 176: 🔗 模型 merged into 🗂️ 資料 workspace → 4 top-level modes.
     _load(page, app_url)
     sb = _sidebar_text(page)
-    for m in ["探索", "資料", "模型", "分析", "分享"]:
+    for m in ["探索", "資料", "分析", "分享"]:
         assert m in sb, f"view mode {m} missing"
 
 
@@ -86,12 +106,14 @@ def test_retail_shows_all_advanced_analyses(page: Page, app_url: str):
 
 
 def test_retail_model_has_no_fab_leak(page: Page, app_url: str):
+    # Round 176: calc panel lives in 資料 workspace → ➕ 新增資料 tab (main area).
     _load(page, app_url)
-    _set_mode(page, "模型")
-    _open_expander(page, "新增計算欄位")
-    sb = _sidebar_text(page)
-    assert "retail_sales" in sb
-    assert "process_move_fact" not in sb
+    _set_mode(page, "資料")
+    _click_tab(page, "新增資料")
+    _open_main_expander(page, "新增計算欄位")
+    mt = _main_text(page)
+    assert "retail_sales" in mt
+    assert "process_move_fact" not in mt
 
 
 def test_semi_hides_retail_only_analyses(page: Page, app_url: str):
@@ -106,13 +128,15 @@ def test_semi_hides_retail_only_analyses(page: Page, app_url: str):
 
 
 def test_semi_model_has_no_retail_leak(page: Page, app_url: str):
+    # Round 176: calc panel lives in 資料 workspace → ➕ 新增資料 tab (main area).
     _load(page, app_url)
     _load_semi(page)
-    _set_mode(page, "模型")
-    _open_expander(page, "新增計算欄位")
-    sb = _sidebar_text(page)
-    assert ("process_move_fact" in sb) or ("tool_dim" in sb)
-    assert "retail_sales" not in sb and "store_staffing" not in sb
+    _set_mode(page, "資料")
+    _click_tab(page, "新增資料")
+    _open_main_expander(page, "新增計算欄位")
+    mt = _main_text(page)
+    assert ("process_move_fact" in mt) or ("tool_dim" in mt)
+    assert "retail_sales" not in mt and "store_staffing" not in mt
 
 
 def test_semi_ask_box_has_no_retail_terms(page: Page, app_url: str):
