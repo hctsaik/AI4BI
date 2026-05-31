@@ -324,6 +324,27 @@ def main() -> int:
                   f"sel {n_before}→{n_after}, bars {bars_before}→{bars_after}")
             pg.close()
 
+            # S11 — ✏️ canvas button selects a chart for the right pane (no dropdown)
+            #        AND the pane is pinned (position: sticky) so it stays in view.
+            pg = fresh()
+            pg.get_by_role("button", name="✏️", exact=True).first.click()
+            pg.wait_for_timeout(2_500)
+            editing = pg.get_by_text("正在編輯", exact=False).count() > 0
+            sticky = pg.evaluate("""() => {
+              const a = document.querySelector('#viz-pane-anchor');
+              if (!a) return false;
+              let el = a;
+              while (el) {
+                if (el.matches && el.matches("[data-testid='stVerticalBlock']")
+                    && getComputedStyle(el).position === 'sticky') return true;
+                el = el.parentElement;
+              }
+              return false;
+            }""")
+            check("S11 ✏️ selects chart for pane + pane sticky",
+                  editing and bool(sticky), f"editing={editing} sticky={sticky}")
+            pg.close()
+
             br.close()
     finally:
         proc.terminate()

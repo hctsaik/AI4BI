@@ -1681,9 +1681,9 @@ def _render_visual_cell(
     title = visual.visualization.title or component_id
     is_sandbox = _is_sandbox_visual(visual, contracts)
 
-    # Header row: title | ↑ | ↓ | 🗑 | width selector
+    # Header row: title | ✏️ | ↑ | ↓ | 🗑 | width selector
     if not report.read_only:
-        h_cols = st.columns([5, 1, 1, 1, 2])
+        h_cols = st.columns([4, 1, 1, 1, 1, 2])
     else:
         h_cols = st.columns([8, 1, 1])
 
@@ -1694,19 +1694,29 @@ def _render_visual_cell(
             st.markdown(f"**{title}**")
 
     if not report.read_only:
+        _is_selected = st.session_state.get("selected_component_id") == component_id
         with h_cols[1]:
+            # Round 136: pick this chart for editing in the right 🎨 pane without the
+            # dropdown. Writes a non-widget request key drained at the top of main()
+            # (selected_component_id is a widget key — can't be set after instantiation).
+            if st.button("✅" if _is_selected else "✏️",
+                         key=f"edit_{page_id}_{component_id}",
+                         help="在右側「視覺化」面板編輯這張圖"):
+                st.session_state["_edit_target_request"] = component_id
+                st.rerun()
+        with h_cols[2]:
             if st.button("↑", key=f"up_{page_id}_{component_id}", disabled=(idx == 0), help="上移"):
                 workspace.stage_proposal(build_reorder_visual_proposal(
                     page_id, component_id, "up", list(page.visual_order)
                 ))
                 st.rerun()
-        with h_cols[2]:
+        with h_cols[3]:
             if st.button("↓", key=f"dn_{page_id}_{component_id}", disabled=(idx == order_len - 1), help="下移"):
                 workspace.stage_proposal(build_reorder_visual_proposal(
                     page_id, component_id, "down", list(page.visual_order)
                 ))
                 st.rerun()
-        with h_cols[3]:
+        with h_cols[4]:
             # Round 158: delete this visual (undoable via the 復原 ribbon button).
             if st.button("🗑", key=f"del_{page_id}_{component_id}",
                          help="刪除這張圖（可用上方「復原」還原）"):
@@ -1716,7 +1726,7 @@ def _render_visual_cell(
                 _clear_visual_assistant_context()
                 cache.invalidate_all()
                 st.rerun()
-        with h_cols[4]:
+        with h_cols[5]:
             current_span = visual.col_span
             new_label = st.selectbox(
                 "寬度",
@@ -2215,6 +2225,12 @@ def main() -> None:
 
     force_sync = st.session_state.pop("_sync_widgets_from_report", False)
     _sync_widget_values(report, force=force_sync)
+    # Round 136: drain a pending "edit this chart" request into the selectbox's
+    # widget key BEFORE the selectbox instantiates (writing it later would raise
+    # "cannot be modified after widget instantiated"). Set by the canvas ✏️ button.
+    _edit_req = st.session_state.pop("_edit_target_request", None)
+    if _edit_req is not None:
+        st.session_state["selected_component_id"] = _edit_req
     cache = QueryCache(use_l1=False)
     store = DraftReportStore(_DRAFT_STORE)
     # Include all user-uploaded blocks (retail demo + any CSV uploads)
@@ -2352,6 +2368,20 @@ def main() -> None:
                 with st.expander("Why this result is trusted"):
                     st.markdown(_trusted_markdown)
             with pane_col:
+                # Round 136: pin the pane to the viewport while the (often long)
+                # canvas scrolls, so you can see the chart AND its edit controls at
+                # once. Scoped to this branch only — 分析/模型 full-width modes and
+                # read-only layout are untouched.
+                st.markdown('<div id="viz-pane-anchor"></div>', unsafe_allow_html=True)
+                st.markdown(
+                    """<style>
+                    div[data-testid="stVerticalBlock"]:has(> div #viz-pane-anchor){
+                        position: sticky; top: 3.5rem; align-self: flex-start;
+                        max-height: calc(100vh - 4.5rem); overflow-y: auto;
+                    }
+                    </style>""",
+                    unsafe_allow_html=True,
+                )
                 _render_visualizations_pane(report, cache, _load_all_contracts())
 
 
