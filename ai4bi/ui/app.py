@@ -1890,6 +1890,91 @@ def _render_visual_field_well(component_id, visual, report, cache, contracts, in
                 elif res is not None and res.message:
                     st.caption(f"⚠️ {res.message}")
 
+        # ── 🎛️ Format pane: axis range/scale, sort, data labels, legend ──
+        _render_format_controls(component_id, visual, report, cache)
+
+
+def _patch_visual_extra(page_id, vid, key, before, after) -> None:
+    """Stage+apply a patch to a visual's visualization.extra[key]."""
+    workspace.stage_proposal(ReportProposal(
+        description=f"格式：{key}={after}",
+        changes=[ReportChange(
+            path=f"pages/{page_id}/visuals/{vid}/visualization/extra/{key}",
+            label=f"格式 {key}", before=before, after=after, affects_data=False)],
+        target_component_id=vid))
+    workspace.accept_pending()
+
+
+def _render_format_controls(component_id, visual, report, cache) -> None:
+    """Round 160: Power BI-style Format controls for a chart visual — Y-axis
+    range/scale, sort order, data labels, legend position. All via governed patches."""
+    vtype = visual.visualization.visual_type.value
+    page_id = next((pid for pid, p in report.pages.items() if component_id in p.visuals), None)
+    if page_id is None:
+        return
+    extra = dict(visual.visualization.extra or {})
+    st.markdown("**🎛️ 格式**")
+
+    # ── sort order (value-based) — for bar/pie/table, not time series ──
+    if vtype in ("bar_chart", "pie_chart", "table") and visual.query.metrics:
+        alias = visual.query.metrics[0].alias or visual.query.metrics[0].metric_name
+        cur = visual.query.sort[0].direction.value if visual.query.sort else "desc"
+        sort_label = {"desc": "由高到低", "asc": "由低到高"}
+        pick = st.selectbox("排序", ["由高到低", "由低到高"],
+                            index=0 if cur == "desc" else 1, key=f"fmt_sort_{component_id}")
+        new_dir = "desc" if pick == "由高到低" else "asc"
+        if new_dir != cur:
+            before = [{"column_name": s.column_name, "direction": s.direction.value}
+                      for s in visual.query.sort]
+            after = [{"column_name": alias, "direction": new_dir}]
+            workspace.stage_proposal(ReportProposal(
+                description=f"排序 {pick}",
+                changes=[ReportChange(path=f"pages/{page_id}/visuals/{component_id}/query/sort",
+                                      label="排序", before=before, after=after, affects_data=True)],
+                target_component_id=component_id))
+            workspace.accept_pending(); cache.invalidate_all(); st.rerun()
+
+    # ── Y-axis range + scale (line/bar) ──
+    if vtype in ("line_chart", "bar_chart"):
+        c1, c2, c3 = st.columns(3)
+        ymin = c1.text_input("Y 最小", value=("" if extra.get("y_min") is None else str(extra.get("y_min"))),
+                             key=f"fmt_ymin_{component_id}", placeholder="自動")
+        ymax = c2.text_input("Y 最大", value=("" if extra.get("y_max") is None else str(extra.get("y_max"))),
+                             key=f"fmt_ymax_{component_id}", placeholder="自動")
+        scale = c3.selectbox("刻度", ["線性", "對數"],
+                             index=0 if extra.get("y_scale") != "log" else 1, key=f"fmt_scale_{component_id}")
+        if st.button("套用 Y 軸", key=f"fmt_yaxis_apply_{component_id}"):
+            def _num(s):
+                try:
+                    return float(s) if s.strip() != "" else None
+                except ValueError:
+                    return None
+            for key, val in (("y_min", _num(ymin)), ("y_max", _num(ymax)),
+                             ("y_scale", "log" if scale == "對數" else "linear")):
+                _patch_visual_extra(page_id, component_id, key, extra.get(key), val)
+            cache.invalidate_all(); st.rerun()
+
+    # ── data labels toggle (bar/line/pie) ──
+    if vtype in ("bar_chart", "line_chart", "pie_chart"):
+        cur_dl = bool(extra.get("data_labels"))
+        new_dl = st.checkbox("顯示資料標籤", value=cur_dl, key=f"fmt_dl_{component_id}")
+        if new_dl != cur_dl:
+            _patch_visual_extra(page_id, component_id, "data_labels", extra.get("data_labels"), new_dl)
+            cache.invalidate_all(); st.rerun()
+
+    # ── legend position ──
+    if vtype in ("line_chart", "bar_chart", "pie_chart"):
+        _LEG = {"預設": "top", "底部": "bottom", "右側": "right", "隱藏": "hide"}
+        cur_leg = extra.get("legend_position") or "top"
+        inv = {v: k for k, v in _LEG.items()}
+        pick = st.selectbox("圖例位置", list(_LEG.keys()),
+                            index=list(_LEG.keys()).index(inv.get(cur_leg, "預設")),
+                            key=f"fmt_leg_{component_id}")
+        new_leg = _LEG[pick]
+        if new_leg != cur_leg:
+            _patch_visual_extra(page_id, component_id, "legend_position", extra.get("legend_position"), new_leg)
+            cache.invalidate_all(); st.rerun()
+
 
 _GRAIN_LABELS = {
     "day": "日", "week": "週", "month": "月", "quarter": "季", "year": "年",

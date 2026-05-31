@@ -139,7 +139,39 @@ def _build_figure(
     )
     fig.update_xaxes(showgrid=True, gridcolor="rgba(128,128,128,0.15)")
     fig.update_yaxes(showgrid=True, gridcolor="rgba(128,128,128,0.15)")
+    _apply_axis_and_legend_format(fig, style)
     return fig
+
+
+def _apply_axis_and_legend_format(fig, style) -> None:
+    """Round 160: apply Format-pane settings from style.extra:
+    y_min/y_max (axis range), y_scale ('linear'|'log'), legend_position."""
+    extra = getattr(style, "extra", None) or {}
+    y_scale = extra.get("y_scale")
+    if y_scale == "log":
+        fig.update_yaxes(type="log")
+    y_min, y_max = extra.get("y_min"), extra.get("y_max")
+    if y_min is not None or y_max is not None:
+        # plotly needs an explicit [lo, hi]; on a log axis the range is log10.
+        import math
+        lo = y_min if y_min is not None else None
+        hi = y_max if y_max is not None else None
+        if lo is not None and hi is not None:
+            rng = [lo, hi]
+            if y_scale == "log":
+                rng = [math.log10(v) if v and v > 0 else 0 for v in rng]
+            fig.update_yaxes(range=rng, autorange=False)
+    pos = extra.get("legend_position")
+    if pos and pos != "hide":
+        anchors = {
+            "top": dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            "bottom": dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5),
+            "right": dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02),
+            "left": dict(orientation="v", yanchor="top", y=1, xanchor="right", x=-0.1),
+        }
+        fig.update_layout(showlegend=True, legend=anchors.get(pos, anchors["top"]))
+    elif pos == "hide":
+        fig.update_layout(showlegend=False)
 
 
 def _handle_selection(

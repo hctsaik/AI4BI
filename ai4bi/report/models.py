@@ -552,6 +552,8 @@ _ALLOWLISTED_VISUAL_EXTRA_KEYS = {
     "number_format",       # display number format (Round 058)
     "hole", "show_percent",  # pie/donut presentation
     "target", "target_good_if",  # KPI goal / pacing (Round 084)
+    # Round 160: chart Format pane — axis range/scale, legend placement
+    "y_min", "y_max", "y_scale", "legend_position",
 }
 
 
@@ -607,6 +609,11 @@ def _get_path(report: ExecutableReportSpec, path: str) -> Any:
                     "agg_override": metric.agg_override.value if metric.agg_override else None,
                 }
                 for metric in visual.query.metrics
+            ]
+        if parts[4:] == ["query", "sort"]:
+            return [
+                {"column_name": s.column_name, "direction": s.direction.value}
+                for s in visual.query.sort
             ]
         if parts[4:] == ["query", "filters"]:
             return [
@@ -742,6 +749,12 @@ def _set_path(report: ExecutableReportSpec, path: str, value: Any) -> None:
                     value=copy.deepcopy(h.get("value")),
                 )
                 for h in value
+            ]
+            return
+        if parts[4:] == ["query", "sort"]:
+            visual.query.sort = [
+                SortSpec(s["column_name"], SortDirection(s.get("direction", "desc")))
+                for s in value
             ]
             return
     if len(parts) == 8 and parts[0] == "pages" and parts[2] == "visuals" and parts[4] == "query" and parts[5] == "block_refs" and parts[7] == "pinned_version":

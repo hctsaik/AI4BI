@@ -189,6 +189,11 @@ def _build_figure(
             textposition="outside",
             cliponaxis=False,
         )
+    # Round 160: axis range/scale + legend placement (Format pane). Only meaningful
+    # on a vertical bar chart's value (y) axis.
+    if orientation != "horizontal":
+        from ai4bi.ui.components.line_chart import _apply_axis_and_legend_format
+        _apply_axis_and_legend_format(fig, style)
     return fig
 
 
