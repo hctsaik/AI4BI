@@ -38,3 +38,35 @@
 
 ### 待辦(下一輪)
 - Round 2:Multi-Agent 定義 10 個晶圓廠資料分析情境 + 打分(目標平均 ≥95);未達則迭代。
+
+---
+
+## Round 2 — 10 個晶圓廠情境定義 + 評分(實跑驗證)
+
+**參與視角**:fab 領域專家(定義 S1–S10 + rubric)、2 位評審(實跑 NL2+Executor 對 fab demo 逐句核對嵌入訊號)。
+
+### 討論項目
+晶圓廠核心分析 10 情境:S1 良率趨勢+連續下滑 / S2 tool matching / S3 commonality / S4 defect Pareto / S5 yield 依 product·step / S6 良率變化原因分解 / S7 WIP·move 趨勢 / S8 queue·bottleneck / S9 SPC 離群 / S10 跨表 yield×OEE+大資料。rubric:A 自然語言 zero-code 20 / B 正確且製程語意(良率 die-count 重算、比率不加總)25 / C 可解釋 15 / D 不卡關 15 / E 資源安全 10 / F 無術語繁中 10 / G 可溯源 5。
+
+### 共識(評分,實跑)
+- **分析引擎本身正確**(已實證):commonality→ETCH-02(Fisher p=0.0017、wafer 粒度)、declining→ETCH-01、weighted_yield_pct die-count 重算、OEE ETCH-02 50.2% 最差、cross_fact aggregate-then-join、上傳 5 萬列截取防 OOM。
+- **首輪分數**:S1 70・S2 62・S3 60・S4 93・S5 88(avg 74.6);S6 38・S7 88・S8 80・S9 82・S10 96(avg 76.8)。**總平均 ≈ 75.7,未達 95。**
+
+### 爭議 / 關鍵發現
+1. **S6 致命正確性 bug**:`compute_grouped_comparison` 對**比率指標(yield)把各組百分點 delta 相加**、貢獻=delta/total → 「Memory ↓894%、整體 +1.2%」;與 die-count 重算的真實 MoM(~0.3pp)矛盾。**B=0。**
+2. **NL2 路由脆弱(S1/S2/S3)**:引擎對,但自然問法被誤路由 —— S3「良率<80%…都走同一台?」的「80」被當 `failed_wafer_count` HAVING;S2「比較兩台良率」回成 move_count;S1「一直掉」不在觸發詞。
+3. **方法論(S5)**:良率比較走 mean(yield_pct)(此資料因 tested_die 恆定碰巧相等,換不等 die 數就錯)。
+4. **rubric 校準問題(S2)**:期望兩台 etch 良率差 >10pp,但 demo 真實只差 **0.78pp**(ETCH-02 excursion 被稀釋)→ 這是**資料訊號**問題,需決定是否調整 demo 資料讓 ETCH-02 承載更高比例低良率 wafer。
+
+### 本輪實作(R178,已修正最嚴重者)
+- ✅ **S6 致命 bug 修正**:`compute_grouped_comparison` 新增 `is_ratio`;比率指標**不加總群組比率**,改用**未分組的真實加權整體**(`df.attrs['overall_*']`,executor SUM(num)/SUM(den)),貢獻設 NaN(不再捏造 894%);`_explain_change`/`change_panel` 偵測比率指標並套用;`_compose_decomposition_sentence` 比率時只報「各群漲跌幅」不報「佔 X%」。已加端到端測試(整體良率 92.3% 合理、貢獻 NaN)。
+- ✅ **S1 觸發詞**:`_DECLINE_TRIGGERS` 補「一直掉/一直跌/逐周下滑/持續探低/一直變差」等。
+
+### 後續方向(next — 尚未達 95,需續修)
+- **S3**:「良率<門檻% + 是否集中同一台/共同點」強制走 commonality,「80」識別為良率門檻而非 count HAVING。
+- **S2**:「比較 X 跟 Y 的良率 / 差多少」鎖定良率欄位做 entity-compare,不可掉到整體值或 move_count。
+- **S5**:良率比較一律用 `weighted_yield_pct`,移除 subgroup-compare 的 mean(yield_pct) 路徑。
+- **S4**:Pareto 量值鎖 `defect_die`,prompt 帶「%」不切到比率欄位。
+- **S8/S9**:「瓶頸+等待」併附 queue 平均各 step 降序;SPC 空結果補「最接近界限者 ETCH-02(2.85σ)」。
+- **資料/rubric(S2)**:需決定是否讓 ETCH-02 excursion 更集中以呈現顯著 tool 差異。
+- 預計修完上述後重評(或重生 10 情境)直到平均 ≥95。

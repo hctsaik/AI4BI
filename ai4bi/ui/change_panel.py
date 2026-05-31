@@ -57,9 +57,16 @@ def render_change_panel(contracts: dict[str, DataBlockContract], executor) -> No
         if st.button("📊 分析變化", key="chg_run", type="primary"):
             base = VisualQuerySpec("chg_base", [BlockRef(block_id)],
                                    metrics=[MetricRef(block_id, metric_name, metric_alias)])
+            # Round 178: ratio/average metrics (yield %, rate) must not be summed
+            # across groups — flag so compute_grouped_comparison uses the weighted
+            # overall and skips bogus additive contributions.
+            _m = next((m for m in contract.metrics if m.name == metric_name), None)
+            _is_ratio = bool(_m and getattr(
+                getattr(_m, "disaggregation_method", None), "value", None) in ("average", "none"))
             df = compute_grouped_comparison(
                 executor, base, date_block_id=block_id, date_column=date_col,
                 dimension_col=dim, period=period, metric_col=metric_alias,
+                is_ratio=_is_ratio,
             )
             st.session_state["_chg_result"] = df
 

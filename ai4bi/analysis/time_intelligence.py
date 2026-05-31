@@ -146,6 +146,7 @@ def compute_grouped_comparison(
     period: str,
     metric_col: str,
     anchor: Optional[date] = None,
+    is_ratio: bool = False,
 ) -> pd.DataFrame:
     """Per-dimension current-vs-previous deltas (Round 071).
 
@@ -155,6 +156,16 @@ def compute_grouped_comparison(
     sorted by delta ascending (biggest decliners first). Answers
     "why did <metric> change?" by store/category, same-store YoY, etc.
     Returns an empty DataFrame if the period/anchor can't be resolved.
+
+    Round 178: ``is_ratio`` must be True for ratio/average metrics (yield %, rate,
+    margin). You CANNOT sum group ratios — doing so produced nonsense like
+    "Memory ↓894%, overall +1.2%". For ratio metrics we (a) leave
+    ``contribution_pct`` as NaN (a group's additive contribution to a weighted
+    average is undefined without a mix/rate decomposition — we report per-group
+    rate movers instead), and (b) attach the TRUE weighted overall current/
+    previous (computed UNGROUPED, so the executor's SUM(num)/SUM(den) is correct)
+    in ``df.attrs['overall_current'/'overall_previous']`` for the caller to use
+    instead of summing the per-group rates.
     """
     days = _PERIOD_DAYS.get(period)
     if days is None:
@@ -178,6 +189,20 @@ def compute_grouped_comparison(
         except Exception:  # noqa: BLE001
             return pd.DataFrame()
 
+    def _ungrouped(start: date, end: date, suffix: str) -> float:
+        """The TRUE weighted metric over the window (no group sum) — used for
+        ratio metrics so the overall delta is SUM(num)/SUM(den), not Σ rates."""
+        spec = _period_spec(base_spec, date_block_id, date_column, start, end, suffix)
+        spec = replace(spec, dimensions=[], sort=[], limit=None)
+        try:
+            r = executor.run(spec)
+            if r is None or r.empty:
+                return float("nan")
+            col = metric_col if metric_col in r.columns else r.columns[-1]
+            return float(r[col].iloc[0])
+        except Exception:  # noqa: BLE001
+            return float("nan")
+
     cur = _grouped(cur_start, anchor, "gcur")
     prev = _grouped(prev_start, prev_end, "gprev")
     if cur.empty and prev.empty:
@@ -198,6 +223,16 @@ def compute_grouped_comparison(
         return (row["delta"] / abs(row["previous"]) * 100.0) if row["previous"] else float("nan")
 
     merged["delta_pct"] = merged.apply(_pct, axis=1).round(1)
+    if is_ratio:
+        # Group ratios are NOT additive — a per-group "contribution %" to a
+        # weighted average is undefined here. Report per-group rate movers only,
+        # and carry the true weighted overall for the caller.
+        merged["contribution_pct"] = float("nan")
+        merged = merged.sort_values("delta").reset_index(drop=True)
+        merged.attrs["overall_current"] = _ungrouped(cur_start, anchor, "ocur")
+        merged.attrs["overall_previous"] = _ungrouped(prev_start, prev_end, "oprev")
+        merged.attrs["is_ratio"] = True
+        return merged
     total_change = merged["delta"].sum()
     merged["contribution_pct"] = (
         (merged["delta"] / total_change * 100.0).round(1) if total_change else 0.0

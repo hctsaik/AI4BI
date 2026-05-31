@@ -3925,10 +3925,12 @@ class NL2ProposalService:
             metrics=[MetricRef(block_id, metric_name, alias)],
             inherit_global_filter=False,
         )
+        is_ratio = _metric_is_ratio(contracts, block_id, metric_name)
         try:
             df = compute_grouped_comparison(
                 executor, base, date_block_id=block_id, date_column=date_col,
                 dimension_col=dim_col, period=period, metric_col=alias,
+                is_ratio=is_ratio,
             )
         except Exception:  # noqa: BLE001
             return None
@@ -3936,14 +3938,21 @@ class NL2ProposalService:
             return None
 
         unit = _metric_unit(contracts, block_id, metric_name)
-        total = float(df["delta"].sum())
-        cur_total = float(df["current"].sum())
-        prev_total = float(df["previous"].sum())
+        if is_ratio:
+            # ratio metrics: TRUE weighted overall (not a sum of group rates),
+            # carried in df.attrs by compute_grouped_comparison (Round 178).
+            cur_total = float(df.attrs.get("overall_current", float("nan")))
+            prev_total = float(df.attrs.get("overall_previous", float("nan")))
+            total = (cur_total - prev_total) if (cur_total == cur_total and prev_total == prev_total) else 0.0
+        else:
+            total = float(df["delta"].sum())
+            cur_total = float(df["current"].sum())
+            prev_total = float(df["previous"].sum())
         delta_pct = ((cur_total - prev_total) / abs(prev_total) * 100.0) if prev_total else None
         scope = _PERIOD_TITLE.get(period, period)
 
         sentence = _compose_decomposition_sentence(
-            alias, dim_col, df, total, unit, scope
+            alias, dim_col, df, total, unit, scope, is_ratio=is_ratio
         )
         notes = [
             f"指標「{alias}」依「{dim_col}」拆解（{scope} vs 前一期），重用治理查詢路徑。",
@@ -6079,8 +6088,9 @@ _DORMANT_TRIGGERS = ("滯銷", "賣不動", "沒在賣", "停售", "停止銷售
                      "no longer selling", "slow-moving", "slow moving")
 _CHURN_TRIGGERS = ("流失", "churn", "rfm", "快走", "要走", "好久沒來", "沉睡", "回購率", "誰快不來", "快不來")
 _DECLINE_TRIGGERS = ("連續下滑", "連續下跌", "一直下滑", "持續下滑", "持續下跌", "持續衰退",
-                     "連續衰退", "一直在掉", "越來越差", "走弱", "連續成長", "持續成長",
-                     "逐週下滑", "逐月下滑", "逐週退化", "逐步下滑", "趨勢下滑", "退化",
+                     "連續衰退", "一直在掉", "一直掉", "一直跌", "一直在跌", "持續探低",
+                     "一直變差", "越來越差", "走弱", "連續成長", "持續成長",
+                     "逐週下滑", "逐周下滑", "逐月下滑", "逐週退化", "逐步下滑", "趨勢下滑", "退化",
                      "drift", "degrad", "走低",
                      "keeps declining", "declining", "consecutive", "months in a row",
                      "in a row", "streak")
@@ -6616,21 +6626,44 @@ def _resolve_decomp_dimension(idx, prompt: str, normalized: str, contracts, bloc
     return ent_col or any_col
 
 
-def _compose_decomposition_sentence(alias, dim_col, df, total, unit, scope) -> str:
+def _metric_is_ratio(contracts, block_id: str, metric_name: str) -> bool:
+    """True if the metric is a ratio/average (yield %, rate, margin) — Round 178:
+    such metrics must NOT be summed across groups in a change decomposition."""
+    c = (contracts or {}).get(block_id)
+    if c is not None:
+        for m in getattr(c, "metrics", []) or []:
+            if getattr(m, "name", None) == metric_name:
+                val = getattr(getattr(m, "disaggregation_method", None), "value", None)
+                if val in ("average", "none"):
+                    return True
+                if val in ("sum", "count"):
+                    return False
+    n = (metric_name or "").lower()
+    return any(k in n for k in ("yield", "pct", "percent", "rate", "ratio", "margin", "avg", "average"))
+
+
+def _compose_decomposition_sentence(alias, dim_col, df, total, unit, scope,
+                                    is_ratio: bool = False) -> str:
     """Build the ranked-contributor answer sentence for a change decomposition."""
     arrow = "成長" if total >= 0 else "下降"
-    head = f"{scope}「{alias}」整體{arrow} {_format_metric_value(abs(total), unit)}，依「{dim_col}」拆解："
+    _recompute = "（加權重算）" if is_ratio else ""
+    head = (f"{scope}「{alias}」整體{arrow} {_format_metric_value(abs(total), unit)}{_recompute}，"
+            f"依「{dim_col}」拆解：")
     dim_name = df.columns[0]
+
+    def _suffix(row) -> str:
+        # ratio metrics have no additive contribution (NaN) — show movers only.
+        pct = row.get("contribution_pct")
+        return f"（佔{abs(pct):.0f}%）" if pct is not None and pct == pct else ""
+
     # df is sorted by delta ascending (biggest decliners first).
     decliners = df[df["delta"] < 0].head(2)
     risers = df[df["delta"] > 0].sort_values("delta", ascending=False).head(2)
     parts: list[str] = []
     for _, row in decliners.iterrows():
-        parts.append(f"{row[dim_name]} ↓{_format_metric_value(abs(row['delta']), unit)}"
-                     f"（佔{abs(row['contribution_pct']):.0f}%）")
+        parts.append(f"{row[dim_name]} ↓{_format_metric_value(abs(row['delta']), unit)}{_suffix(row)}")
     for _, row in risers.iterrows():
-        parts.append(f"{row[dim_name]} ↑{_format_metric_value(abs(row['delta']), unit)}"
-                     f"（佔{abs(row['contribution_pct']):.0f}%）")
+        parts.append(f"{row[dim_name]} ↑{_format_metric_value(abs(row['delta']), unit)}{_suffix(row)}")
     if not parts:
         return head + "各維度變化不顯著。"
     return head + "；".join(parts) + "。"
