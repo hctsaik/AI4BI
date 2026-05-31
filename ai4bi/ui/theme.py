@@ -426,43 +426,41 @@ section[data-testid="stSidebar"] {{ background-color: {th.secondary_bg_color}; }
 .stApp p, .stApp label, .stApp span, .stApp li,
 .stApp h1, .stApp h2, .stApp h3, .stApp h4 {{ color: {th.chrome_text_color}; }}
 body, .stApp {{ font-family: {th.font_family}; }}
-/* Primary / form-submit buttons: colored background → contrast-checked text.
-   Dark accent ⇒ white label; light accent ⇒ dark label (luminance-based).
-   !important + descendant rule so the body-text color above can't override it. */
+/* Buttons: colored background → contrast-checked text. Streamlit 1.5x marks the
+   button kind with data-testid="stBaseButton-<kind>" (NOT kind="..."), so we
+   target the testid prefix (primary matches primary+primaryFormSubmit; secondary
+   matches secondary+secondaryFormSubmit; download's inner button is
+   stBaseButton-secondary). Legacy kind="..." kept as a fallback. !important +
+   the descendant rule beat the body-text color rule above. */
+button[data-testid^="stBaseButton-primary"],
 .stButton > button[kind="primary"],
-.stButton > button[kind="primaryFormSubmit"],
-div[data-testid="stFormSubmitButton"] button {{
-  background-color: {th.primary_color};
-  border-color: {th.primary_color};
+.stButton > button[kind="primaryFormSubmit"] {{
+  background-color: {th.primary_color} !important;
+  border-color: {th.primary_color} !important;
   color: {on_primary} !important;
 }}
+button[data-testid^="stBaseButton-primary"] *,
 .stButton > button[kind="primary"] *,
-.stButton > button[kind="primaryFormSubmit"] *,
-div[data-testid="stFormSubmitButton"] button * {{ color: {on_primary} !important; }}
-.stButton > button[kind="primary"]:hover,
-.stButton > button[kind="primary"]:focus,
-.stButton > button[kind="primary"]:active {{
-  background-color: {th.primary_color};
-  border-color: {th.primary_color};
+.stButton > button[kind="primaryFormSubmit"] * {{ color: {on_primary} !important; }}
+button[data-testid^="stBaseButton-primary"]:hover,
+button[data-testid^="stBaseButton-primary"]:focus,
+button[data-testid^="stBaseButton-primary"]:active {{
   color: {on_primary} !important;
   filter: brightness(1.08);
 }}
-/* Secondary / tertiary / download / form-submit-secondary buttons: theme the
-   surface explicitly so they never fall back to a Streamlit default that
-   clashes with the chrome (esp. the dark theme). Text = contrast-checked on
-   the secondary surface, !important so the body-text rule can't wash it out. */
+/* Secondary / tertiary / download buttons → secondary surface + readable text. */
+button[data-testid^="stBaseButton-secondary"],
+button[data-testid^="stBaseButton-tertiary"],
 .stButton > button[kind="secondary"],
-.stButton > button[kind="secondaryFormSubmit"],
-.stButton > button[kind="tertiary"],
-div[data-testid="stDownloadButton"] button {{
-  background-color: {th.secondary_bg_color};
-  border-color: {th.grid_color};
+.stButton > button[kind="tertiary"] {{
+  background-color: {th.secondary_bg_color} !important;
+  border-color: {th.grid_color} !important;
   color: {on_secondary} !important;
 }}
+button[data-testid^="stBaseButton-secondary"] *,
+button[data-testid^="stBaseButton-tertiary"] *,
 .stButton > button[kind="secondary"] *,
-.stButton > button[kind="secondaryFormSubmit"] *,
-.stButton > button[kind="tertiary"] *,
-div[data-testid="stDownloadButton"] button * {{ color: {on_secondary} !important; }}
+.stButton > button[kind="tertiary"] * {{ color: {on_secondary} !important; }}
 /* bordered visual cards inherit a subtle themed surface */
 div[data-testid="stVerticalBlockBorderWrapper"] {{
   border-color: {th.grid_color};

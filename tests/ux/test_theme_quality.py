@@ -90,6 +90,17 @@ def test_on_accent_prefers_white_and_clears_aa_large():
             assert ink == "#FFFFFF", f"{key}: should use white on {th.primary_color}"
 
 
+def test_app_css_targets_streamlit_1_5x_button_testids():
+    """Streamlit 1.5x marks buttons with data-testid='stBaseButton-<kind>', not
+    kind='...'. The injected CSS must target those testids or the contrast-checked
+    label color never applies (the bug where a primary button kept dark text)."""
+    css = theme.app_css(theme.get_theme("executive"))
+    assert 'stBaseButton-primary' in css
+    assert 'stBaseButton-secondary' in css
+    # and the primary label is white on the (dark) executive accent
+    assert "#FFFFFF !important" in css
+
+
 def test_secondary_surface_text_is_legible():
     """Secondary/download buttons sit on the secondary surface — its text must
     clear WCAG-AA (4.5:1)."""
