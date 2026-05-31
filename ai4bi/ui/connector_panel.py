@@ -100,10 +100,15 @@ def safe_fetch_json(url: str, headers: "dict | None" = None,
 
 def _reject_injection(*vals) -> "str | None":
     """Return a zh reason if any value has chars that could break out of the
-    single-quoted ATTACH DSN / path string; else None."""
+    single-quoted ATTACH DSN / path string; else None.
+
+    Backslash is rejected too: libpq treats ``\\'`` inside a quoted DSN value as a
+    LITERAL quote, so allowing ``\\`` would let a trailing backslash escape the
+    closing quote and inject extra connection parameters. With both ``'`` and
+    ``\\`` banned, a value can never break out of its single-quote wrapping."""
     for v in vals:
-        if v and any(ch in str(v) for ch in ("'", ";", "\n", "\r")):
-            return "連線參數包含不允許的字元（' ; 或換行）。"
+        if v and any(ch in str(v) for ch in ("'", "\\", ";", "\n", "\r")):
+            return "連線參數包含不允許的字元（' \\ ; 或換行）。"
     return None
 
 

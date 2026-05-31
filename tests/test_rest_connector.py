@@ -95,6 +95,21 @@ def test_db_postgres_rejects_dsn_injection():
     assert ok is False
 
 
+@pytest.mark.parametrize("host", [
+    "foo\\",                    # trailing backslash → would escape the closing quote
+    "foo\\ sslmode=disable",    # backslash + injected param
+    "foo bar' options=x",       # quote breakout
+])
+def test_db_postgres_rejects_backslash_and_quote_escapes(host):
+    # libpq treats \' inside a quoted value as a literal quote, so a lone
+    # backslash must be rejected or it can break out of _pg_dsn's quoting.
+    ok, _ = validate_db_target({
+        "type": "postgresql", "host": host, "dbname": "d",
+        "user": "u", "password": "p", "port": "5432",
+    })
+    assert ok is False
+
+
 def test_db_postgres_localhost_is_allowed():
     # a DB on localhost/LAN is the NORMAL case — must NOT be blocked
     ok, reason = validate_db_target({
