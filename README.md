@@ -10,6 +10,16 @@ streamlit run ai4bi/ui/app.py          # ETCH Queue-Time Explorer demo
 python -m pytest tests/ -q             # run full test suite
 ```
 
+### Windows 一鍵啟動器
+
+雙擊專案根目錄的 `launch.hta`（Windows 內建，免安裝）即可圖形化啟動：可選 port、切換 Claude API（LLM）/mock 模式、一鍵開瀏覽器與停止。等同執行：
+
+```powershell
+cd c:\code\claude\AI4BI; $env:LLM_MODE="anthropic"; $env:ANTHROPIC_API_KEY="sk-ant-..."; python -m streamlit run ai4bi/ui/app.py --server.port 8502
+```
+
+> LLM 模式由 `LLM_MODE`（`mock`|`anthropic`）、`ANTHROPIC_API_KEY`、`ANTHROPIC_MODEL` 三個環境變數控制；未設或出錯會自動 fallback 回 mock。
+
 ## Current Implementation Status
 
 | Sprint | Status | Highlights | Tests |
