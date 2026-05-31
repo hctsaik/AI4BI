@@ -1822,15 +1822,18 @@ def _render_visual_field_well(component_id, visual, report, cache, contracts, in
                                     for m in visual.query.metrics]
                         after_m = [{"block_id": fact_block, "metric_name": picked_m,
                                     "alias": picked_m, "agg_override": None}]
-                        proposal = ReportProposal(
-                            description=f"值改為 {picked_m}",
-                            changes=[ReportChange(
-                                path=f"pages/{page_id}/visuals/{component_id}/query/metrics",
-                                label=f"值 → {picked_m}", before=before_m, after=after_m,
-                                affects_data=True)],
-                            target_component_id=component_id,
-                        )
-                        workspace.stage_proposal(proposal)
+                        changes = [ReportChange(
+                            path=f"pages/{page_id}/visuals/{component_id}/query/metrics",
+                            label=f"值 → {picked_m}", before=before_m, after=after_m,
+                            affects_data=True)]
+                        # Round 161: a sort referencing the OLD measure alias would
+                        # become an invalid (non-projected) sort → re-point it.
+                        sc = _sort_remap_change(visual, page_id, component_id, [picked_m])
+                        if sc is not None:
+                            changes.append(sc)
+                        workspace.stage_proposal(ReportProposal(
+                            description=f"值改為 {picked_m}", changes=changes,
+                            target_component_id=component_id))
                         workspace.accept_pending()
                         cache.invalidate_all()
                         st.rerun()
@@ -1889,9 +1892,6 @@ def _render_visual_field_well(component_id, visual, report, cache, contracts, in
                     st.rerun()
                 elif res is not None and res.message:
                     st.caption(f"⚠️ {res.message}")
-
-        # ── 🎛️ Format pane: axis range/scale, sort, data labels, legend ──
-        _render_format_controls(component_id, visual, report, cache)
 
 
 def _patch_visual_extra(page_id, vid, key, before, after) -> None:
@@ -2350,10 +2350,37 @@ def _render_visualizations_pane(report: ExecutableReportSpec, cache: QueryCache,
                         cache.invalidate_all()
                         st.rerun()
 
-    # Dropdown fallback (also covers no-build / AppTest / KPI visuals).
-    label = "或用下拉選單編輯" if used_dnd else "編輯選項"
+    # Dropdown fallback for value/dimension/type (also covers no-build / AppTest).
+    label = "或用下拉選單編輯（值 / 分組 / 圖表類型）" if used_dnd else "編輯選項"
     with st.expander(label, expanded=not used_dnd):
         _render_visual_field_well(sel, visual, report, cache, contracts, in_pane=True)
+    # Format controls are ALWAYS visible (not buried in the fallback expander),
+    # since the drag-drop component doesn't cover axis/sort/labels/legend.
+    if visual.visualization.visual_type.value in _CHART_TYPE_LABELS:
+        _render_format_controls(sel, visual, report, cache)
+
+
+def _sort_remap_change(visual, page_id, vid, new_aliases):
+    """Round 161: when the measure(s) change, rewrite any sort that referenced an
+    old metric alias (now removed) to a current alias — else the query has a sort
+    on a non-projected column and errors. Returns a ReportChange or None."""
+    cur = [{"column_name": s.column_name, "direction": s.direction.value}
+           for s in visual.query.sort]
+    if not cur or not new_aliases:
+        return None
+    new_set = set(new_aliases)
+    old_metric_aliases = {m.alias or m.metric_name for m in visual.query.metrics}
+    after, changed = [], False
+    for s in cur:
+        if s["column_name"] not in new_set and s["column_name"] in old_metric_aliases:
+            after.append({"column_name": new_aliases[0], "direction": s["direction"]})
+            changed = True
+        else:
+            after.append(s)
+    if not changed:
+        return None
+    return ReportChange(path=f"pages/{page_id}/visuals/{vid}/query/sort",
+                        label="排序欄位更新", before=cur, after=after, affects_data=True)
 
 
 def _apply_field_well_result(report, page_id, sel, visual, fact_block, result) -> bool:
@@ -2377,6 +2404,9 @@ def _apply_field_well_result(report, page_id, sel, visual, fact_block, result) -
         changes.append(ReportChange(
             path=f"pages/{page_id}/visuals/{sel}/query/metrics",
             label="值", before=before_m, after=after_m, affects_data=True))
+        sc = _sort_remap_change(visual, page_id, sel, values)  # keep sort valid
+        if sc is not None:
+            changes.append(sc)
 
     cur_dims = [d.column_name for d in visual.query.dimensions]
     if dims != cur_dims:
