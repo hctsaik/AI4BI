@@ -69,6 +69,50 @@ def clear() -> None:
     _STORE.clear()
 
 
+def source_row_count(contract: "DataBlockContract") -> "int | None":
+    """Row count WITHOUT materializing the data (Round 167).
+
+    Reads metadata only — CachedDataSource carries ``row_count``; an
+    InlineDataSource knows ``len(records)``. Returns None when the count can't
+    be known without loading (so callers can show "未知" instead of paying for
+    a full scan). This is the cheap basis for the data-source inspector.
+    """
+    from ai4bi.blocks.contracts import CachedDataSource, InlineDataSource
+
+    src = contract.data_source
+    if isinstance(src, CachedDataSource):
+        return int(src.row_count)
+    if isinstance(src, InlineDataSource):
+        return len(src.records)
+    return None
+
+
+def sample_dataframe(contract: "DataBlockContract", n: int = 20) -> pd.DataFrame:
+    """Return at most ``n`` rows for a *resource-safe preview* (Round 167).
+
+    Never renders or copies the whole dataset:
+    - InlineDataSource → builds a DataFrame from only the first ``n`` records.
+    - CachedDataSource → ``.head(n)`` of the in-store frame (a cheap view; the
+      rows already live once in the store, so no extra materialization).
+
+    Use this for previews/profiling instead of ``materialize_dataframe`` so a
+    50K-row source doesn't get fully rendered into the browser or scanned for
+    stats on every rerun.
+    """
+    from ai4bi.blocks.contracts import CachedDataSource, InlineDataSource
+
+    n = max(0, int(n))
+    src = contract.data_source
+    if isinstance(src, InlineDataSource):
+        return pd.DataFrame(src.records[:n])
+    if isinstance(src, CachedDataSource):
+        return get_dataframe(src.content_hash).head(n)
+    raise TypeError(
+        f"Cannot sample data source of type {type(src).__name__} "
+        f"for block '{contract.block_id}'"
+    )
+
+
 def materialize_dataframe(contract: "DataBlockContract") -> pd.DataFrame:
     """Resolve any contract's data source to a DataFrame.
 

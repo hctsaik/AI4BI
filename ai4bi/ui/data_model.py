@@ -40,6 +40,23 @@ def _user_loaded_blocks() -> dict[str, DataBlockContract]:
     return {bid: c for bid, c in all_blocks.items() if bid in meta}
 
 
+def _friendly_time(ts: "str | None") -> "str | None":
+    """Format a stored 'YYYY-MM-DD HH:MM' upload time as 今天/昨天/日期."""
+    if not ts:
+        return None
+    try:
+        import datetime as _dt
+        dt = _dt.datetime.strptime(ts, "%Y-%m-%d %H:%M")
+        today = _dt.date.today()
+        if dt.date() == today:
+            return f"今天 {dt:%H:%M}"
+        if dt.date() == today - _dt.timedelta(days=1):
+            return f"昨天 {dt:%H:%M}"
+        return ts
+    except Exception:  # noqa: BLE001
+        return ts
+
+
 def render_data_source_manager(report_sources: "dict | None" = None) -> None:
     """Round 147 / 166: unified data-source manager — one list of EVERY source
     powering the current report, so the user can always see how many there are.
@@ -69,36 +86,39 @@ def render_data_source_manager(report_sources: "dict | None" = None) -> None:
         return
 
     n_rel = len(get_user_semantic_model().get("relationships", []))
-    st.caption(f"**這份報表使用 {total} 個資料來源 · {n_rel} 個關聯**")
-
-    def _cols_count(contract) -> int:
-        return len(getattr(contract, "columns", []) or [])
+    # Round 167: total rows is metadata-only (CachedDataSource.row_count) — we
+    # never load or scan any frame just to summarize.
+    from ai4bi.blocks.datastore import source_row_count
+    from ai4bi.ui.data_inspector import render_source_inspector
+    total_rows, any_known = 0, False
+    for c in list(builtin.values()) + list(uploads.values()):
+        rc = source_row_count(c)
+        if rc is not None:
+            total_rows += rc
+            any_known = True
+    rows_txt = f" · 約 {total_rows:,} 列" if any_known else ""
+    st.caption(f"**這份報表使用 {total} 個資料來源 · {n_rel} 個關聯{rows_txt}**")
+    st.caption("展開任一來源即可看欄位結構（schema）；資料預覽採**取樣、需手動展開**,大型資料不會整表載入或掃描。")
 
     # ── built-in / demo sources (read-only) ─────────────────────────────
-    for bid, contract in builtin.items():
-        label = getattr(contract, "description", None) or bid
-        st.markdown(
-            f"**{label}** · 📊 內建／示範資料  \n"
-            f"<span style='color:#888;font-size:0.85em'>"
-            f"{_cols_count(contract)} 欄 · `{bid}`</span>",
-            unsafe_allow_html=True,
-        )
+    if builtin:
+        st.markdown("**📊 內建／示範資料**")
+        for bid, contract in builtin.items():
+            label = getattr(contract, "description", None) or bid
+            render_source_inspector(contract, display_name=label,
+                                    origin="📊 內建／示範資料", key_prefix=f"dsm_b_{bid}")
 
     # ── user-loaded sources (removable) ─────────────────────────────────
-    for bid, contract in uploads.items():
-        m = meta.get(bid, {})
-        origin = _SOURCE_BADGE.get(str(m.get("source", "")).lower(), "📄 上傳檔案")
-        cols = st.columns([4, 1])
-        with cols[0]:
-            st.markdown(
-                f"**{m.get('display_name', bid)}** · {origin}  \n"
-                f"<span style='color:#888;font-size:0.85em'>"
-                f"{m.get('row_count', '?')} 行 · {len(m.get('metric_names', []))} 指標 · "
-                f"{len(m.get('dim_names', []))} 維度 · `{bid}`</span>",
-                unsafe_allow_html=True,
-            )
-        with cols[1]:
-            if st.button("移除", key=f"dsm_remove_{bid}"):
+    if uploads:
+        st.markdown("**📥 你載入的資料**")
+        for bid, contract in uploads.items():
+            m = meta.get(bid, {})
+            origin = _SOURCE_BADGE.get(str(m.get("source", "")).lower(), "📄 上傳檔案")
+            _uploaded = _friendly_time(m.get("uploaded_at"))
+            render_source_inspector(contract, display_name=m.get("display_name", bid),
+                                    origin=origin, key_prefix=f"dsm_u_{bid}",
+                                    subtitle=f"🕒 載入於 {_uploaded}" if _uploaded else None)
+            if st.button("🗑 移除此來源", key=f"dsm_remove_{bid}"):
                 st.session_state.get(_USER_BLOCKS_KEY, {}).pop(bid, None)
                 st.session_state.get(_USER_BLOCK_META_KEY, {}).pop(bid, None)
                 st.rerun()

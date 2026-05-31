@@ -345,11 +345,13 @@ def render_upload_panel() -> None:
             if _USER_BLOCK_META_KEY not in st.session_state:
                 st.session_state[_USER_BLOCK_META_KEY] = {}
             st.session_state[_USER_BLOCKS_KEY][block_id] = contract
+            import datetime as _dt
             st.session_state[_USER_BLOCK_META_KEY][block_id] = {
                 "metric_names": metric_names,
                 "dim_names": dim_names,
                 "display_name": data_name,
                 "row_count": len(df),
+                "uploaded_at": _dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
             }
             # Round 033: signal app.py to auto-build report immediately
             st.session_state[_PENDING_NEW_BLOCK_KEY] = block_id
