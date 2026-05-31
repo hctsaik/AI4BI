@@ -43,6 +43,7 @@ from ai4bi.report.retail_template import (
     build_retail_demo_report, build_retail_sales_block, build_store_staffing_block,
 )
 from ai4bi.ui.data_model import render_join_builder, render_data_model_view, get_user_semantic_model, render_data_source_manager
+from ai4bi.ui.create_data import render_create_data_panel  # Round 176
 from ai4bi.ui.workspace_manager import render_workspace_panel  # Round 039
 from ai4bi.ui.audit_trail import render_audit_trail, record_change  # Round 040
 from ai4bi.ui.report_slicer import render_report_slicer, get_slicer_filters, SlicerDefinition  # Round 041
@@ -2716,10 +2717,11 @@ def main() -> None:
                     st.subheader("跨資料表計算結果")
                     render_cross_fact_results()
             with _ws_new:
-                st.caption("上傳檔案、連接資料庫，或從既有資料新產生欄位／資料表。")
+                st.caption("上傳檔案、連接資料庫／服務，或從既有資料新產生欄位／資料表。")
                 render_upload_panel()
                 render_connector_panel()
                 render_calc_metric_panel(_report_block_contracts(report))
+                render_create_data_panel(_report_block_contracts(report))
                 _render_create_report_from_loaded(cache)
                 with st.expander("⚙️ 進階：情境參數（What-if）與手動新增圖表", expanded=False):
                     render_what_if_panel()

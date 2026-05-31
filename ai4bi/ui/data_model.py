@@ -28,6 +28,7 @@ _USER_SEMANTIC_MODEL_KEY = "user_semantic_model"
 _SOURCE_BADGE = {
     "duckdb": "🦆 DuckDB", "sqlite": "💾 SQLite", "postgres": "🐘 Postgres",
     "postgresql": "🐘 Postgres", "url": "🌐 URL", "rest": "🌐 REST",
+    "derived": "🔄 衍生資料",
 }
 
 
