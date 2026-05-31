@@ -56,11 +56,15 @@ from ai4bi.ui.calc_metric_panel import render_calc_metric_panel  # Round 052
 from ai4bi.ui.cross_fact_panel import render_cross_fact_panel, render_cross_fact_results  # Round 055
 from ai4bi.ui.what_if_panel import render_what_if_panel, get_parameters  # Round 060
 from ai4bi.ui.bookmark_panel import render_bookmark_panel  # Round 061
-from ai4bi.ui.cohort_panel import render_cohort_panel, render_cohort_results  # Round 062
+from ai4bi.ui.cohort_panel import (  # Round 062
+    render_cohort_panel, render_cohort_results, _cohort_applicable, _fact_blocks,
+)
 from ai4bi.ui.change_panel import render_change_panel, render_change_results  # Round 071
-from ai4bi.ui.basket_panel import render_basket_panel, render_basket_results  # Round 077
-from ai4bi.ui.rfm_panel import render_rfm_panel, render_rfm_results  # Round 082
-from ai4bi.ui.trend_streak_panel import render_trend_streak_panel, render_trend_streak_results  # Round 085
+from ai4bi.ui.basket_panel import render_basket_panel, render_basket_results, _basket_applicable  # Round 077
+from ai4bi.ui.rfm_panel import render_rfm_panel, render_rfm_results, _rfm_applicable  # Round 082
+from ai4bi.ui.trend_streak_panel import (  # Round 085
+    render_trend_streak_panel, render_trend_streak_results, _streak_applicable,
+)
 from ai4bi.ui.format_controls import FORMAT_CONTROL_VTYPES as _FMT_VTYPES  # Round 135
 from ai4bi.ui import theme as _theme  # Round 164: design-system / themes
 from ai4bi.report.share_auth import hash_password, verify_password  # Round 064
@@ -275,6 +279,38 @@ def _report_block_contracts(report: ExecutableReportSpec) -> dict[str, DataBlock
     # data is editable even before it appears in a visual
     ids |= set(st.session_state.get(_USER_BLOCK_META_KEY, {}).keys())
     return {bid: all_c[bid] for bid in ids if bid in all_c}
+
+
+def _applicable_analysis_tabs(report: ExecutableReportSpec) -> list[tuple[str, "callable"]]:
+    """Round 174: the 分析-mode result tabs are data-driven, mirroring each
+    panel's own applicability gate (R156). Retail/customer analyses (客戶留存 /
+    常一起購買 / RFM) only appear when the report's data actually has those
+    semantics — so a semiconductor/fab report (lots, tools, no customers) no
+    longer shows irrelevant retail tabs. 連續下滑 / 變化分解 / 業務摘要 are
+    general business analyses and apply to fab data too."""
+    return _analysis_tabs_for_facts(_fact_blocks(_report_block_contracts(report)))
+
+
+def _analysis_tabs_for_facts(facts: dict) -> list[tuple[str, "callable"]]:
+    """Pure helper (testable without Streamlit): given the report's fact-block
+    contracts, return [(label, results_renderer), ...] for the analyses that
+    apply to that data. See _applicable_analysis_tabs for rationale (R174)."""
+    def _any(pred) -> bool:
+        return any(pred(c) for c in facts.values())
+
+    tabs: list[tuple[str, callable]] = []
+    if _any(_cohort_applicable):
+        tabs.append(("客戶留存", render_cohort_results))
+    if _any(_basket_applicable):
+        tabs.append(("常一起購買", render_basket_results))
+    if _any(_rfm_applicable):
+        tabs.append(("RFM", render_rfm_results))
+    if _any(_streak_applicable):
+        tabs.append(("連續下滑", render_trend_streak_results))
+    # change-decomposition + summary are general (not retail-specific) — always offered.
+    tabs.append(("變化分解", render_change_results))
+    tabs.append(("業務摘要", render_summary_results))
+    return tabs
 
 
 def _share_password_ok(report: ExecutableReportSpec) -> bool:
@@ -2651,25 +2687,15 @@ def main() -> None:
             st.markdown("---")
             st.subheader("分析結果")
             _hint = "在左側「分析」面板選好選項並執行，結果會顯示在這裡。"
-            _tabs = st.tabs(["客戶留存", "常一起購買", "RFM", "連續下滑", "變化分解", "業務摘要"])
-            with _tabs[0]:
-                if not render_cohort_results():
-                    st.caption(_hint)
-            with _tabs[1]:
-                if not render_basket_results():
-                    st.caption(_hint)
-            with _tabs[2]:
-                if not render_rfm_results():
-                    st.caption(_hint)
-            with _tabs[3]:
-                if not render_trend_streak_results():
-                    st.caption(_hint)
-            with _tabs[4]:
-                if not render_change_results():
-                    st.caption(_hint)
-            with _tabs[5]:
-                if not render_summary_results():
-                    st.caption(_hint)
+            # Round 174: data-driven tabs — retail-only analyses (cohort/basket/
+            # RFM) are hidden when the report's data has no customer/product
+            # semantics (e.g. semiconductor), matching the sidebar panels' gate.
+            _analysis_tabs = _applicable_analysis_tabs(report)
+            _tab_objs = st.tabs([_lbl for _lbl, _ in _analysis_tabs])
+            for _to, (_lbl, _fn) in zip(_tab_objs, _analysis_tabs):
+                with _to:
+                    if not _fn():
+                        st.caption(_hint)
         elif "模型" in _nav_mode:
             # Round 134: 模型 mode — full-width canvas, then cross-fact results in
             # the wide main area (controls stay in the sidebar). No right pane.
