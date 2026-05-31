@@ -109,6 +109,7 @@ def _plotly(pg):
             legorient: (d.layout && d.layout.legend) ? d.layout.legend.orientation : null,
             legy: (d.layout && d.layout.legend) ? d.layout.legend.y : null,
             hastext: (d.data||[]).some(t => t.texttemplate || (t.text && t.text.length)),
+            x0: (d.data && d.data[0] && d.data[0].x) ? Array.from(d.data[0].x).slice(0,12) : [],
             y0: (d.calcdata && d.calcdata[0])
                   ? d.calcdata[0].map(pt => pt.y !== undefined ? pt.y : pt.s).slice(0,12) : []
         }))""")
@@ -227,21 +228,29 @@ def main() -> int:
                   f"{b['y0'] if b else None}→{a['y0'] if a else None}")
             pg.close()
 
-            # S3 — change group-by dimension
+            # S3 — change group-by dimension → bar's categories actually change
             pg = fresh()
             _select_visual(pg, BAR); _expand_fallback(pg)
-            _set_select_last(pg, "分組")
-            check("S3 change group-by dimension (no error)",
-                  len(pg.locator("[data-testid='stException']").all()) == 0)
+            x_before = (_bar(pg) or {}).get("x0")
+            _set_select(pg, "分組", "product_family")  # a dimension on the fact block
+            x_after = (_bar(pg) or {}).get("x0")
+            check("S3 group-by changes the axis categories",
+                  bool(x_before) and bool(x_after) and x_after != x_before
+                  and len(pg.locator("[data-testid='stException']").all()) == 0,
+                  f"{x_before}→{x_after}")
             pg.close()
 
-            # S4 — sort high→low → bar values non-increasing
+            # S4 — sort: desc gives non-increasing AND asc gives non-decreasing (reorders)
             pg = fresh()
             _select_visual(pg, BAR)
             _set_select(pg, "排序", "由高到低")
-            s = _bar(pg)
-            mono = bool(s and len(s["y0"]) >= 2 and all(s["y0"][i] >= s["y0"][i+1] for i in range(len(s["y0"])-1)))
-            check("S4 sort high→low → non-increasing bars", mono, str(s["y0"][:6]) if s else "no bar")
+            desc = (_bar(pg) or {}).get("y0") or []
+            _set_select(pg, "排序", "由低到高")
+            asc = (_bar(pg) or {}).get("y0") or []
+            ok4 = (len(desc) >= 2 and all(desc[i] >= desc[i+1] for i in range(len(desc)-1))
+                   and len(asc) >= 2 and all(asc[i] <= asc[i+1] for i in range(len(asc)-1))
+                   and desc != asc)
+            check("S4 sort reorders (desc↘ vs asc↗)", ok4, f"desc={desc[:6]} asc={asc[:6]}")
             pg.close()
 
             # S5 — Y-axis min/max
@@ -283,18 +292,24 @@ def main() -> int:
                   str((s["showlegend"], s["legy"])) if s else "no bar")
             pg.close()
 
-            # S9 — delete a chart
+            # S9 — delete a chart, then 復原 restores it
             pg = fresh()
             before_del = pg.get_by_role("button", name="🗑", exact=True).count()
             pg.get_by_role("button", name="🗑", exact=True).first.click()
             pg.wait_for_timeout(3_000)
             after_del = pg.get_by_role("button", name="🗑", exact=True).count()
-            check("S9 delete removes one chart", after_del == before_del - 1, f"{before_del}→{after_del}")
+            pg.get_by_role("button", name="復原", exact=True).first.click()  # undo
+            pg.wait_for_timeout(3_000)
+            restored = pg.get_by_role("button", name="🗑", exact=True).count()
+            check("S9 delete removes one chart + 復原 restores",
+                  after_del == before_del - 1 and restored == before_del,
+                  f"{before_del}→{after_del}→{restored}")
             pg.close()
 
-            # S10 — add a chart by typing (NL)
+            # S10 — add a bar chart by typing (NL) → +1 visual AND a new bar appears
             pg = fresh()
             n_before = _selector_option_count(pg)
+            bars_before = sum(1 for s in _plotly(pg) if s["type0"] == "bar")
             pg.locator("textarea").first.fill("加一張長條圖")
             pg.get_by_role("button", name="送出請求", exact=False).first.click()
             pg.wait_for_timeout(3_500)
@@ -303,7 +318,10 @@ def main() -> int:
                 if btn.count():
                     btn.first.click(); pg.wait_for_timeout(4_000); break
             n_after = _selector_option_count(pg)
-            check("S10 add chart by NL (+1 visual)", n_after >= n_before + 1, f"{n_before}→{n_after}")
+            bars_after = sum(1 for s in _plotly(pg) if s["type0"] == "bar")
+            check("S10 add bar chart by NL (+1 visual, new bar rendered)",
+                  n_after >= n_before + 1 and bars_after >= bars_before + 1,
+                  f"sel {n_before}→{n_after}, bars {bars_before}→{bars_after}")
             pg.close()
 
             br.close()

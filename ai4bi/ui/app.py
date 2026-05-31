@@ -1862,36 +1862,49 @@ def _render_visual_field_well(component_id, visual, report, cache, contracts, in
                 cache.invalidate_all()
                 st.rerun()
 
-        # ── group-by dimension switch (categorical columns of the visual's block) ──
-        block_ids = {ref.block_id for ref in visual.query.block_refs}
-        dim_cols: list[str] = []
-        for bid in block_ids:
-            c = (contracts or {}).get(bid)
-            for col in getattr(c, "columns", []) or []:
-                if getattr(col, "data_type", "") in ("string", "str", "object", "text", "varchar") \
-                        and not col.name.lower().endswith(("_id", "_code")):
-                    dim_cols.append(col.name)
+        # ── group-by dimension switch — categorical columns of the visual's own
+        # block, applied as a DIRECT block-scoped patch (Round 162). Going via the
+        # NL categorical_dimension_change handler wrongly rejected same-block
+        # columns as "not certified", and excluding *_id hid the current dimension.
         cur_dims = [d.column_name for d in visual.query.dimensions]
         cur_dim = cur_dims[0] if cur_dims else None
-        if dim_cols:
-            options = sorted(set(dim_cols))
+        fact_b = visual.query.metrics[0].block_id if visual.query.metrics else None
+        dim_block = {}  # column -> block_id (only the metric's block, so it's joinable)
+        if fact_b is not None:
+            c = (contracts or {}).get(fact_b)
+            for col in getattr(c, "columns", []) or []:
+                low = col.name.lower()
+                is_cat = getattr(col, "data_type", "") in ("string", "str", "object", "text", "varchar")
+                # keep categorical cols; allow the CURRENT dim even if it ends in _id
+                if (is_cat and not low.endswith("_code")) or col.name == cur_dim:
+                    dim_block[col.name] = fact_b
+        if dim_block:
+            options = sorted(dim_block)
             idx = options.index(cur_dim) if cur_dim in options else 0
             picked = st.selectbox(
                 "分組依據（group by）", options, index=idx,
                 key=f"fw_dim_{component_id}",
-                help="改變這張圖的分組維度，例如從「月份」改成「產品」。",
+                help="改變這張圖的分組維度，例如從「機台」改成「產品」。",
             )
             if picked != cur_dim:
-                res = svc._build_single_proposal(
-                    "categorical_dimension_change", {"dimension_keyword": picked}, picked,
-                    report, component_id, None, contracts)
-                if res is not None and res.proposal is not None:
-                    workspace.stage_proposal(res.proposal)
+                page_id2 = next((pid for pid, p in report.pages.items()
+                                 if component_id in p.visuals), None)
+                if page_id2 is not None:
+                    before_d = [{"block_id": d.block_id, "column_name": d.column_name,
+                                 "alias": d.alias, "truncate_date_to": d.truncate_date_to}
+                                for d in visual.query.dimensions]
+                    after_d = [{"block_id": dim_block[picked], "column_name": picked,
+                                "alias": picked, "truncate_date_to": None}]
+                    workspace.stage_proposal(ReportProposal(
+                        description=f"分組改為 {picked}",
+                        changes=[ReportChange(
+                            path=f"pages/{page_id2}/visuals/{component_id}/query/dimensions",
+                            label=f"分組 → {picked}", before=before_d, after=after_d,
+                            affects_data=True)],
+                        target_component_id=component_id))
                     workspace.accept_pending()
                     cache.invalidate_all()
                     st.rerun()
-                elif res is not None and res.message:
-                    st.caption(f"⚠️ {res.message}")
 
 
 def _patch_visual_extra(page_id, vid, key, before, after) -> None:

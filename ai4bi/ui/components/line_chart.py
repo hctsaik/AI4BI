@@ -151,16 +151,22 @@ def _apply_axis_and_legend_format(fig, style) -> None:
     if y_scale == "log":
         fig.update_yaxes(type="log")
     y_min, y_max = extra.get("y_min"), extra.get("y_max")
-    if y_min is not None or y_max is not None:
-        # plotly needs an explicit [lo, hi]; on a log axis the range is log10.
+    if y_min is not None and y_max is not None:
+        # both bounds → explicit range; on a log axis the range is log10.
         import math
-        lo = y_min if y_min is not None else None
-        hi = y_max if y_max is not None else None
-        if lo is not None and hi is not None:
-            rng = [lo, hi]
-            if y_scale == "log":
-                rng = [math.log10(v) if v and v > 0 else 0 for v in rng]
-            fig.update_yaxes(range=rng, autorange=False)
+        rng = [y_min, y_max]
+        if y_scale == "log":
+            rng = [math.log10(v) if v and v > 0 else 0 for v in rng]
+        fig.update_yaxes(range=rng, autorange=False)
+    elif y_min is not None or y_max is not None:
+        # Round 162: one-sided bound — clamp via autorangeoptions so a min-only or
+        # max-only setting isn't silently ignored (the other side auto-fits).
+        opts = {}
+        if y_min is not None:
+            opts["minallowed"] = y_min
+        if y_max is not None:
+            opts["maxallowed"] = y_max
+        fig.update_yaxes(autorangeoptions=opts)
     pos = extra.get("legend_position")
     if pos and pos != "hide":
         anchors = {
