@@ -36,7 +36,7 @@ def _set_mode(page: Page, text: str) -> None:
 def _load_semi(page: Page) -> None:
     page.get_by_text("進階示範").first.click()
     page.wait_for_timeout(700)
-    page.get_by_role("button", name="載入半導體示範報表").click()
+    page.get_by_role("button", name="🔬 半導體示範").click()
     page.wait_for_timeout(3_500)
 
 

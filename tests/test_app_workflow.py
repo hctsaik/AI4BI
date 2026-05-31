@@ -1,7 +1,7 @@
 """App workflow integration tests.
 
 Round 033 update: default report is now the retail demo.
-Semiconductor-specific tests switch to semi demo via the "載入半導體示範報表" button.
+Semiconductor-specific tests switch to semi demo via the "🔬 半導體示範" button.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def _visual_selectbox(app: AppTest):
 
 def _load_semi_demo(app: AppTest) -> AppTest:
     """Switch the app to the semiconductor demo report (needed for semi-specific tests)."""
-    _click(app, "載入半導體示範報表")
+    _click(app, "🔬 半導體示範")
     return app
 
 

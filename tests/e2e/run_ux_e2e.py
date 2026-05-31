@@ -61,7 +61,7 @@ def _set_mode(pg, text: str):
 def _load_semi(pg):
     pg.get_by_text("進階示範").first.click()
     pg.wait_for_timeout(700)
-    pg.get_by_role("button", name="載入半導體示範報表").click()
+    pg.get_by_role("button", name="🔬 半導體示範").click()
     pg.wait_for_timeout(3_500)
 
 

@@ -835,6 +835,232 @@ def _render_ai_suggestions(report: ExecutableReportSpec, cache: QueryCache) -> N
                     st.rerun()
 
 
+def _report_badge(report) -> str:
+    """A short 'which report am I in' badge for the breadcrumb / hub."""
+    rid = report.audit.report_id
+    if getattr(report, "read_only", False):
+        return "🔒 唯讀分享"
+    if rid == "retail_demo_v1":
+        return "🛍️ 零售示範（範例）"
+    if rid == "semiconductor_queue_time_v1":
+        return "🔬 半導體示範（範例）"
+    if rid.startswith(("upload_", "blank_")):
+        return "📄 你的報表"
+    return "📊 報表"
+
+
+def _new_blank_report() -> ExecutableReportSpec:
+    from ai4bi.report.models import AuditMetadata, ReportPageSpec
+    import os
+    import uuid
+    return ExecutableReportSpec(
+        audit=AuditMetadata(report_id=f"blank_{uuid.uuid4().hex[:6]}",
+                            created_by=os.environ.get("ANALYST_NAME", "user")),
+        title="新報表", semantic_model_ref="user@1.0.0", status="user_draft",
+        pages={"main": ReportPageSpec("main", "Overview", {}, [], "概覽")}, controls={},
+    )
+
+
+def _relative_time(ts: float) -> str:
+    """Human 'how long ago' label for a draft's last-modified time."""
+    import time
+    delta = time.time() - ts
+    if delta < 90:
+        return "剛剛"
+    if delta < 3600:
+        return f"{int(delta // 60)} 分鐘前"
+    if delta < 86400:
+        return f"{int(delta // 3600)} 小時前"
+    if delta < 7 * 86400:
+        return f"{int(delta // 86400)} 天前"
+    import datetime as _dt
+    return _dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+
+
+def _hub_is_dirty(report: ExecutableReportSpec) -> bool:
+    """True when the current report has edits since it was loaded/saved.
+    Baseline revision is recorded in _render_draft_controls and reset on save."""
+    if getattr(report, "read_only", False):
+        return False
+    if st.session_state.get("_baseline_for") != report.report_id:
+        return False
+    base = st.session_state.get("_baseline_rev")
+    return base is not None and report.revision != base
+
+
+def _do_switch(intent: str, store: DraftReportStore, cache: QueryCache) -> None:
+    """Load the report identified by a switch intent (used by the hub guard)."""
+    if intent == "retail":
+        workspace.replace_with_loaded(build_retail_demo_report())
+    elif intent == "semi":
+        workspace.replace_with_loaded(build_semiconductor_queue_time_report())
+    elif intent == "blank":
+        workspace.replace_with_loaded(_new_blank_report())
+    elif intent.startswith("open:"):
+        stem = intent[len("open:"):]
+        for p in store.list_paths():
+            if p.stem == stem:
+                workspace.replace_with_loaded(store.load(p))
+                break
+    cache.invalidate_all()
+
+
+def _render_saved_drafts(store: DraftReportStore, cache: QueryCache, dirty: bool) -> None:
+    """List saved drafts (recent-first) with 開啟 (guarded if dirty) + delete."""
+    current = workspace.current_report()
+    current_id = current.report_id if current else None
+    saved_paths = store.list_paths()
+    if not saved_paths:
+        st.caption("（尚無已儲存的草稿）")
+        return
+    try:  # most-recently-modified first so frequent reports are on top
+        saved_paths = sorted(saved_paths, key=lambda p: p.stat().st_mtime, reverse=True)
+    except Exception:  # noqa: BLE001
+        pass
+    st.caption(f"已儲存的草稿（{len(saved_paths)} 份，最近在前）")
+    pending = st.session_state.get("_hub_del_pending")
+    for path in saved_paths:
+        try:
+            rep = store.load(path)
+        except Exception:  # noqa: BLE001
+            st.caption(f"⚠️ {path.name} 讀取失敗")
+            continue
+        is_cur = rep.report_id == current_id
+        if pending == path.stem:  # two-step delete confirmation
+            st.warning(f"確定刪除「{rep.title}」？此動作無法復原。")
+            cc = st.columns(2)
+            with cc[0]:
+                if st.button("確定刪除", key=f"hub_delyes_{path.stem}", width="stretch"):
+                    path.unlink(missing_ok=True)
+                    st.session_state.pop("_hub_del_pending", None)
+                    st.rerun()
+            with cc[1]:
+                if st.button("取消", key=f"hub_delno_{path.stem}", width="stretch"):
+                    st.session_state.pop("_hub_del_pending", None)
+                    st.rerun()
+            continue
+        try:
+            mtime = _relative_time(path.stat().st_mtime)
+        except Exception:  # noqa: BLE001
+            mtime = ""
+        row = st.columns([4, 1, 1])
+        with row[0]:
+            st.markdown(("🟢 " if is_cur else "") + f"**{rep.title}**")
+            if mtime:
+                st.caption(f"上次修改 {mtime}")
+        with row[1]:
+            if not is_cur and st.button("開啟", key=f"hub_open_{path.stem}"):
+                if dirty:
+                    st.session_state["_pending_switch"] = f"open:{path.stem}"
+                else:
+                    _do_switch(f"open:{path.stem}", store, cache)
+                st.rerun()
+        with row[2]:
+            if st.button("🗑", key=f"hub_del_{path.stem}", help="刪除此草稿"):
+                st.session_state["_hub_del_pending"] = path.stem
+                st.rerun()
+
+
+def _render_report_hub(report: ExecutableReportSpec, cache: QueryCache,
+                       store: DraftReportStore) -> None:
+    """Round 168: ONE clear report entry — open-existing vs create-new + save.
+
+    Replaces the scattered demo-switcher + 📤分享-mode workspace panel + 🗂️資料
+    build button so the "how do I start" steps are obvious:
+      ① 使用既有報表（示範 / 已存草稿）   ② 全新建立（用我的資料 / 空白）
+    plus file-lifecycle actions (儲存 / 另存新版 / 重新命名) that don't belong
+    under 分享. Switching away from a report with unsaved edits is guarded.
+    """
+    st.markdown(f"**📋 {report.title}**")
+    st.caption(_report_badge(report))
+    dirty = _hub_is_dirty(report)
+
+    # Unsaved-changes guard: confirm before discarding edits on a switch.
+    pend = st.session_state.get("_pending_switch")
+    if pend:
+        st.warning("⚠️ 目前報表有未儲存變更，切換後會遺失。")
+        c = st.columns(3)
+        with c[0]:
+            if st.button("💾 先儲存再切", key="psw_save", width="stretch"):
+                store.save(workspace.current_report())
+                _do_switch(pend, store, cache)
+                st.session_state.pop("_pending_switch", None)
+                st.rerun()
+        with c[1]:
+            if st.button("直接切換", key="psw_go", width="stretch", help="丟棄未儲存的變更"):
+                _do_switch(pend, store, cache)
+                st.session_state.pop("_pending_switch", None)
+                st.rerun()
+        with c[2]:
+            if st.button("取消", key="psw_cancel", width="stretch"):
+                st.session_state.pop("_pending_switch", None)
+                st.rerun()
+        return
+
+    def _switch(intent: str) -> None:
+        if dirty:
+            st.session_state["_pending_switch"] = intent
+        else:
+            _do_switch(intent, store, cache)
+        st.rerun()
+
+    first = not st.session_state.get("_hub_seen")
+    with st.expander("📋 報表：開啟 ／ 新建 ／ 儲存", expanded=first):
+        st.session_state["_hub_seen"] = True
+
+        st.markdown("**① 使用既有報表**")
+        d = st.columns(2)
+        with d[0]:
+            if st.button("🛍️ 零售示範", key="hub_retail", width="stretch"):
+                _switch("retail")
+        with d[1]:
+            if st.button("🔬 半導體示範", key="hub_semi", width="stretch"):
+                _switch("semi")
+        _render_saved_drafts(store, cache, dirty)
+
+        st.markdown("**② 全新建立報表**")
+        n = st.columns(2)
+        with n[0]:
+            if st.button("✨ 用我的資料", key="hub_new_data", width="stretch", type="primary",
+                         help="上傳檔案或連接資料庫,自動建立新報表"):
+                # not a report switch — stays on this report, just changes mode.
+                st.session_state["_nav_mode"] = "🗂️ 資料"
+                st.rerun()
+        with n[1]:
+            if st.button("📄 空白報表", key="hub_blank", width="stretch"):
+                _switch("blank")
+
+        # File-lifecycle actions — promoted out of 📤分享 (save ≠ share).
+        if report and not report.read_only:
+            st.markdown("**③ 儲存目前報表**" + ("　🟠 有未儲存變更" if dirty else ""))
+            if st.button("💾 儲存", key="hub_save", width="stretch"):
+                store.save(workspace.current_report())
+                st.session_state["_baseline_rev"] = workspace.current_report().revision
+                workspace.set_message("已儲存目前報表")
+                st.rerun()
+            # Rename and Save-as have SEPARATE inputs — unambiguous which a name feeds.
+            rn = st.text_input("✏️ 重新命名為", value="", key="hub_rename_name",
+                               placeholder=report.title)
+            if st.button("✏️ 重新命名", key="hub_rename", width="stretch",
+                         disabled=not rn.strip(), help="改目前這份報表的名稱"):
+                workspace.replace_with_loaded(
+                    replace(workspace.current_report(), title=rn.strip()))
+                st.rerun()
+            sa = st.text_input("💾 另存新版，命名為", value="", key="hub_saveas_name",
+                               placeholder=f"{report.title} 複本")
+            if st.button("💾 另存新版", key="hub_saveas", width="stretch",
+                         disabled=not sa.strip(), help="複製成一份新報表，不動原檔"):
+                import uuid
+                cur = workspace.current_report()
+                forked = replace(
+                    cur, title=sa.strip(),
+                    audit=replace(cur.audit, report_id=f"blank_{uuid.uuid4().hex[:6]}"))
+                workspace.replace_with_loaded(forked)
+                saved = store.save(workspace.current_report())
+                workspace.set_message(f"已另存並切換到新版：{saved.name}")
+                st.rerun()
+
+
 def _render_draft_controls(
     report: ExecutableReportSpec,
     cache: QueryCache,
@@ -844,21 +1070,15 @@ def _render_draft_controls(
     with st.sidebar:
         st.title("AI for BI")
 
-        # Demo switcher — Round 033 (persistent, top)
-        _is_user_report = report.audit.report_id.startswith("upload_")
-        _is_retail_demo = report.audit.report_id == "retail_demo_v1"
-        _is_semi_demo = report.audit.report_id == "semiconductor_queue_time_v1"
-        if _is_user_report or _is_semi_demo:
-            if st.button("← 回到零售示範報表", key="back_to_retail_demo"):
-                workspace.replace_with_loaded(build_retail_demo_report())
-                cache.invalidate_all()
-                st.rerun()
-        if _is_retail_demo:
-            with st.expander("進階示範（半導體）", expanded=False):
-                if st.button("載入半導體示範報表", key="load_semi_demo"):
-                    workspace.replace_with_loaded(build_semiconductor_queue_time_report())
-                    cache.invalidate_all()
-                    st.rerun()
+        # Round 168: record the dirty-tracking baseline when the current report
+        # identity changes (a switch/load), so edits-since-load can be detected.
+        if st.session_state.get("_baseline_for") != report.report_id:
+            st.session_state["_baseline_for"] = report.report_id
+            st.session_state["_baseline_rev"] = report.revision
+
+        # single clear report entry (open existing / create new / save)
+        # — replaces the scattered demo-switcher + 分享-mode workspace panel.
+        _render_report_hub(report, cache, store)
 
         # ── Ribbon: always-on actions (undo / redo / clear cache) ──────────
         # Round 147: promoted out of the buried 報表設定 expander so editing
@@ -894,6 +1114,11 @@ def _render_draft_controls(
         # Replaces the old flat ~25-panel scroll. Each mode shows only its
         # relevant panes, so the join/data-model/data-source features are
         # first-class destinations instead of buried expanders.
+        # Round 168: drain a pending mode jump (e.g. welcome card → 資料) BEFORE
+        # the radio instantiates, since its widget value can't be set afterwards.
+        _pending_mode = st.session_state.pop("_pending_nav_mode", None)
+        if _pending_mode is not None:
+            st.session_state["_nav_mode"] = _pending_mode
         mode = st.radio(
             "模式",
             ["🔍 探索", "🗂️ 資料", "🔗 模型", "📊 分析", "📤 分享"],
@@ -967,7 +1192,7 @@ def _render_draft_controls(
 
         elif "分享" in mode:
             st.subheader("分享與管理")
-            render_workspace_panel(store, cache)
+            st.caption("💡 開啟／新建／儲存報表已移到左上角的「📋 報表」入口；這裡專注於對外分享與發布。")
             with st.expander("📤 分享與發布", expanded=False):
                 st.caption("檢查報表是否符合發布條件，建立唯讀分享連結，或載入已發布版本。")
                 _render_publication_readiness(report)
@@ -2323,6 +2548,13 @@ def main() -> None:
     if readonly:
         render_readonly_banner()
     else:
+        # Round 168: breadcrumb — which report am I in, and which mode (markdown,
+        # not caption, so "which report" is prominent enough to always notice).
+        _mode = st.session_state.get("_nav_mode", "🔍 探索")
+        _dirty_tag = "　·　🟠 有未儲存變更" if _hub_is_dirty(report) else ""
+        st.markdown(
+            f"📋 **{_report_badge(report)}**　·　目前在「{_mode}」"
+            f"　·　切換／新建在左上「📋 報表」{_dirty_tag}")
         _rid = report.audit.report_id
         if _rid == "retail_demo_v1":
             st.caption("📊 零售示範資料（2026 年 3–5 月合成數據）｜左側上傳你的資料，或直接用自然語言探索。")
@@ -2332,6 +2564,28 @@ def main() -> None:
             st.caption("📁 你的資料 — AI 自動建立的起始報表，可用自然語言繼續探索。")
         else:
             st.caption(f"報表 ID: `{_rid}`")
+
+    # Round 168: first-run welcome — make the (otherwise invisible) starting
+    # point explicit and offer the two paths. Dismissible; shown once per session.
+    if not readonly and not st.session_state.get("_welcome_dismissed"):
+        with st.container(border=True):
+            st.markdown("#### 👋 歡迎使用 AI for BI — 你想怎麼開始？")
+            st.caption("目前畫面是一份**範例報表**,可直接看或用自然語言編輯。或選一條路開始：")
+            wc = st.columns([1, 1, 1])
+            with wc[0]:
+                st.markdown("**① 用這份範例**  \n直接在下方輸入框用自然語言提問或改圖。")
+                if st.button("✅ 就用這份範例", key="welcome_use_demo", width="stretch"):
+                    st.session_state["_welcome_dismissed"] = True
+                    st.rerun()
+            with wc[1]:
+                st.markdown("**② 用我的資料**  \n上傳檔案／連資料庫,自動建新報表。")
+                if st.button("✨ 開始建立", key="welcome_new", type="primary", width="stretch"):
+                    st.session_state["_pending_nav_mode"] = "🗂️ 資料"
+                    st.session_state["_welcome_dismissed"] = True
+                    st.rerun()
+            with wc[2]:
+                st.markdown("**③ 開啟既有報表**  \n左上「📋 報表」開示範或你存過的草稿。")
+                st.caption("（在左側「📋 報表：開啟／新建／儲存」）")
 
     # Round 148: primary NL ask box at the TOP of the canvas (Power BI Copilot
     # placement) — the most common action lives where the user is looking, not
