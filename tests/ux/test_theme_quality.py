@@ -102,12 +102,12 @@ def test_app_css_targets_streamlit_1_5x_button_testids():
 
 
 def test_secondary_surface_text_is_legible():
-    """Secondary/download buttons sit on the secondary surface — its text must
+    """Secondary/download buttons use the (white) page surface — its text must
     clear WCAG-AA (4.5:1)."""
     from ai4bi.ui.theme import on_color
     from tests.ux.theme_score import contrast_ratio
     for key, th in theme.all_themes().items():
-        assert contrast_ratio(on_color(th.secondary_bg_color), th.secondary_bg_color) >= 4.5, key
+        assert contrast_ratio(on_color(th.bg_color), th.bg_color) >= 4.5, key
 
 
 def test_no_palette_color_equals_text_color():

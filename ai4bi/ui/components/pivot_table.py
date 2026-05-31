@@ -34,8 +34,8 @@ def render_pivot(query_spec: VisualQuerySpec, df: pd.DataFrame, style: Visualiza
     metric = (query_spec.metrics[0].alias or query_spec.metrics[0].metric_name) \
         if query_spec.metrics else None
 
-    if title:
-        st.caption(f"**{title}**")
+    # Round 172: the visual frame already renders the title (bold) — rendering it
+    # again here as a caption produced the duplicated, inconsistent second title.
 
     # Need 2 dims + a metric present to pivot; otherwise show the plain frame.
     if len(dims) >= 2 and metric and all(d in df.columns for d in dims[:2]) and metric in df.columns:

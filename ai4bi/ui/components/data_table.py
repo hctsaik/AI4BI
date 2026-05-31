@@ -258,8 +258,9 @@ def render_data_table(
     # ------------------------------------------------------------------ #
     # Render
     # ------------------------------------------------------------------ #
-    if title:
-        st.markdown(f"**{title}**")  # match the panels' table-title style (consistency)
+    # Round 172: the visual frame (_render_visual_cell) already renders the
+    # title in bold — don't render it again here (it produced a duplicate /
+    # inconsistent second title vs other visual types).
 
     if styled_df is not None:
         st.dataframe(

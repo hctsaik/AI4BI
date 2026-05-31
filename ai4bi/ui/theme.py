@@ -408,7 +408,7 @@ def app_css(theme: Optional[Theme] = None) -> str:
     """
     th = theme or get_active_theme()
     on_primary = on_accent(th.primary_color)  # prefer white on the accent (AA-large)
-    on_secondary = on_color(th.secondary_bg_color)  # readable on the secondary surface
+    on_secondary = on_color(th.bg_color)  # readable on the (white) button surface
     return f"""
 <style>
 :root {{
@@ -448,13 +448,14 @@ button[data-testid^="stBaseButton-primary"]:active {{
   color: {on_primary} !important;
   filter: brightness(1.08);
 }}
-/* Secondary / tertiary / download buttons → secondary surface + readable text. */
+/* Secondary / tertiary / download buttons → white (page) surface, outlined,
+   with readable text. (White-bg outline button — the look the user asked for.) */
 button[data-testid^="stBaseButton-secondary"],
 button[data-testid^="stBaseButton-tertiary"],
 .stButton > button[kind="secondary"],
 .stButton > button[kind="tertiary"] {{
-  background-color: {th.secondary_bg_color} !important;
-  border-color: {th.grid_color} !important;
+  background-color: {th.bg_color} !important;
+  border-color: {th.axis_color} !important;
   color: {on_secondary} !important;
 }}
 button[data-testid^="stBaseButton-secondary"] *,
