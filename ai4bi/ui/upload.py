@@ -12,9 +12,10 @@ Round 032 adds:
 from __future__ import annotations
 
 import io
+import json
 import re
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 import pandas as pd
 import streamlit as st
@@ -244,8 +245,88 @@ def _read_csv_any_encoding(raw: bytes) -> pd.DataFrame:
         raise last_exc or RuntimeError("無法解析 CSV 編碼")
 
 
+# ── JSON ingestion (Round 176) ──────────────────────────────────────────────
+# Most user data "ends up as JSON" (from APIs / SQL exports), but JSON is often
+# nested or wrapped in an envelope. These pure helpers turn an arbitrary parsed
+# JSON value into a flat, queryable table; the UI picks the records path.
+
+def _parse_json_any_encoding(raw: bytes) -> Any:
+    """Decode + parse JSON, tolerating common encodings (mirrors the CSV path)."""
+    for enc in ("utf-8-sig", "utf-8", "big5", "cp950", "gb18030", "utf-16"):
+        try:
+            return json.loads(raw.decode(enc))
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"JSON 格式錯誤：{exc}") from exc
+    raise ValueError("無法解析 JSON 編碼")
+
+
+def _is_list_of_dicts(v: Any) -> bool:
+    return isinstance(v, list) and len(v) > 0 and all(isinstance(x, dict) for x in v)
+
+
+def json_record_paths(obj: Any) -> list[str]:
+    """Candidate dot-paths to the list-of-records inside a parsed JSON object.
+
+    "" means "the top level is already the records" (an array of objects) or
+    "treat the whole object as a single row". Paths are ranked by record count
+    (largest table first) so the most likely choice leads the picker.
+    """
+    if _is_list_of_dicts(obj):
+        return [""]
+    paths: list[tuple[str, int]] = []
+    if isinstance(obj, dict):
+        def _scan(d: dict, prefix: str) -> None:
+            for k, v in d.items():
+                p = f"{prefix}{k}"
+                if _is_list_of_dicts(v):
+                    paths.append((p, len(v)))
+                elif isinstance(v, dict):
+                    _scan(v, p + ".")
+        _scan(obj, "")
+    paths.sort(key=lambda x: -x[1])
+    return [p for p, _ in paths] or [""]
+
+
+def _get_json_path(obj: Any, path: str) -> Any:
+    if not path:
+        return obj
+    cur = obj
+    for part in path.split("."):
+        cur = cur[part]
+    return cur
+
+
+def json_to_dataframe(obj: Any, record_path: str = "") -> pd.DataFrame:
+    """Normalize parsed JSON into a flat DataFrame.
+
+    Nested objects flatten to dotted columns (``addr.city``); residual list/dict
+    cells are JSON-encoded to strings so every column is representable (and can
+    be flagged as 巢狀 downstream). The caller still caps row count.
+    """
+    target = _get_json_path(obj, record_path)
+    if isinstance(target, list):
+        records = [r if isinstance(r, dict) else {"value": r} for r in target]
+    elif isinstance(target, dict):
+        records = [target]
+    else:
+        records = [{"value": target}]
+    df = pd.json_normalize(records, sep=".")
+    for col in df.columns:
+        if df[col].apply(lambda x: isinstance(x, (list, dict))).any():
+            df[col] = df[col].apply(
+                lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, (list, dict)) else x
+            )
+    return df
+
+
 def _load_file(uploaded_file) -> Optional[pd.DataFrame]:
-    """Parse an uploaded file into a DataFrame (encoding/format tolerant)."""
+    """Parse an uploaded file into a DataFrame (encoding/format tolerant).
+
+    JSON uses the best auto-detected records path; the upload panel offers a
+    picker to override it for nested/enveloped data.
+    """
     name: str = uploaded_file.name.lower()
     raw = uploaded_file.read()
     try:
@@ -261,10 +342,58 @@ def _load_file(uploaded_file) -> Optional[pd.DataFrame]:
                 return None
         if name.endswith(".parquet"):
             return pd.read_parquet(io.BytesIO(raw))
+        if name.endswith(".json"):
+            obj = _parse_json_any_encoding(raw)
+            return json_to_dataframe(obj, json_record_paths(obj)[0])
         st.error(f"不支援的檔案格式：{uploaded_file.name}")
     except Exception as exc:  # noqa: BLE001
         st.error(f"讀取檔案失敗：{exc}")
     return None
+
+
+def _render_json_records_picker(uploaded) -> Optional[pd.DataFrame]:
+    """Parse a JSON upload, let the user choose where the data rows live, and
+    return the normalized table. Handles arrays, envelopes ({"data": [...]}) and
+    nested objects; flags the residual nested (JSON-text) columns."""
+    try:
+        obj = _parse_json_any_encoding(uploaded.getvalue())
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"讀取 JSON 失敗：{exc}")
+        return None
+
+    paths = json_record_paths(obj)
+    if len(paths) > 1:
+        def _label(p: str) -> str:
+            if p == "":
+                return "最外層（整份就是資料列）"
+            try:
+                n = len(_get_json_path(obj, p))
+            except Exception:  # noqa: BLE001
+                n = "?"
+            return f"{p}（{n} 筆）"
+        path = st.selectbox(
+            "這份 JSON 的「資料列」在哪裡？", paths, format_func=_label,
+            key="json_record_path",
+            help="JSON 常把資料包在某個欄位裡（例如 data、items、results）。選錯可改這裡。",
+        )
+    else:
+        path = paths[0]
+
+    try:
+        df = json_to_dataframe(obj, path)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"無法把這份 JSON 轉成表格：{exc}")
+        return None
+    if df.empty:
+        st.warning("這份 JSON 沒有可轉成表格的資料列。")
+        return None
+
+    nested = [c for c in df.columns
+              if df[c].dtype == object
+              and df[c].astype(str).str.startswith(("{", "[")).any()]
+    if nested:
+        st.caption("🧩 巢狀欄位（以 JSON 文字呈現，可後續再處理）：" + "、".join(f"`{c}`" for c in nested))
+    return df
 
 
 _COL_CATEGORY_LABEL: dict[ColCategory, str] = {
@@ -313,11 +442,11 @@ def _render_health_check(classifications: list[ColumnClassification]) -> None:
 def render_upload_panel() -> None:
     """Render the 'Upload Your Data' sidebar expander — Round 028/032."""
     with st.expander("上傳資料", expanded=False):
-        st.caption("支援 CSV（自動辨識 Big5／UTF-8 等編碼）、Excel（.xlsx／.xls）、Parquet — 最多 50,000 行")
+        st.caption("支援 CSV（自動辨識 Big5／UTF-8 等編碼）、Excel（.xlsx／.xls）、Parquet、JSON — 最多 50,000 行")
 
         uploaded = st.file_uploader(
             "選擇檔案",
-            type=["csv", "xlsx", "xls", "parquet"],
+            type=["csv", "xlsx", "xls", "parquet", "json"],
             key="data_upload_widget",
             label_visibility="collapsed",
         )
@@ -326,7 +455,12 @@ def render_upload_panel() -> None:
             _render_existing_blocks()
             return
 
-        df = _load_file(uploaded)
+        # JSON gets a records-path picker (nested / enveloped data); other
+        # formats load directly.
+        if uploaded.name.lower().endswith(".json"):
+            df = _render_json_records_picker(uploaded)
+        else:
+            df = _load_file(uploaded)
         if df is None:
             return
 
