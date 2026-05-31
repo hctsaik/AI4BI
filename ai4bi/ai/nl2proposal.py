@@ -956,7 +956,9 @@ class NL2ProposalService:
             )
 
         return self._unsupported(
-            "No supported governed BI intent was detected.",
+            "我看不太懂這個問法，沒有對應到支援的分析動作或問題。請換句話、說得更具體一點，"
+            "例如：「依機台比較平均等待時間」「哪台機台等待時間最長」「最近的等待時間趨勢」；"
+            "或展開下方「💡 你可以這樣問」看可用範例。",
             target_scope=_target_scope(selected_component_id),
         )
 

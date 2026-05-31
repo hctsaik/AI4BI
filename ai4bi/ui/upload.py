@@ -223,19 +223,47 @@ def infer_block(
     return contract, metric_names, dim_names
 
 
+# Real-world CSVs (esp. Taiwanese gov / Excel exports) are often NOT utf-8 —
+# Big5 / CP950 are common. Try the likely encodings in order before giving up.
+_CSV_ENCODINGS = ("utf-8-sig", "utf-8", "big5", "cp950", "gb18030", "utf-16")
+
+
+def _read_csv_any_encoding(raw: bytes) -> pd.DataFrame:
+    last_exc: Exception | None = None
+    for enc in _CSV_ENCODINGS:
+        try:
+            return pd.read_csv(io.BytesIO(raw), encoding=enc)
+        except (UnicodeDecodeError, UnicodeError) as exc:
+            last_exc = exc
+            continue
+    # latin-1 maps every byte, so this never raises a decode error — last resort
+    # (keeps a stubborn file readable rather than failing the upload outright).
+    try:
+        return pd.read_csv(io.BytesIO(raw), encoding="latin-1")
+    except Exception:  # noqa: BLE001
+        raise last_exc or RuntimeError("無法解析 CSV 編碼")
+
+
 def _load_file(uploaded_file) -> Optional[pd.DataFrame]:
-    """Parse an uploaded file into a DataFrame."""
+    """Parse an uploaded file into a DataFrame (encoding/format tolerant)."""
     name: str = uploaded_file.name.lower()
     raw = uploaded_file.read()
     try:
         if name.endswith(".csv"):
-            return pd.read_csv(io.BytesIO(raw))
-        if name.endswith((".xls", ".xlsx")):
-            return pd.read_excel(io.BytesIO(raw))
+            return _read_csv_any_encoding(raw)
+        if name.endswith(".xlsx"):
+            return pd.read_excel(io.BytesIO(raw), engine="openpyxl")
+        if name.endswith(".xls"):
+            try:
+                return pd.read_excel(io.BytesIO(raw), engine="xlrd")
+            except ImportError:
+                st.error("讀取舊版 .xls 需要 `xlrd` 套件；請改存成 .xlsx,或安裝 `xlrd>=2.0.1` 後重試。")
+                return None
         if name.endswith(".parquet"):
             return pd.read_parquet(io.BytesIO(raw))
+        st.error(f"不支援的檔案格式：{uploaded_file.name}")
     except Exception as exc:  # noqa: BLE001
-        st.error(f"Failed to read file: {exc}")
+        st.error(f"讀取檔案失敗：{exc}")
     return None
 
 
@@ -285,7 +313,7 @@ def _render_health_check(classifications: list[ColumnClassification]) -> None:
 def render_upload_panel() -> None:
     """Render the 'Upload Your Data' sidebar expander — Round 028/032."""
     with st.expander("上傳資料", expanded=False):
-        st.caption("支援 CSV、Excel (.xlsx)、Parquet — 最多 50,000 行")
+        st.caption("支援 CSV（自動辨識 Big5／UTF-8 等編碼）、Excel（.xlsx／.xls）、Parquet — 最多 50,000 行")
 
         uploaded = st.file_uploader(
             "選擇檔案",

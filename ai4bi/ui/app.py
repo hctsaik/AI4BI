@@ -1135,10 +1135,11 @@ def _render_draft_controls(
             render_bookmark_panel(cache)
 
         elif "資料" in mode:
-            # Unified data-source manager: one place to add & inspect every source.
+            # Add-data controls stay in the sidebar; the data-source overview
+            # (schema + sampled preview) renders WIDE in the main canvas
+            # (Round 168r: the preview was cramped in the narrow sidebar).
             st.subheader("資料來源")
-            st.caption("在這裡上傳檔案、連接資料庫，並管理已載入的資料。")
-            render_data_source_manager(_report_block_contracts(report))
+            st.caption("在這裡上傳檔案、連接資料庫。👉 已載入來源的欄位結構與取樣預覽顯示在右側主畫布。")
             render_upload_panel()
             render_connector_panel()
             _user_meta: dict = st.session_state.get(_USER_BLOCK_META_KEY, {})
@@ -2679,6 +2680,13 @@ def main() -> None:
             if st.session_state.get("_xf_result") is not None and not st.session_state["_xf_result"].empty:
                 st.subheader("跨資料表計算結果")
                 render_cross_fact_results()
+        elif "資料" in _nav_mode:
+            # Round 168r: data-source overview (schema + sampled preview) in the
+            # WIDE canvas — the preview tables were cramped in the sidebar.
+            _render_canvas(report, cache, executor, active_filters)
+            st.markdown("---")
+            st.subheader("資料來源")
+            render_data_source_manager(_report_block_contracts(report))
         else:
             # Round 153: Power BI-style layout — report canvas on the left, a
             # persistent 🎨 視覺化 (Visualizations) pane on the right that edits the
