@@ -70,3 +70,21 @@
 - **S8/S9**:「瓶頸+等待」併附 queue 平均各 step 降序;SPC 空結果補「最接近界限者 ETCH-02(2.85σ)」。
 - **資料/rubric(S2)**:需決定是否讓 ETCH-02 excursion 更集中以呈現顯著 tool 差異。
 - 預計修完上述後重評(或重生 10 情境)直到平均 ≥95。
+
+---
+
+## Round 3 — 修正路由瑕疵 + demo 資料校準(使用者核准:1 修路由、2 強化 ETCH-02 訊號)
+
+### 已完成(實跑驗證,已提交)
+- ✅ **demo 資料(S2)**:ETCH-02 yield_factor 0.96→0.86。ETCH-01 92.6% vs ETCH-02 **83.8%(差 8.8pp,原 0.78pp)**。`<80%` wafer 仍全在 ETCH-02(S3 保留)、ETCH-02 仍 OEE 最差。整體良率落高 80s(現實),OEE 損失改由「良率/可用率」並列居首 → 更連貫的「ETCH-02 同時拖累良率與可用率」故事。已更新 3 個 fab 測試到新基準。(commit 514322a)
+- ✅ **S3 commonality 優先路由**:`_looks_like_commonality` 命中時**最優先**走 commonality,避免「<80%」被誤判成 count/value filter。正規問法「良率<80%…集中在同一台」現正確回 **ETCH-02(lift 1.82、Fisher p<0.05)**。(514322a)
+- ✅ **S2 entity-compare 改用正確指標**:`_answer_entity_compare` 改為「收集所有含兩實體的候選 block,優先選**含 prompt 所要指標**的 block」。「比較 ETCH-01 跟 ETCH-02 的良率」現正確比良率(92.6% vs 83.8%),不再回 move_count。(本輪)
+- ✅ 先前(R178 R2):S6 致命比率分解、S1 觸發詞。
+
+### 仍待修(次要 / 邊界,後續)
+- S5:subgroup-compare 良率走 mean(yield_pct),應改 weighted(現資料因 tested_die 恆定數值相同,屬未來防呆)。
+- S4:Pareto 量值鎖 defect_die(prompt 帶「%」時別切到比率欄)。
+- S8:「瓶頸+等待」併附 queue 平均各 step 降序。
+- S9:SPC 3σ 空結果補「最接近界限者 ETCH-02(2.85σ)」。
+- 邊界:S3「低於…都走」的 wafer/晶圓 entity 解析;S2「兩台機台差多少」未具名實體時改走依機台拆解。
+- **下一步**:Multi-Agent 重評 10 情境(量化新平均),未達 95 續修。最影響平均的 4 個最低分情境(S6/S3/S2/S1)已修。

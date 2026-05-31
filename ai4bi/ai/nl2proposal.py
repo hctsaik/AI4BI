@@ -1340,8 +1340,8 @@ class NL2ProposalService:
         from ai4bi.blocks.contracts import BlockType
         from ai4bi.blocks.datastore import materialize_dataframe
 
-        # Find a fact block + categorical column whose values include both operands.
-        target = None
+        # Find fact blocks + categorical columns whose values include both operands.
+        candidates: list[tuple[str, str]] = []
         for bid, c in contracts.items():
             if getattr(c, "block_type", None) not in (
                 BlockType.fact, BlockType.snapshot_fact, BlockType.target_fact):
@@ -1354,16 +1354,22 @@ class NL2ProposalService:
                         if cc.data_type in ("string", "str", "object")]:
                 vals = set(df[col].astype(str).unique()) if col in df.columns else set()
                 if a in vals and b in vals:
-                    target = (bid, col)
+                    candidates.append((bid, col))
                     break
-            if target:
-                break
-        if target is None:
+        if not candidates:
             return None
-        block_id, col = target
 
+        # Round 178 (S2): the same entities can live in multiple facts (tool_id in
+        # process-move AND etch_tool_id in wafer-yield). Prefer the block holding
+        # the metric the prompt actually asked for, so "兩台機台的良率" compares
+        # yield — not move_count from whichever fact happened to be first.
         idx = SchemaIndex.build(contracts)
         match = idx.best_metric_match(prompt, normalized)
+        if match is not None:
+            _pref = next(((b, cc) for (b, cc) in candidates if b == match.block_id), None)
+            block_id, col = _pref if _pref is not None else candidates[0]
+        else:
+            block_id, col = candidates[0]
         if match is not None and match.block_id == block_id:
             metric_name, alias = match.metric_name, match.alias
         else:
