@@ -457,11 +457,12 @@ class Executor:
         ]
         if len(aliases) != len(set(aliases)):
             raise QueryPlanningError("Visual output aliases must be unique.")
-        for sort_spec in spec.sort:
-            if sort_spec.column_name not in aliases:
-                raise QueryPlanningError(
-                    f"Sort column '{sort_spec.column_name}' is not a projected output."
-                )
+        # Round 163: self-heal a stale sort. After a UI edit changes the measure or
+        # dimension, a sort that referenced the now-removed column would otherwise
+        # crash the whole visual ("Sort column X is not a projected output"). A
+        # sort on a non-projected column is a no-op in SQL terms, so drop it
+        # rather than failing the query.
+        _valid_sort = [s for s in spec.sort if s.column_name in aliases]
 
         select_parts = [
             *(self._build_dimension_expr(dimension, contracts) for dimension in spec.dimensions),
@@ -505,11 +506,11 @@ class Executor:
             ]
             if having_parts:
                 sql_parts.append("HAVING\n    " + "\n    AND ".join(having_parts))
-        if spec.sort:
+        if _valid_sort:
             sql_parts.append(
                 "ORDER BY " + ", ".join(
                     f"{_quote(sort.column_name)} {sort.direction.value.upper()}"
-                    for sort in spec.sort
+                    for sort in _valid_sort
                 )
             )
         if spec.limit:

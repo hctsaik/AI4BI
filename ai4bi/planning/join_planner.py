@@ -74,9 +74,11 @@ class SafeJoinPlanner:
                     f"Only dimensions can be joined to a primary fact; rejected '{secondary_id}'."
                 )
             if secondary_id not in referenced_ids:
-                raise QueryPlanningError(
-                    f"Secondary block '{secondary_id}' is not used by a dimension or filter."
-                )
+                # Round 163: self-heal. After a UI edit changes the group-by off a
+                # joined dimension's column, that secondary block can be left
+                # unreferenced. An unused join can't cause fan-out, so simply skip
+                # it instead of crashing the visual.
+                continue
             resolved.append(self._resolve_direct_relationship(primary, secondary))
         return resolved
 

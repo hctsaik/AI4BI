@@ -236,15 +236,19 @@ class TestSemiconductorCurrentExecutorPath:
         with pytest.raises(QueryPlanningError, match="Only dimensions"):
             Executor(registry_root=BLOCKS_DIR).run(spec)
 
-    def test_executor_rejects_unused_dimension_block(self):
+    def test_executor_skips_unused_dimension_block(self):
+        """Round 163: an unused joined dimension block self-heals (skipped, not
+        rejected) — after a UI group-by edit a secondary block can be left
+        unreferenced; an unused join can't fan out, so the query still succeeds."""
         spec = VisualQuerySpec(
             spec_id="unused_tool_lineage",
             block_refs=[BlockRef("process_move_fact"), BlockRef("tool_dim")],
             metrics=[MetricRef("process_move_fact", "move_count", "Moves")],
         )
 
-        with pytest.raises(QueryPlanningError, match="not used"):
-            Executor(registry_root=BLOCKS_DIR).run(spec)
+        df = Executor(registry_root=BLOCKS_DIR).run(spec)  # no exception
+        assert "Moves" in df.columns
+        assert not any("tool" in c.lower() for c in df.columns)  # unused block absent
 
     def test_executor_rejects_undeclared_ratio_metric(self):
         spec = VisualQuerySpec(
