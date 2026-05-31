@@ -1683,7 +1683,6 @@ def _render_visual_cell(
     page = report.pages[page_id]
     visual = page.visuals[component_id]
     title = visual.visualization.title or component_id
-    is_sandbox = _is_sandbox_visual(visual, contracts)
 
     # Header row: title | ✏️ | ↑ | ↓ | 🗑 | width selector
     if not report.read_only:
@@ -1692,10 +1691,9 @@ def _render_visual_cell(
         h_cols = st.columns([8, 1, 1])
 
     with h_cols[0]:
-        if is_sandbox:
-            st.markdown(f"**{title}** &nbsp; {_SANDBOX_BADGE_HTML}", unsafe_allow_html=True)
-        else:
-            st.markdown(f"**{title}**")
+        # Round 165: dropped the per-visual "🔬 實驗中" sandbox badge (friction
+        # for SMB self-serve; certification is advisory-only now).
+        st.markdown(f"**{title}**")
 
     if not report.read_only:
         _is_selected = st.session_state.get("selected_component_id") == component_id
@@ -2341,11 +2339,10 @@ def main() -> None:
     if not readonly:
         _render_visual_assistant(report, cache, executor)
 
-    # Sandbox banner: shown whenever the report contains non-certified blocks (002-E)
-    if not readonly:
-        _loaded_contracts = _load_all_contracts()
-        if _has_sandbox_blocks(report, _loaded_contracts):
-            _render_sandbox_banner()
+    # Round 165: the always-on "sandbox / uncertified blocks" banner was removed —
+    # for SMB self-serve use it was friction (uploaded + demo data is never
+    # "certified"). Certification status is still reported in the publish flow as
+    # a non-blocking advisory; nothing blocks everyday exploration or sharing.
 
     # Round 048: threshold alert banner (shown when a rule's condition is true)
     render_alert_banner(executor)

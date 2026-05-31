@@ -110,12 +110,14 @@ def test_gate_returns_all_five_checks(demo_report, contracts, semantic_model):
 # ---------------------------------------------------------------------------
 
 def test_block_lifecycle_fails_for_validated_blocks(demo_report, contracts, semantic_model):
-    """The demo report uses 'validated' blocks, so block_lifecycle must be blocking=True, passed=False."""
+    """Round 165: uncertified blocks are reported (passed=False) but NON-blocking
+    so SMB self-serve sharing isn't gated on formal certification."""
     result = run_publication_gate(demo_report, contracts, semantic_model)
     lifecycle_check = next(c for c in result.checks if c.check_name == "block_lifecycle")
-    # Contracts are validated, not certified → must fail
-    assert lifecycle_check.blocking is True
+    # Contracts are validated, not certified → still surfaced as not-passed…
     assert lifecycle_check.passed is False
+    # …but advisory only (no longer blocks publication).
+    assert lifecycle_check.blocking is False
 
 
 # ---------------------------------------------------------------------------

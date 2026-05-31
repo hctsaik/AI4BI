@@ -10,3 +10,8 @@ backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F4F7FB"
 textColor = "#1B2A38"
 font = "sans serif"
+# Round 165: table headers. Streamlit renders dataframe header text in a faded
+# color by design, so it looked too light. Give the header row a distinct band
+# + visible cell borders so columns read as a proper, professional header.
+dataframeHeaderBackgroundColor = "#DCE4EE"
+dataframeBorderColor = "#C4D0DE"

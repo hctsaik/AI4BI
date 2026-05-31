@@ -47,7 +47,14 @@ def _check_block_lifecycle(
     report: ExecutableReportSpec,
     contracts: dict[str, DataBlockContract],
 ) -> GateCheckResult:
-    """All referenced blocks must be in the 'certified' lifecycle stage."""
+    """Surface which blocks aren't certified — as a NON-blocking advisory.
+
+    Round 165: for the SMB self-serve product, requiring every block to be
+    formally "certified" before a report can be shared was pure friction
+    (uploaded files and the bundled demo data are never certified). The check
+    still reports the status so the user is informed, but it no longer blocks
+    publishing — consistent with how the policy check works (see ``_check_policy``).
+    """
     non_certified: list[str] = []
     for page in report.pages.values():
         for visual in page.visuals.values():
@@ -65,16 +72,16 @@ def _check_block_lifecycle(
             check_name="block_lifecycle",
             passed=False,
             message=(
-                "The following blocks are not certified: "
+                "提醒：下列資料尚未經過正式認證（仍可分享，請自行確認資料可信）："
                 + ", ".join(sorted(set(non_certified)))
             ),
-            blocking=True,
+            blocking=False,
         )
     return GateCheckResult(
         check_name="block_lifecycle",
         passed=True,
         message="All referenced blocks are certified.",
-        blocking=True,
+        blocking=False,
     )
 
 
