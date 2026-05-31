@@ -139,6 +139,16 @@ def _build_figure(
     )
     fig.update_xaxes(showgrid=True, gridcolor="rgba(128,128,128,0.15)")
     fig.update_yaxes(showgrid=True, gridcolor="rgba(128,128,128,0.15)")
+    # Round 135: data labels on each point (Power BI parity). Only affects the
+    # metric traces added above — the trend/forecast traces are appended later.
+    if style.extra.get("data_labels"):
+        fmt = style.extra.get("number_format", ",.0f")
+        fig.update_traces(
+            mode="lines+markers+text",
+            texttemplate="%{y:" + fmt + "}",
+            textposition="top center",
+            cliponaxis=False,
+        )
     _apply_axis_and_legend_format(fig, style)
     return fig
 
@@ -167,17 +177,27 @@ def _apply_axis_and_legend_format(fig, style) -> None:
         if y_max is not None:
             opts["maxallowed"] = y_max
         fig.update_yaxes(autorangeoptions=opts)
-    pos = extra.get("legend_position")
-    if pos and pos != "hide":
-        anchors = {
-            "top": dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            "bottom": dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5),
-            "right": dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02),
-            "left": dict(orientation="v", yanchor="top", y=1, xanchor="right", x=-0.1),
-        }
-        fig.update_layout(showlegend=True, legend=anchors.get(pos, anchors["top"]))
-    elif pos == "hide":
+    apply_legend_position(fig, extra)
+
+
+_LEGEND_ANCHORS = {
+    "top": dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    "bottom": dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5),
+    "right": dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02),
+    "left": dict(orientation="v", yanchor="top", y=1, xanchor="right", x=-0.1),
+}
+
+
+def apply_legend_position(fig, extra) -> None:
+    """Round 135: shared legend placement (line/bar/pie) so every chart that
+    offers the 圖例位置 control honors it. 'hide' turns the legend off."""
+    pos = (extra or {}).get("legend_position")
+    if not pos:
+        return
+    if pos == "hide":
         fig.update_layout(showlegend=False)
+        return
+    fig.update_layout(showlegend=True, legend=_LEGEND_ANCHORS.get(pos, _LEGEND_ANCHORS["top"]))
 
 
 def _handle_selection(

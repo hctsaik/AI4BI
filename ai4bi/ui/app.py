@@ -61,6 +61,7 @@ from ai4bi.ui.change_panel import render_change_panel, render_change_results  # 
 from ai4bi.ui.basket_panel import render_basket_panel, render_basket_results  # Round 077
 from ai4bi.ui.rfm_panel import render_rfm_panel, render_rfm_results  # Round 082
 from ai4bi.ui.trend_streak_panel import render_trend_streak_panel, render_trend_streak_results  # Round 085
+from ai4bi.ui.format_controls import FORMAT_CONTROL_VTYPES as _FMT_VTYPES  # Round 135
 from ai4bi.report.share_auth import hash_password, verify_password  # Round 064
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
@@ -1929,7 +1930,7 @@ def _render_format_controls(component_id, visual, report, cache) -> None:
     st.markdown("**🎛️ 格式**")
 
     # ── sort order (value-based) — for bar/pie/table, not time series ──
-    if vtype in ("bar_chart", "pie_chart", "table") and visual.query.metrics:
+    if vtype in _FMT_VTYPES["sort"] and visual.query.metrics:
         alias = visual.query.metrics[0].alias or visual.query.metrics[0].metric_name
         cur = visual.query.sort[0].direction.value if visual.query.sort else "desc"
         sort_label = {"desc": "由高到低", "asc": "由低到高"}
@@ -1948,7 +1949,7 @@ def _render_format_controls(component_id, visual, report, cache) -> None:
             workspace.accept_pending(); cache.invalidate_all(); st.rerun()
 
     # ── Y-axis range + scale (line/bar) ──
-    if vtype in ("line_chart", "bar_chart"):
+    if vtype in _FMT_VTYPES["y_axis"]:
         c1, c2, c3 = st.columns(3)
         ymin = c1.text_input("Y 最小", value=("" if extra.get("y_min") is None else str(extra.get("y_min"))),
                              key=f"fmt_ymin_{component_id}", placeholder="自動")
@@ -1968,7 +1969,7 @@ def _render_format_controls(component_id, visual, report, cache) -> None:
             cache.invalidate_all(); st.rerun()
 
     # ── data labels toggle (bar/line/pie) ──
-    if vtype in ("bar_chart", "line_chart", "pie_chart"):
+    if vtype in _FMT_VTYPES["data_labels"]:
         cur_dl = bool(extra.get("data_labels"))
         new_dl = st.checkbox("顯示資料標籤", value=cur_dl, key=f"fmt_dl_{component_id}")
         if new_dl != cur_dl:
@@ -1976,7 +1977,7 @@ def _render_format_controls(component_id, visual, report, cache) -> None:
             cache.invalidate_all(); st.rerun()
 
     # ── legend position ──
-    if vtype in ("line_chart", "bar_chart", "pie_chart"):
+    if vtype in _FMT_VTYPES["legend_position"]:
         _LEG = {"預設": "top", "底部": "bottom", "右側": "right", "隱藏": "hide"}
         cur_leg = extra.get("legend_position") or "top"
         inv = {v: k for k, v in _LEG.items()}

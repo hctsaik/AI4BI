@@ -70,6 +70,38 @@ def _handle_selection(event: Any, query_spec: VisualQuerySpec, label_col: str) -
     st.session_state[_LEGACY_CROSS_FILTER_KEY] = payload
 
 
+def _build_figure(df: pd.DataFrame, val_col: str, name_col, style: VisualizationSpec):
+    """Construct the pie/donut Figure. Honors Format-pane controls offered for a
+    pie (data_labels, legend_position) so the UI toggles aren't silently dropped."""
+    hole: float = float(style.extra.get("hole", 0.4))
+    show_percent: bool = bool(style.extra.get("show_percent", True))
+    text_info = "percent+label" if show_percent else "label"
+    # Round 135: 顯示資料標籤 toggle adds the raw value onto each slice.
+    if style.extra.get("data_labels"):
+        text_info = text_info + "+value"
+
+    fig = px.pie(
+        df,
+        values=val_col,
+        names=name_col,
+        hole=hole,
+        title=style.title or "",
+        height=style.height_px,
+        color_discrete_sequence=px.colors.qualitative.Plotly,
+    )
+    fig.update_traces(textinfo=text_info, pull=0.02)
+    fig.update_layout(
+        template="plotly_white",
+        paper_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=20, r=20, t=40, b=20),
+        showlegend=style.show_legend,
+    )
+    # Round 135: shared legend placement (圖例位置) — previously ignored on pies.
+    from ai4bi.ui.components.line_chart import apply_legend_position
+    apply_legend_position(fig, style.extra)
+    return fig
+
+
 def render_pie_chart(
     query_spec: VisualQuerySpec,
     df: pd.DataFrame,
@@ -97,26 +129,7 @@ def render_pie_chart(
     if query_spec.dimensions:
         name_col = _resolve_col(query_spec.dimensions[0], df)
 
-    hole: float = float(style.extra.get("hole", 0.4))
-    show_percent: bool = bool(style.extra.get("show_percent", True))
-    text_info = "percent+label" if show_percent else "label"
-
-    fig = px.pie(
-        df,
-        values=val_col,
-        names=name_col,
-        hole=hole,
-        title=style.title or "",
-        height=style.height_px,
-        color_discrete_sequence=px.colors.qualitative.Plotly,
-    )
-    fig.update_traces(textinfo=text_info, pull=0.02)
-    fig.update_layout(
-        template="plotly_white",
-        paper_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=20, r=20, t=40, b=20),
-        showlegend=style.show_legend,
-    )
+    fig = _build_figure(df, val_col, name_col, style)
 
     event = st.plotly_chart(
         fig,
@@ -146,5 +159,5 @@ def render_pie_chart(
 
     logger.debug(
         "[pie_chart] spec=%s hole=%.2f rows=%d",
-        query_spec.spec_id, hole, len(df),
+        query_spec.spec_id, float(style.extra.get("hole", 0.4)), len(df),
     )
