@@ -15,3 +15,7 @@ font = "sans serif"
 # + visible cell borders so columns read as a proper, professional header.
 dataframeHeaderBackgroundColor = "#DCE4EE"
 dataframeBorderColor = "#C4D0DE"
+# Round 166: the header text is also drawn at NORMAL weight (fontWeights.normal)
+# in a faded color, so on the band it still read faint. Raise the base font
+# weight to medium (500) so header (and body) text is crisper and more legible.
+baseFontWeight = 500

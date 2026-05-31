@@ -57,6 +57,25 @@ def test_scenario_average_above_95():
     assert sum(scores) / len(scores) >= 95.0
 
 
+def test_on_color_picks_readable_text_for_any_background():
+    """on_color must pick the higher-contrast text for any surface, and the
+    primary-button label must clear WCAG-AA for large/UI text (>= 3:1)."""
+    from ai4bi.ui.theme import on_color, _INK
+    from tests.ux.theme_score import contrast_ratio
+    assert on_color("#000000") == "#FFFFFF"
+    assert on_color("#FFFFFF") == _INK  # light bg → dark ink
+    for key, th in theme.all_themes().items():
+        ink = on_color(th.primary_color)
+        chosen = contrast_ratio(ink, th.primary_color)
+        other = contrast_ratio("#FFFFFF" if ink == _INK else _INK, th.primary_color)
+        # it really is the better of the two options…
+        assert chosen >= other, f"{key}: on_color picked the lower-contrast text"
+        # …and clears AA for large/bold button text.
+        assert chosen >= 3.0, (
+            f"{key}: primary button text {ink} on {th.primary_color} = {chosen:.2f} < 3:1"
+        )
+
+
 def test_no_palette_color_equals_text_color():
     # a categorical color must not masquerade as the body text color.
     from tests.ux.theme_score import delta_e

@@ -314,6 +314,40 @@ def colorway(theme: Optional[Theme] = None) -> list[str]:
     return list((theme or get_active_theme()).qualitative)
 
 
+def _relative_luminance(hex_color: str) -> float:
+    """WCAG relative luminance of an sRGB hex color (0=black … 1=white)."""
+    h = hex_color.strip().lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    try:
+        r, g, b = (int(h[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+    except (ValueError, IndexError):
+        return 1.0
+
+    def _lin(c: float) -> float:
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * _lin(r) + 0.7152 * _lin(g) + 0.0722 * _lin(b)
+
+
+_INK = "#16202B"   # near-black ink for light surfaces
+
+
+def on_color(background_hex: str) -> str:
+    """Return the most legible text color for the given background.
+
+    The rule the user asked us to always honor: text must contrast with its
+    surface (a dark background needs white text). Rather than a fixed luminance
+    cut-off, we pick whichever of white / dark-ink gives the higher WCAG
+    contrast ratio — so a deep navy gets white, while a bright accent like
+    #118DFF correctly gets dark ink (which reads better there).
+    """
+    bg = _relative_luminance(background_hex)
+    white_contrast = (1.0 + 0.05) / (bg + 0.05)
+    dark_contrast = (bg + 0.05) / (_relative_luminance(_INK) + 0.05)
+    return "#FFFFFF" if white_contrast >= dark_contrast else _INK
+
+
 def apply_to_fig(fig, theme: Optional[Theme] = None):
     """Stamp a Plotly figure with the active theme.
 
@@ -359,6 +393,7 @@ def app_css(theme: Optional[Theme] = None) -> str:
     bordered containers that wrap each visual.
     """
     th = theme or get_active_theme()
+    on_primary = on_color(th.primary_color)  # white on dark accents, dark on light
     return f"""
 <style>
 :root {{
@@ -366,17 +401,36 @@ def app_css(theme: Optional[Theme] = None) -> str:
   --ai4bi-bg: {th.bg_color};
   --ai4bi-bg2: {th.secondary_bg_color};
   --ai4bi-text: {th.chrome_text_color};
+  --ai4bi-on-primary: {on_primary};
 }}
 .stApp {{ background-color: {th.bg_color}; }}
 section[data-testid="stSidebar"] {{ background-color: {th.secondary_bg_color}; }}
-.stApp, .stApp p, .stApp label, .stApp span, .stApp li,
+/* Body text (incl. the dark midnight theme). Buttons/colored surfaces below
+   re-assert their own contrast-checked text with !important so this can't
+   wash them out. */
+.stApp p, .stApp label, .stApp span, .stApp li,
 .stApp h1, .stApp h2, .stApp h3, .stApp h4 {{ color: {th.chrome_text_color}; }}
 body, .stApp {{ font-family: {th.font_family}; }}
-/* primary buttons + accents */
+/* Primary / form-submit buttons: colored background → contrast-checked text.
+   Dark accent ⇒ white label; light accent ⇒ dark label (luminance-based).
+   !important + descendant rule so the body-text color above can't override it. */
 .stButton > button[kind="primary"],
-.stButton > button[data-testid="baseButton-primary"] {{
+.stButton > button[kind="primaryFormSubmit"],
+div[data-testid="stFormSubmitButton"] button {{
   background-color: {th.primary_color};
   border-color: {th.primary_color};
+  color: {on_primary} !important;
+}}
+.stButton > button[kind="primary"] *,
+.stButton > button[kind="primaryFormSubmit"] *,
+div[data-testid="stFormSubmitButton"] button * {{ color: {on_primary} !important; }}
+.stButton > button[kind="primary"]:hover,
+.stButton > button[kind="primary"]:focus,
+.stButton > button[kind="primary"]:active {{
+  background-color: {th.primary_color};
+  border-color: {th.primary_color};
+  color: {on_primary} !important;
+  filter: brightness(1.08);
 }}
 /* bordered visual cards inherit a subtle themed surface */
 div[data-testid="stVerticalBlockBorderWrapper"] {{

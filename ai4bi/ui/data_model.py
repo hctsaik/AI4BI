@@ -40,28 +40,52 @@ def _user_loaded_blocks() -> dict[str, DataBlockContract]:
     return {bid: c for bid, c in all_blocks.items() if bid in meta}
 
 
-def render_data_source_manager() -> None:
-    """Round 147: unified data-source manager — one list of every loaded source
-    (uploaded files + DB-connector imports) with origin, row count, and remove.
+def render_data_source_manager(report_sources: "dict | None" = None) -> None:
+    """Round 147 / 166: unified data-source manager — one list of EVERY source
+    powering the current report, so the user can always see how many there are.
 
-    Both upload.py and connector_panel.py write to the same ``user_blocks`` /
-    ``meta`` dicts, so this is the single place to see and manage all sources —
-    Power BI's "Queries" / Power Query pane equivalent.
+    Shows two groups:
+      * 內建／示範資料 — blocks the current report uses that the user didn't upload
+        (e.g. the retail / semiconductor demo). Read-only (they ARE the report).
+      * 你載入的資料 — files/DB imports the user added (meta-tracked, removable).
+
+    ``report_sources`` is ``{block_id: contract}`` for the blocks the current
+    report references (passed from app._report_block_contracts). When omitted we
+    fall back to just the user-loaded sources (old behaviour).
     """
     meta: dict = st.session_state.get(_USER_BLOCK_META_KEY, {})
-    # Round 155/156: only GENUINELY user-loaded sources (meta-tracked); demo seed
-    # blocks have no meta, so they don't masquerade as "your data".
-    user_blocks = _user_loaded_blocks()
-    if not user_blocks:
+    uploads = _user_loaded_blocks()  # genuinely user-loaded (meta-tracked)
+    report_sources = dict(report_sources or {})
+    # built-in / demo = report blocks the user didn't upload themselves
+    builtin = {bid: c for bid, c in report_sources.items() if bid not in meta}
+
+    total = len(builtin) + len(uploads)
+    if total == 0:
         st.info(
-            "目前沒有自己上傳的資料來源。用下方「上傳檔案」或「連接資料庫」加入第一份資料；"
+            "目前沒有資料來源。用下方「上傳檔案」或「連接資料庫」加入第一份資料；"
             "加入 2 份以上後，可到 **🔗 模型** 模式把它們關聯起來。",
             icon="📂",
         )
         return
+
     n_rel = len(get_user_semantic_model().get("relationships", []))
-    st.caption(f"**已載入 {len(user_blocks)} 個資料來源 · {n_rel} 個關聯**")
-    for bid, contract in list(user_blocks.items()):
+    st.caption(f"**這份報表使用 {total} 個資料來源 · {n_rel} 個關聯**")
+
+    def _cols_count(contract) -> int:
+        return len(getattr(contract, "columns", []) or [])
+
+    # ── built-in / demo sources (read-only) ─────────────────────────────
+    for bid, contract in builtin.items():
+        label = getattr(contract, "description", None) or bid
+        st.markdown(
+            f"**{label}** · 📊 內建／示範資料  \n"
+            f"<span style='color:#888;font-size:0.85em'>"
+            f"{_cols_count(contract)} 欄 · `{bid}`</span>",
+            unsafe_allow_html=True,
+        )
+
+    # ── user-loaded sources (removable) ─────────────────────────────────
+    for bid, contract in uploads.items():
         m = meta.get(bid, {})
         origin = _SOURCE_BADGE.get(str(m.get("source", "")).lower(), "📄 上傳檔案")
         cols = st.columns([4, 1])
@@ -78,7 +102,8 @@ def render_data_source_manager() -> None:
                 st.session_state.get(_USER_BLOCKS_KEY, {}).pop(bid, None)
                 st.session_state.get(_USER_BLOCK_META_KEY, {}).pop(bid, None)
                 st.rerun()
-    if len(user_blocks) >= 2:
+
+    if total >= 2:
         st.caption("💡 想把多份資料合併分析？到 **🔗 模型** 模式建立關聯（join）。")
     st.divider()
 

@@ -913,7 +913,7 @@ def _render_draft_controls(
             # Unified data-source manager: one place to add & inspect every source.
             st.subheader("資料來源")
             st.caption("在這裡上傳檔案、連接資料庫，並管理已載入的資料。")
-            render_data_source_manager()
+            render_data_source_manager(_report_block_contracts(report))
             render_upload_panel()
             render_connector_panel()
             _user_meta: dict = st.session_state.get(_USER_BLOCK_META_KEY, {})
