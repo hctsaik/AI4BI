@@ -194,13 +194,15 @@ def render_source_inspector(contract, *, display_name: str, origin: str,
                             key_prefix: str, default_sample: int = 20,
                             subtitle: Optional[str] = None,
                             embedded: bool = False) -> None:
-    """Render one source's schema (free) + an opt-in sampled preview.
+    """Render one source CONTENT-FIRST: a small sampled preview of the actual
+    rows up top, with the schema/types tucked into a click-to-open expander.
 
-    Nothing expensive runs until the user ticks 預覽 — schema and shape come
-    from metadata only. ``subtitle`` adds an optional line (e.g. upload time).
-    ``embedded`` (Round 176) drops the outer expander so the schema shows
-    immediately — used by the workspace master-detail detail pane, where the
-    source is already chosen on the left, so re-previewing is a single click.
+    Round 177: a fab engineer judges a dataset by its values (yield 0–1 vs 0–100,
+    date span, right lot), not by a column-type table — so the sample leads and
+    the schema is secondary. Resource-safe: the preview is the first N rows only
+    (sample_dataframe → head(N), cached); the full table is never scanned. The
+    distinct-count/range stats stay opt-in. ``embedded`` (Round 176) drops the
+    outer expander for the workspace master-detail detail pane.
     """
     import contextlib
     import streamlit as st
@@ -222,30 +224,54 @@ def render_source_inspector(contract, *, display_name: str, origin: str,
             line += f"　|　{subtitle}"
         st.caption(line)
 
-        # --- schema (free; no rows loaded) ---
-        rows = schema_rows(contract)
-        if rows:
-            st.markdown("**欄位結構（schema）**")
-            # column search for wide tables (no extra cost — filters in memory)
-            if len(rows) > 12:
-                q = st.text_input("搜尋欄位", key=f"{key_prefix}_q",
-                                  placeholder="輸入欄位名片段…").strip().lower()
-                if q:
-                    rows = [r for r in rows if q in str(r["欄位"]).lower()]
-                    st.caption(f"符合「{q}」：{len(rows)} 欄")
-            schema_df = pd.DataFrame(rows)
-            st.dataframe(schema_df, width="stretch", hide_index=True)
-            st.download_button(
-                "⬇️ 匯出 schema (CSV)",
-                schema_df.to_csv(index=False).encode("utf-8-sig"),
-                file_name=f"{shape.block_id}_schema.csv", mime="text/csv",
-                key=f"{key_prefix}_dl",
-            )
-        else:
-            st.caption("此來源未宣告欄位結構。")
-
-        # --- column display prefs (S4): rename / hide for the workspace view ---
+        # Round 177: CONTENT-FIRST. A fab engineer wants to see what the data
+        # actually looks like (is yield 0–1 or 0–100? which dates? right lot?) —
+        # that's the judgement; the schema (types) is secondary, click-to-open.
+        # Resource-safe: the sample is the first N rows only (sample_dataframe →
+        # head(N), cached); the full table is never scanned/sent to the browser.
         prefs = get_column_prefs(shape.block_id) if embedded else None
+        try:
+            sample, prof = _cached_sample_profile(
+                _source_version(contract), default_sample, contract)
+        except Exception as exc:  # noqa: BLE001 — preview must never break the page
+            sample, prof = None, []
+            st.warning(f"無法取樣預覽：{exc}")
+
+        if shape.is_large:
+            st.caption(f"⚠️ 大型資料：以下只是**前 {default_sample} 列取樣**，不是全表"
+                       "（不會把整張表送進瀏覽器或做全表掃描）。")
+        if sample is not None and not sample.empty:
+            st.markdown(f"**資料內容（前 {len(sample)} 列取樣）**")
+            _disp = sample
+            if prefs and (prefs["alias"] or prefs["hidden"]):
+                _disp = apply_column_prefs(sample, prefs["alias"], prefs["hidden"])
+            st.dataframe(_disp, width="stretch", hide_index=True)
+        else:
+            st.caption("沒有可預覽的資料。")
+
+        # --- schema is now SECONDARY: collapsed, open only when you need types ---
+        rows = schema_rows(contract)
+        with st.expander("🔧 欄位結構（型態／可空，需要時點開）", expanded=False):
+            if rows:
+                _view = rows
+                if len(rows) > 12:
+                    q = st.text_input("搜尋欄位", key=f"{key_prefix}_q",
+                                      placeholder="輸入欄位名片段…").strip().lower()
+                    if q:
+                        _view = [r for r in rows if q in str(r["欄位"]).lower()]
+                        st.caption(f"符合「{q}」：{len(_view)} 欄")
+                schema_df = pd.DataFrame(_view)
+                st.dataframe(schema_df, width="stretch", hide_index=True)
+                st.download_button(
+                    "⬇️ 匯出欄位清單 (CSV)",
+                    schema_df.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"{shape.block_id}_schema.csv", mime="text/csv",
+                    key=f"{key_prefix}_dl",
+                )
+            else:
+                st.caption("此來源未宣告欄位結構。")
+
+        # --- column display prefs (S4): rename / hide for this preview ---
         if embedded and rows:
             with st.expander("⚙️ 預覽顯示設定（改名稱／隱藏欄位）", expanded=False):
                 st.caption("整理**這份預覽**要怎麼顯示：把欄位改成看得懂的名稱、或暫時隱藏不需要的欄位。"
@@ -269,25 +295,9 @@ def render_source_inspector(contract, *, display_name: str, origin: str,
                         elif not hidden_now and col in prefs["hidden"]:
                             prefs["hidden"].remove(col)
 
-        # --- opt-in sampled preview (the only path that touches data) ---
-        if shape.is_large:
-            st.caption("⚠️ 大型資料：預覽只取樣前幾列，不會把整張表送進瀏覽器、也不會做全表掃描。")
-        want = st.checkbox(f"🔍 載入取樣預覽與統計（前 {default_sample} 列）",
-                           key=f"{key_prefix}_prev")
-        if want:
-            try:
-                # cached per (source-version, n): computed once, not every rerun.
-                sample, prof = _cached_sample_profile(
-                    _source_version(contract), default_sample, contract)
-            except Exception as exc:  # noqa: BLE001 — preview must never break the page
-                st.warning(f"無法取樣預覽：{exc}")
-                return
-            if sample is None or sample.empty:
-                st.info("沒有可預覽的資料。")
-                return
-            if prefs and (prefs["alias"] or prefs["hidden"]):
-                sample = apply_column_prefs(sample, prefs["alias"], prefs["hidden"])
-            st.dataframe(sample, width="stretch", hide_index=True)
-            st.caption(f"以下統計為**取樣估計**（基於前 {len(sample)} 列,非全表,僅供概覽）：")
-            st.dataframe(pd.DataFrame(prof), width="stretch", hide_index=True)
-            st.caption("⚠️＝此欄空白偏多（非空率 < 90%）　·　「種類數」＝此欄有幾種不同的值")
+        # --- sampled stats stay opt-in (distinct counts etc. — more than head) ---
+        if sample is not None and not sample.empty:
+            if st.checkbox("📊 顯示取樣統計（非空率／種類數／範圍）", key=f"{key_prefix}_prof"):
+                st.caption(f"以下為**取樣估計**（基於前 {len(sample)} 列,非全表,僅供概覽）：")
+                st.dataframe(pd.DataFrame(prof), width="stretch", hide_index=True)
+                st.caption("⚠️＝此欄空白偏多（非空率 < 90%）　·　「種類數」＝此欄有幾種不同的值")

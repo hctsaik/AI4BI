@@ -83,6 +83,16 @@ def test_data_workspace_renders_with_source_selector():
     assert "_ws_source_sel" in keys
 
 
+def test_workspace_shows_content_sample_by_default():
+    # Round 177: content-first — the selected source's sample rows render without
+    # ticking any checkbox (previously the preview was opt-in behind a checkbox).
+    at = _new_app()
+    at.session_state["_nav_mode"] = "🗂️ 資料"
+    at.run(timeout=60)
+    assert not at.exception
+    assert len(at.dataframe) >= 1  # a content sample is shown by default
+
+
 def test_data_workspace_selection_persists_across_rerun():
     at = _new_app()
     at.session_state["_nav_mode"] = "🗂️ 資料"
