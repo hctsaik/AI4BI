@@ -1967,6 +1967,12 @@ def _render_visual_cell(
                          key=f"edit_{page_id}_{component_id}",
                          help="在右側「視覺化」面板編輯這張圖"):
                 st.session_state["_edit_target_request"] = component_id
+                # Round 175: the right 🎨 視覺化 pane lives only in 探索 mode. When
+                # ✏️ is clicked from a full-width mode (分析/模型/資料) the chart was
+                # selected but no pane appeared ("右側不見了"). Jump to 探索 so the
+                # editor is always where the button promises it will be.
+                if "探索" not in st.session_state.get("_nav_mode", "🔍 探索"):
+                    st.session_state["_pending_nav_mode"] = "🔍 探索"
                 st.rerun()
         with h_cols[2]:
             if st.button("↑", key=f"up_{page_id}_{component_id}", disabled=(idx == 0), help="上移"):

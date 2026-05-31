@@ -62,6 +62,28 @@ def test_dropdown_fallback_still_selects():
     assert app.session_state["selected_component_id"] == _CID
 
 
+def test_edit_button_jumps_to_explore_from_fullwidth_mode():
+    """Round 175: the right 🎨 視覺化 pane lives only in 探索 mode. Clicking ✏️
+    from a full-width mode (分析/模型/資料) used to select the chart but show no
+    pane ('右側不見了'). It must now jump to 探索 so the editor appears."""
+    app = _new_app()
+    app.session_state["_nav_mode"] = "📊 分析"
+    app.run(timeout=30)
+    _edit_button(app).click().run(timeout=30)
+    assert not app.exception
+    assert app.session_state["_nav_mode"] == "🔍 探索"
+    assert app.session_state["selected_component_id"] == _CID
+
+
+def test_edit_button_keeps_explore_mode_when_already_there():
+    """In 探索 mode the ✏️ must NOT trigger a spurious mode change."""
+    app = _new_app()  # defaults to 探索
+    assert app.session_state["_nav_mode"] == "🔍 探索"
+    _edit_button(app).click().run(timeout=30)
+    assert app.session_state["_nav_mode"] == "🔍 探索"
+    assert app.session_state["selected_component_id"] == _CID
+
+
 def test_pane_sticky_css_is_emitted():
     # CSS layout can't be asserted in AppTest (no CSSOM); smoke that the rule is
     # emitted. Real sticky behavior is verified by the Playwright e2e.
