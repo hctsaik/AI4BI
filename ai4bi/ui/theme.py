@@ -348,6 +348,20 @@ def on_color(background_hex: str) -> str:
     return "#FFFFFF" if white_contrast >= dark_contrast else _INK
 
 
+def on_accent(background_hex: str) -> str:
+    """Text color for a *filled accent* (e.g. a primary button).
+
+    The user's convention: a colored/dark accent should get **white** text.
+    We honor that whenever white clears WCAG-AA for large/UI text (>= 3:1),
+    and only fall back to dark ink for an accent too light for white (so the
+    label never drops below AA-large). All our theme primaries are dark enough
+    for white except a very bright one like midnight's #4C9AFF.
+    """
+    bg = _relative_luminance(background_hex)
+    white_contrast = (1.0 + 0.05) / (bg + 0.05)
+    return "#FFFFFF" if white_contrast >= 3.0 else _INK
+
+
 def apply_to_fig(fig, theme: Optional[Theme] = None):
     """Stamp a Plotly figure with the active theme.
 
@@ -393,7 +407,8 @@ def app_css(theme: Optional[Theme] = None) -> str:
     bordered containers that wrap each visual.
     """
     th = theme or get_active_theme()
-    on_primary = on_color(th.primary_color)  # white on dark accents, dark on light
+    on_primary = on_accent(th.primary_color)  # prefer white on the accent (AA-large)
+    on_secondary = on_color(th.secondary_bg_color)  # readable on the secondary surface
     return f"""
 <style>
 :root {{
@@ -432,6 +447,22 @@ div[data-testid="stFormSubmitButton"] button * {{ color: {on_primary} !important
   color: {on_primary} !important;
   filter: brightness(1.08);
 }}
+/* Secondary / tertiary / download / form-submit-secondary buttons: theme the
+   surface explicitly so they never fall back to a Streamlit default that
+   clashes with the chrome (esp. the dark theme). Text = contrast-checked on
+   the secondary surface, !important so the body-text rule can't wash it out. */
+.stButton > button[kind="secondary"],
+.stButton > button[kind="secondaryFormSubmit"],
+.stButton > button[kind="tertiary"],
+div[data-testid="stDownloadButton"] button {{
+  background-color: {th.secondary_bg_color};
+  border-color: {th.grid_color};
+  color: {on_secondary} !important;
+}}
+.stButton > button[kind="secondary"] *,
+.stButton > button[kind="secondaryFormSubmit"] *,
+.stButton > button[kind="tertiary"] *,
+div[data-testid="stDownloadButton"] button * {{ color: {on_secondary} !important; }}
 /* bordered visual cards inherit a subtle themed surface */
 div[data-testid="stVerticalBlockBorderWrapper"] {{
   border-color: {th.grid_color};

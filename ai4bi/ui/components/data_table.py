@@ -241,9 +241,13 @@ def render_data_table(
                         q1, q3 = s.quantile(0.25), s.quantile(0.75)
                         iqr = q3 - q1
                         mask = (display_df[nc] < q1 - 1.5 * iqr) | (display_df[nc] > q3 + 1.5 * iqr)
+                    # Round 169r: contrast-checked text on the highlight color
+                    # (a user-chosen light color would make white invisible).
+                    from ai4bi.ui.theme import on_color as _on_color
+                    _fg = _on_color(color)
                     styler = styler.apply(
-                        lambda col_data, m=mask, c=color: [
-                            f"background-color:{c};color:white" if v else "" for v in m
+                        lambda col_data, m=mask, c=color, fg=_fg: [
+                            f"background-color:{c};color:{fg}" if v else "" for v in m
                         ],
                         subset=[nc],
                     )
@@ -255,7 +259,7 @@ def render_data_table(
     # Render
     # ------------------------------------------------------------------ #
     if title:
-        st.caption(f"**{title}**")
+        st.markdown(f"**{title}**")  # match the panels' table-title style (consistency)
 
     if styled_df is not None:
         st.dataframe(

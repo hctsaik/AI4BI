@@ -76,6 +76,29 @@ def test_on_color_picks_readable_text_for_any_background():
         )
 
 
+def test_on_accent_prefers_white_and_clears_aa_large():
+    """Filled accents (primary buttons): white when it clears AA-large (3:1),
+    dark ink only when white can't — and the chosen text always >= 3:1."""
+    from ai4bi.ui.theme import on_accent
+    from tests.ux.theme_score import contrast_ratio
+    for key, th in theme.all_themes().items():
+        ink = on_accent(th.primary_color)
+        cr = contrast_ratio(ink, th.primary_color)
+        assert cr >= 3.0, f"{key}: button text {ink} on {th.primary_color} = {cr:.2f} < 3:1"
+        # white must be used unless it would fail AA-large
+        if contrast_ratio("#FFFFFF", th.primary_color) >= 3.0:
+            assert ink == "#FFFFFF", f"{key}: should use white on {th.primary_color}"
+
+
+def test_secondary_surface_text_is_legible():
+    """Secondary/download buttons sit on the secondary surface — its text must
+    clear WCAG-AA (4.5:1)."""
+    from ai4bi.ui.theme import on_color
+    from tests.ux.theme_score import contrast_ratio
+    for key, th in theme.all_themes().items():
+        assert contrast_ratio(on_color(th.secondary_bg_color), th.secondary_bg_color) >= 4.5, key
+
+
 def test_no_palette_color_equals_text_color():
     # a categorical color must not masquerade as the body text color.
     from tests.ux.theme_score import delta_e

@@ -1,6 +1,24 @@
 import { useEffect, useMemo, useState } from "react";
 import { Streamlit, ComponentProps } from "streamlit-component-lib";
 
+// Contrast-checked text for a filled accent (mirror of theme.on_accent):
+// prefer white on the accent; fall back to dark ink only when white would drop
+// below WCAG-AA for large/UI text (3:1) — e.g. a very bright accent.
+function onAccent(hex: string): string {
+  const h = (hex || "").replace("#", "");
+  if (h.length < 6) return "#FFFFFF";
+  const lin = (c: number) => {
+    const s = c / 255;
+    return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  };
+  const r = lin(parseInt(h.slice(0, 2), 16));
+  const g = lin(parseInt(h.slice(2, 4), 16));
+  const b = lin(parseInt(h.slice(4, 6), 16));
+  const L = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  const whiteContrast = 1.05 / (L + 0.05);
+  return whiteContrast >= 3.0 ? "#FFFFFF" : "#16202B";
+}
+
 // ---- types ---------------------------------------------------------------
 type Field = { name: string; label: string; kind: "measure" | "dimension" };
 type Wells = { values: string[]; axis: string[]; legend: string[] };
@@ -211,7 +229,7 @@ function FieldWell({ args, theme }: ComponentProps) {
                 style={{
                   fontSize: 12, padding: "4px 10px", borderRadius: 6, cursor: dis ? "not-allowed" : "pointer",
                   border: `1px solid ${sel ? t.primary : t.border}`,
-                  background: sel ? t.primary : t.bg, color: sel ? "#fff" : t.text,
+                  background: sel ? t.primary : t.bg, color: sel ? onAccent(t.primary) : t.text,
                   opacity: dis ? 0.4 : 1,
                 }}
                 title={dis ? "樞紐需要兩個維度" : ""}
