@@ -74,6 +74,20 @@ def _numeric_cols(contract) -> list[str]:
             if getattr(c, "data_type", "") in ("integer", "float")]
 
 
+def _existing_block_ids() -> set:
+    from ai4bi.ui.upload import _USER_BLOCK_META_KEY
+    return set(st.session_state.get(_USER_BLOCK_META_KEY, {}).keys())
+
+
+def _confirm_overwrite(block_id: str, display_name: str, key: str) -> bool:
+    """If a block with this id already exists, warn and require explicit
+    confirmation so the user never silently overwrites a dataset."""
+    if block_id not in _existing_block_ids():
+        return True
+    st.warning(f"已有名為「{display_name}」的資料；建立會**覆蓋**它。")
+    return st.checkbox("我確認要覆蓋同名資料", key=key)
+
+
 def render_create_data_panel(report_sources: "dict | None" = None) -> None:
     """Render the 合併 / 樞紐彙總 creators in the ➕ 新增資料 tab."""
     from ai4bi.ui.upload import _slugify
@@ -102,10 +116,11 @@ def render_create_data_panel(report_sources: "dict | None" = None) -> None:
                 st.dataframe(df.head(5), width="stretch", hide_index=True)
                 nm = st.text_input("新資料的名稱", value="合併資料", key="union_name")
                 bid = _slugify(nm) or "merged_data"
+                ok = _confirm_overwrite(bid, nm, key="union_overwrite")
                 if st.button("✅ 建立合併資料", key="union_create", type="primary",
-                             disabled=df.empty):
+                             disabled=df.empty or not ok):
                     _register_block(df, bid, nm, source="derived")
-                    st.success(f"✅ 已建立「{nm}」（{len(df):,} 列）")
+                    st.success(f"✅ 已建立「{nm}」（最多 {len(df):,} 列）")
                     st.rerun()
         elif picked:
             st.info("請再選一份資料才能合併。")
@@ -125,10 +140,13 @@ def render_create_data_panel(report_sources: "dict | None" = None) -> None:
                            format_func=lambda a: _AGG_LABELS[a], key="pivot_agg")
         measure = None
         if agg != "count":
-            if not num_cols:
-                st.info("這份資料沒有可彙總的數值欄位，可改用「筆數 (COUNT)」。")
             measure = st.selectbox("彙總欄位（數值）", num_cols or ["—"], key="pivot_measure")
-        if group_cols:
+        # A non-count aggregate needs a real numeric column; guide the user to
+        # COUNT instead of letting them hit an error (S9 edge case).
+        valid_measure = (agg == "count") or (measure in num_cols)
+        if group_cols and not valid_measure:
+            st.info("這個彙總方式需要一個數值欄位；請選數值欄位，或改用「筆數 (COUNT)」。")
+        if group_cols and valid_measure:
             try:
                 src_df = _capped_frame(contract)
                 out = aggregate_frame(src_df, group_cols,
@@ -140,8 +158,9 @@ def render_create_data_panel(report_sources: "dict | None" = None) -> None:
                 st.dataframe(out.head(5), width="stretch", hide_index=True)
                 nm = st.text_input("新資料的名稱", value=f"{names[bid_src]}_摘要", key="pivot_name")
                 bid_new = _slugify(nm) or "summary_data"
+                ok = _confirm_overwrite(bid_new, nm, key="pivot_overwrite")
                 if st.button("✅ 建立彙總資料", key="pivot_create", type="primary",
-                             disabled=out.empty):
+                             disabled=out.empty or not ok):
                     _register_block(out, bid_new, nm, source="derived")
                     st.success(f"✅ 已建立「{nm}」（{len(out):,} 列）")
                     st.rerun()

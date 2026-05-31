@@ -391,6 +391,13 @@ def render_join_builder(expanded: bool = False) -> None:
         block_ids = list(user_blocks.keys())
 
         st.caption("**建立新的關聯**")
+        # Round 176: a 1:N detection means main/sub are likely swapped; the swap
+        # button sets this flag, drained BEFORE the selectboxes re-instantiate.
+        if st.session_state.pop("_join_swap_request", False):
+            _fb, _tb = st.session_state.get("join_from_block"), st.session_state.get("join_to_block")
+            if _fb and _tb:
+                st.session_state["join_from_block"] = _tb
+                st.session_state["join_to_block"] = _fb
         col_l, col_r = st.columns(2)
         with col_l:
             from_bid = st.selectbox("主表（事實資料）", block_ids, key="join_from_block")
@@ -459,6 +466,9 @@ def render_join_builder(expanded: bool = False) -> None:
             st.success(f"關聯型態：**{card_label}**　{_CARD_HELP[card_label]}")
         elif card_label == "1:N":
             st.warning(f"關聯型態：**{card_label}**　{_CARD_HELP[card_label]}")
+            if st.button("🔄 對調主表／副表", key="join_swap_btn"):
+                st.session_state["_join_swap_request"] = True
+                st.rerun()
         else:  # N:N or 未知 — risky
             st.error(f"關聯型態：**{card_label}**　{_CARD_HELP[card_label]}")
         st.caption("（型態由前幾列取樣估計，非全表掃描。）")

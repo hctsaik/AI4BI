@@ -10,7 +10,7 @@ from ai4bi.blocks.contracts import (
     DisaggregationMethod, InlineDataSource, MetricDefinition, PolicySpec,
 )
 from ai4bi.query_spec import BlockRef, MetricRef, VisualQuerySpec
-from ai4bi.ui.calc_metric_panel import validate_formula
+from ai4bi.ui.calc_metric_panel import validate_formula, formula_lineage
 
 
 def _block() -> DataBlockContract:
@@ -48,6 +48,29 @@ def test_validate_rejects_unknown_column():
 def test_validate_rejects_injection():
     ok, _ = validate_formula("SUM(revenue); DROP TABLE sales", _block())
     assert not ok
+
+
+# Round 176: lineage/溯源 is a stated requirement of scenario S10 — pin it.
+def test_formula_lineage_lists_referenced_columns():
+    cols, metrics = formula_lineage("(revenue - cost) / NULLIF(revenue, 0)", _block())
+    assert set(cols) == {"revenue", "cost"}
+    assert "revenue" in metrics  # 'revenue' is also a metric name
+
+
+def test_formula_lineage_uses_word_boundaries_not_substrings():
+    b = _block().model_copy(update={
+        "columns": [ColumnSchema(name="rev", data_type="float"),
+                    ColumnSchema(name="revenue", data_type="float")],
+        "metrics": [],
+    })
+    cols, _ = formula_lineage("SUM(revenue)", b)
+    assert "revenue" in cols
+    assert "rev" not in cols  # substring of 'revenue' must not falsely match
+
+
+def test_formula_lineage_empty_when_no_refs():
+    cols, metrics = formula_lineage("1 + 2", _block())
+    assert cols == [] and metrics == []
 
 
 def test_authored_measure_is_queryable():

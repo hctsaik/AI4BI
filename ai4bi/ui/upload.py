@@ -321,6 +321,16 @@ def json_to_dataframe(obj: Any, record_path: str = "") -> pd.DataFrame:
     return df
 
 
+def nested_json_columns(df: pd.DataFrame) -> list[str]:
+    """Columns that hold JSON-encoded nested values (arrays/objects kept as text
+    by json_to_dataframe). Used to flag 🧩 巢狀欄位 in the JSON/REST previews."""
+    # No dtype gate: pandas 3.0 gives string columns a real `str` dtype (not
+    # object), so check values directly — dtype-agnostic and robust.
+    def _looks_json(v) -> bool:
+        return isinstance(v, str) and v[:1] in ("{", "[")
+    return [c for c in df.columns if df[c].map(_looks_json).any()]
+
+
 def _load_file(uploaded_file) -> Optional[pd.DataFrame]:
     """Parse an uploaded file into a DataFrame (encoding/format tolerant).
 
@@ -378,6 +388,9 @@ def _render_json_records_picker(uploaded) -> Optional[pd.DataFrame]:
         )
     else:
         path = paths[0]
+        # Make the auto-choice transparent so the user can tell what we picked.
+        if path:
+            st.caption(f"📍 已自動從 `{path}` 取出資料列（這份 JSON 只有這一處像資料表）。")
 
     try:
         df = json_to_dataframe(obj, path)
@@ -388,11 +401,10 @@ def _render_json_records_picker(uploaded) -> Optional[pd.DataFrame]:
         st.warning("這份 JSON 沒有可轉成表格的資料列。")
         return None
 
-    nested = [c for c in df.columns
-              if df[c].dtype == object
-              and df[c].astype(str).str.startswith(("{", "[")).any()]
+    nested = nested_json_columns(df)
     if nested:
-        st.caption("🧩 巢狀欄位（以 JSON 文字呈現，可後續再處理）：" + "、".join(f"`{c}`" for c in nested))
+        st.caption("🧩 巢狀欄位（內含多個值，目前以 JSON 文字保存，例如 "
+                   f"`{nested[0]}`）：" + "、".join(f"`{c}`" for c in nested))
     return df
 
 

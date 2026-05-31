@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 
 from ai4bi.ui.upload import (
-    _parse_json_any_encoding, json_record_paths, json_to_dataframe,
+    _parse_json_any_encoding, json_record_paths, json_to_dataframe, nested_json_columns,
 )
 
 
@@ -78,3 +78,10 @@ def test_parse_json_handles_utf8_and_big5():
     assert _parse_json_any_encoding(raw) == payload
     raw_big5 = json.dumps(payload, ensure_ascii=False).encode("big5")
     assert _parse_json_any_encoding(raw_big5) == payload
+
+
+def test_nested_json_columns_flags_residual_arrays():
+    df = json_to_dataframe([{"id": 1, "tags": ["x", "y"], "name": "a"}], "")
+    nested = nested_json_columns(df)
+    assert "tags" in nested
+    assert "name" not in nested and "id" not in nested

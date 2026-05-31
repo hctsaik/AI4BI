@@ -12,6 +12,7 @@ import pytest
 
 from ai4bi.ui.connector_panel import (
     _ip_is_blocked, validate_fetch_url, safe_fetch_json, _parse_headers,
+    validate_db_target, _execute_with_timeout,
 )
 
 
@@ -67,3 +68,67 @@ def test_parse_headers():
     text = "Authorization: Bearer abc123\nX-Env: prod\n\nbad line no colon\n: novalue"
     assert _parse_headers(text) == {"Authorization": "Bearer abc123", "X-Env": "prod"}
     assert _parse_headers("") == {}
+
+
+# --- DB target validation (the remote-URL connector is an SSRF vector too) ---
+
+def test_db_url_branch_blocks_metadata_endpoint():
+    ok, _ = validate_db_target({"type": "url", "url": "http://169.254.169.254/x.csv"})
+    assert ok is False
+
+
+def test_db_url_branch_allows_public():
+    ok, reason = validate_db_target({"type": "url", "url": "https://8.8.8.8/data.csv"})
+    assert ok is True and reason == ""
+
+
+def test_db_url_rejects_quote_injection():
+    ok, _ = validate_db_target({"type": "url", "url": "https://8.8.8.8/x.csv'--"})
+    assert ok is False
+
+
+def test_db_postgres_rejects_dsn_injection():
+    ok, _ = validate_db_target({
+        "type": "postgresql", "host": "localhost", "dbname": "d",
+        "user": "u", "password": "p'; ATTACH evil", "port": "5432",
+    })
+    assert ok is False
+
+
+def test_db_postgres_localhost_is_allowed():
+    # a DB on localhost/LAN is the NORMAL case — must NOT be blocked
+    ok, reason = validate_db_target({
+        "type": "postgresql", "host": "localhost", "dbname": "d",
+        "user": "u", "password": "p", "port": "5432",
+    })
+    assert ok is True and reason == ""
+
+
+# --- query timeout wrapper ------------------------------------------------
+
+class _FakeConn:
+    def __init__(self, delay: float = 0.0):
+        self.delay = delay
+        self.interrupted = False
+
+    def execute(self, _q):
+        import time
+        time.sleep(self.delay)
+        return self
+
+    def df(self):
+        return "DF"
+
+    def interrupt(self):
+        self.interrupted = True
+
+
+def test_execute_with_timeout_returns_fast_result():
+    assert _execute_with_timeout(_FakeConn(0.0), "SELECT 1", timeout=5) == "DF"
+
+
+def test_execute_with_timeout_interrupts_slow_query():
+    conn = _FakeConn(delay=2.0)
+    with pytest.raises(TimeoutError):
+        _execute_with_timeout(conn, "SELECT 1", timeout=1)
+    assert conn.interrupted is True

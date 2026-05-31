@@ -247,8 +247,9 @@ def render_source_inspector(contract, *, display_name: str, origin: str,
         # --- column display prefs (S4): rename / hide for the workspace view ---
         prefs = get_column_prefs(shape.block_id) if embedded else None
         if embedded and rows:
-            with st.expander("⚙️ 欄位顯示（改名稱／隱藏）", expanded=False):
-                st.caption("把欄位改成看得懂的名稱，或隱藏不需要的欄位（只影響此處的顯示與預覽）。")
+            with st.expander("⚙️ 預覽顯示設定（改名稱／隱藏欄位）", expanded=False):
+                st.caption("整理**這份預覽**要怎麼顯示：把欄位改成看得懂的名稱、或暫時隱藏不需要的欄位。"
+                           "（僅影響此處的預覽顯示，不會更動原始資料，也不會改到圖表。）")
                 for col in [c.name for c in getattr(contract, "columns", [])]:
                     cc1, cc2 = st.columns([3, 1])
                     with cc1:
@@ -270,7 +271,7 @@ def render_source_inspector(contract, *, display_name: str, origin: str,
 
         # --- opt-in sampled preview (the only path that touches data) ---
         if shape.is_large:
-            st.caption("⚠️ 大型資料：預覽只會載入取樣的前幾列,不會整表載入或掃描。")
+            st.caption("⚠️ 大型資料：預覽只取樣前幾列，不會把整張表送進瀏覽器、也不會做全表掃描。")
         want = st.checkbox(f"🔍 載入取樣預覽與統計（前 {default_sample} 列）",
                            key=f"{key_prefix}_prev")
         if want:

@@ -29,7 +29,7 @@ from ai4bi.blocks.contracts import (
 )
 from ai4bi.ui.upload import (
     _USER_BLOCKS_KEY, _USER_BLOCK_META_KEY, _PENDING_NEW_BLOCK_KEY, infer_block, _slugify,
-    json_record_paths, json_to_dataframe, _get_json_path,
+    json_record_paths, json_to_dataframe, _get_json_path, nested_json_columns,
 )
 
 _CONN_STATE_KEY = "db_connections"
@@ -98,20 +98,75 @@ def safe_fetch_json(url: str, headers: "dict | None" = None,
     return _json.loads(raw.decode("utf-8", errors="replace"))
 
 
+def _reject_injection(*vals) -> "str | None":
+    """Return a zh reason if any value has chars that could break out of the
+    single-quoted ATTACH DSN / path string; else None."""
+    for v in vals:
+        if v and any(ch in str(v) for ch in ("'", ";", "\n", "\r")):
+            return "連線參數包含不允許的字元（' ; 或換行）。"
+    return None
+
+
+def validate_db_target(conn_info: dict) -> tuple[bool, str]:
+    """Validate a connection target before we touch it.
+
+    The remote-URL connector is a genuine SSRF vector (it fetches an arbitrary
+    URL like the REST connector), so it gets the full public-host check. A
+    PostgreSQL host is an *authenticated DB* and is normally on localhost / the
+    LAN, so we do NOT block private hosts there — we only reject characters that
+    could inject into the ATTACH string. Local files are fine.
+    """
+    t = conn_info.get("type")
+    if t == "url":
+        url = conn_info.get("url", "")
+        if "'" in url:
+            return False, "網址包含不允許的字元（'）。"
+        return validate_fetch_url(url)
+    if t == "postgresql":
+        bad = _reject_injection(
+            conn_info.get("host"), conn_info.get("dbname"), conn_info.get("user"),
+            conn_info.get("password"), conn_info.get("port"),
+        )
+        return (False, bad) if bad else (True, "")
+    if t == "sqlite":
+        return (False, _reject_injection(conn_info.get("path"))) if _reject_injection(
+            conn_info.get("path")) else (True, "")
+    return True, ""
+
+
+def _execute_with_timeout(conn, query: str, timeout: int = 30):
+    """Run conn.execute(query).df() with a wall-clock timeout; on timeout,
+    interrupt the connection so a slow query can't freeze the whole session."""
+    import concurrent.futures as _cf
+    with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(lambda: conn.execute(query).df())
+        try:
+            return fut.result(timeout=timeout)
+        except _cf.TimeoutError:
+            try:
+                conn.interrupt()
+            except Exception:  # noqa: BLE001
+                pass
+            raise TimeoutError(f"查詢超過 {timeout} 秒，已中止（避免卡住整個畫面）。")
+
+
 def _execute_duckdb_query(conn_info: dict, query: str) -> "pd.DataFrame":
-    """Execute a query using DuckDB and return a DataFrame."""
+    """Execute a query using DuckDB and return a DataFrame (validated + timed)."""
     import duckdb
-    import pandas as pd
+
+    ok, reason = validate_db_target(conn_info)
+    if not ok:
+        raise ValueError(reason)
 
     conn_type = conn_info.get("type")
     if conn_type == "duckdb_file":
         conn = duckdb.connect(conn_info["path"], read_only=True)
-        return conn.execute(query).df()
+        return _execute_with_timeout(conn, query)
     elif conn_type == "sqlite":
         conn = duckdb.connect(":memory:")
-        conn.execute(f"INSTALL sqlite; LOAD sqlite;")
+        conn.execute("INSTALL sqlite; LOAD sqlite;")
         conn.execute(f"ATTACH '{conn_info['path']}' (TYPE sqlite, READ_ONLY);")
-        return conn.execute(query).df()
+        return _execute_with_timeout(conn, query)
     elif conn_type == "postgresql":
         conn = duckdb.connect(":memory:")
         conn.execute("INSTALL postgres; LOAD postgres;")
@@ -121,20 +176,22 @@ def _execute_duckdb_query(conn_info: dict, query: str) -> "pd.DataFrame":
             f"password={conn_info['password']}"
         )
         conn.execute(f"ATTACH '{pg_dsn}' AS pg (TYPE postgres, READ_ONLY);")
-        return conn.execute(query).df()
+        return _execute_with_timeout(conn, query)
     elif conn_type == "url":
         conn = duckdb.connect(":memory:")
         url = conn_info["url"]
-        if url.endswith(".parquet"):
-            return conn.execute(f"SELECT * FROM read_parquet('{url}') LIMIT {_MAX_ROWS}").df()
-        else:
-            return conn.execute(f"SELECT * FROM read_csv('{url}') LIMIT {_MAX_ROWS}").df()
+        reader = "read_parquet" if url.endswith(".parquet") else "read_csv"
+        return _execute_with_timeout(conn, f"SELECT * FROM {reader}('{url}') LIMIT {_MAX_ROWS}")
     raise ValueError(f"Unknown connector type: {conn_type}")
 
 
 def _list_tables(conn_info: dict) -> list[str]:
     """List available tables from a connection."""
     import duckdb
+    ok, reason = validate_db_target(conn_info)
+    if not ok:
+        st.error(f"連線設定無效：{reason}")
+        return []
     try:
         conn_type = conn_info.get("type")
         if conn_type == "duckdb_file":
@@ -178,8 +235,12 @@ def _parse_headers(text: str) -> dict:
 
 
 def _register_block(df, block_id: str, display_name: str, source: str) -> None:
-    """Register a fetched/imported DataFrame as a user block (shared by REST/DB)."""
+    """Register a fetched/imported/derived DataFrame as a user block (shared by
+    REST / DB / create-data). Caps rows here as a safety net so EVERY path that
+    lands a block is bounded (the union creator can produce N×source rows)."""
     import datetime as _dt
+    if len(df) > _MAX_ROWS:
+        df = df.head(_MAX_ROWS)
     contract, metric_names, dim_names = infer_block(df, block_id, display_name)
     st.session_state.setdefault(_USER_BLOCKS_KEY, {})
     st.session_state.setdefault(_USER_BLOCK_META_KEY, {})
@@ -232,6 +293,8 @@ def _render_rest_import() -> None:
         path = st.selectbox("資料列在哪裡？", paths, format_func=_label, key="rest_record_path")
     else:
         path = paths[0]
+        if path:
+            st.caption(f"📍 已自動從 `{path}` 取出資料列。")
 
     try:
         df = json_to_dataframe(obj, path)
@@ -241,6 +304,10 @@ def _render_rest_import() -> None:
     if df.empty:
         st.warning("沒有可轉成表格的資料。")
         return
+    _nested = nested_json_columns(df)
+    if _nested:
+        st.caption("🧩 巢狀欄位（內含多個值，目前以 JSON 文字保存）：" +
+                   "、".join(f"`{c}`" for c in _nested))
     if len(df) > _MAX_ROWS:
         st.warning(f"資料有 {len(df):,} 列，已截取前 {_MAX_ROWS:,} 列。")
         df = df.head(_MAX_ROWS)
