@@ -195,8 +195,13 @@ def _add_relationship(
     to_block: str,
     to_col: str,
     rel_id: Optional[str] = None,
+    cardinality: str = "many_to_one",
 ) -> None:
-    """Add a user-defined relationship to the session semantic model."""
+    """Add a user-defined relationship to the session semantic model.
+
+    Round 176: ``cardinality`` (semantic string) is now passed in from the
+    detected join shape instead of always assuming many_to_one.
+    """
     sm = get_user_semantic_model()
     rel_id = rel_id or f"user_{from_block}_to_{to_block}_{from_col}"
     # Remove any existing relationship with same id
@@ -206,7 +211,7 @@ def _add_relationship(
         "from_block": from_block,
         "to_block": to_block,
         "keys": [{"from": from_col, "to": to_col}],
-        "cardinality": "many_to_one",
+        "cardinality": cardinality,
         "join_type": "left",
         "status": "certified",  # user-defined = trusted for their own data
     })
@@ -258,6 +263,56 @@ def _auto_detect_join_cols(
             seen.add((a, b))
             unique.append((a, b, score))
     return unique[:10]
+
+
+# ── Cardinality detection (Round 176) ──────────────────────────────────────
+# Map a display label to the semantic-model cardinality string (and back).
+_CARD_TO_SEMANTIC = {
+    "1:1": "one_to_one", "N:1": "many_to_one",
+    "1:N": "one_to_many", "N:N": "many_to_many",
+}
+_SEMANTIC_TO_CARD = {v: k for k, v in _CARD_TO_SEMANTIC.items()}
+
+
+def cardinality_from_keys(left_unique: "bool | None",
+                          right_unique: "bool | None") -> tuple[str, bool]:
+    """Pure: per-side key-uniqueness → (label, is_risky).
+
+    label ∈ {"1:1","N:1","1:N","N:N","未知"}. N:N (neither side unique) is the
+    fanout-risk case a non-technical user must be warned about; "未知" (a side
+    could not be sampled) is also flagged so we don't silently assume safety.
+    """
+    if left_unique is None or right_unique is None:
+        return "未知", True
+    if left_unique and right_unique:
+        return "1:1", False
+    if not left_unique and right_unique:
+        return "N:1", False
+    if left_unique and not right_unique:
+        return "1:N", False
+    return "N:N", True
+
+
+def detect_cardinality(from_contract, from_col: str, to_contract, to_col: str,
+                       *, sample_n: int = 2000) -> tuple[str, bool]:
+    """Infer join cardinality from SAMPLES only (resource-safe — never loads a
+    full table). Returns (label, is_risky). See cardinality_from_keys."""
+    from ai4bi.blocks.datastore import sample_dataframe
+
+    def _uniq(contract, col) -> "bool | None":
+        try:
+            df = sample_dataframe(contract, sample_n)
+        except Exception:  # noqa: BLE001 — detection must never break the page
+            return None
+        if df is None or col not in getattr(df, "columns", []):
+            return None
+        s = df[col].dropna()
+        if len(s) == 0:
+            return None
+        return int(s.nunique()) == int(len(s))
+
+    return cardinality_from_keys(_uniq(from_contract, from_col),
+                                 _uniq(to_contract, to_col))
 
 
 # ---------------------------------------------------------------------------
@@ -345,10 +400,33 @@ def render_join_builder(expanded: bool = False) -> None:
                 key="join_to_col",
             )
 
-        if st.button("✅ 建立關聯", key="join_create_btn", type="primary"):
-            _add_relationship(from_bid, from_col, to_bid, to_col)
+        # Detect cardinality from samples (resource-safe) and warn on fanout.
+        card_label, risky = detect_cardinality(from_contract, from_col, to_contract, to_col)
+        _CARD_HELP = {
+            "1:1": "✅ 一對一：兩邊的鍵都唯一。",
+            "N:1": "✅ 多對一：多筆主表對應一筆副表（最常見、安全）。",
+            "1:N": "⚠️ 一對多：副表的鍵不唯一 — 通常是主表／副表設反了，建議對調。",
+            "N:N": "🚨 多對多：兩邊的鍵都不唯一，關聯會造成資料「爆量」(fanout)、數字被灌大。",
+            "未知": "❔ 無法判斷關聯型態（資料不足或欄位無法取樣）。",
+        }
+        if card_label in ("1:1", "N:1"):
+            st.success(f"關聯型態：**{card_label}**　{_CARD_HELP[card_label]}")
+        elif card_label == "1:N":
+            st.warning(f"關聯型態：**{card_label}**　{_CARD_HELP[card_label]}")
+        else:  # N:N or 未知 — risky
+            st.error(f"關聯型態：**{card_label}**　{_CARD_HELP[card_label]}")
+        st.caption("（型態由前幾列取樣估計，非全表掃描。）")
+
+        confirm_ok = True
+        if risky:
+            confirm_ok = st.checkbox("我了解風險，仍要建立此關聯", key="join_confirm_risky")
+
+        if st.button("✅ 建立關聯", key="join_create_btn", type="primary",
+                     disabled=not confirm_ok):
+            _add_relationship(from_bid, from_col, to_bid, to_col,
+                              cardinality=_CARD_TO_SEMANTIC.get(card_label, "many_to_one"))
             st.success(
-                f"已建立關聯：`{from_bid}.{from_col}` → `{to_bid}.{to_col}`\n\n"
+                f"已建立關聯（{card_label}）：`{from_bid}.{from_col}` → `{to_bid}.{to_col}`\n\n"
                 "現在可以在同一張圖表裡同時使用這兩份資料的欄位。"
             )
             st.rerun()
@@ -366,10 +444,11 @@ def render_join_builder(expanded: bool = False) -> None:
                 keys = rel.get("keys", [{}])
                 from_k = keys[0].get("from", "?") if keys else "?"
                 to_k = keys[0].get("to", "?") if keys else "?"
+                card = _SEMANTIC_TO_CARD.get(rel.get("cardinality", ""), "")
                 rel_col, del_col = st.columns([5, 1])
                 with rel_col:
                     st.markdown(
-                        f"`{rel['from_block']}.{from_k}` **→** `{rel['to_block']}.{to_k}`"
+                        f"`{rel['from_block']}.{from_k}` **─{card}→** `{rel['to_block']}.{to_k}`"
                     )
                 with del_col:
                     if st.button("刪除", key=f"del_rel_{rel['relationship_id']}"):
@@ -431,17 +510,29 @@ def render_data_model_view() -> None:
                     metric_tag = " _(指標)_" if is_metric else ""
                     st.caption(f"{dtype_icon} `{col.name}` — {col.data_type}{metric_tag}")
 
-        # Relationships diagram (textual)
+        # Relationships diagram (textual) — Round 176: real cardinality + orphans.
         rels = sm.get("relationships", [])
+        st.markdown("---")
+        st.caption("**資料關聯圖**")
         if rels:
-            st.markdown("---")
-            st.caption("**資料關聯圖**")
             for rel in rels:
                 keys = rel.get("keys", [{}])
                 from_k = keys[0].get("from", "?") if keys else "?"
                 to_k = keys[0].get("to", "?") if keys else "?"
                 status_icon = "✅" if rel.get("status") == "certified" else "⚠️"
+                card = _SEMANTIC_TO_CARD.get(rel.get("cardinality", ""), "?")
                 st.markdown(
-                    f"{status_icon} `{rel['from_block']}`.`{from_k}` **─ many:1 ─→** "
+                    f"{status_icon} `{rel['from_block']}`.`{from_k}` **─ {card} ─→** "
                     f"`{rel['to_block']}`.`{to_k}`"
                 )
+        else:
+            st.caption("尚未建立任何關聯。")
+        # Orphan tables: loaded blocks no relationship references — they can't be
+        # combined with the others until linked. Flag them so the user notices.
+        linked = {b for rel in rels for b in (rel.get("from_block"), rel.get("to_block"))}
+        orphans = [bid for bid in user_blocks if bid not in linked]
+        if orphans and len(user_blocks) >= 2:
+            st.warning(
+                "🔗 尚未關聯的資料：" + "、".join(f"`{b}`" for b in orphans)
+                + "。建立關聯後才能和其他資料一起分析。"
+            )
