@@ -47,7 +47,10 @@ _STEPS = [
 # tool_group -> list of (tool_id, vendor, reliability_factor, yield_factor)
 _TOOLS = {
     "PHOTO":   [("PHOTO-01", "ASML",   1.0, 1.00), ("PHOTO-02", "Nikon",  1.05, 0.998)],
-    "ETCH":    [("ETCH-01",  "LAM",    1.0, 1.00), ("ETCH-02",  "TEL",    1.9, 0.96)],   # bottleneck + low yield
+    # Round 178: ETCH-02 yield_factor lowered 0.96→0.86 so the tool-matching gap
+    # vs ETCH-01 is a clear, realistic ~12pp (was diluted to <1pp). Still keeps
+    # the excursion lots (0.72) as the <80% commonality signal on ETCH-02.
+    "ETCH":    [("ETCH-01",  "LAM",    1.0, 1.00), ("ETCH-02",  "TEL",    1.9, 0.86)],   # bottleneck + low yield
     "CVD":     [("CVD-01",   "AMAT",   1.0, 1.00), ("CVD-02",   "AMAT",   1.0, 1.00)],
     "IMPLANT": [("IMP-01",   "AMAT",   1.0, 1.00), ("IMP-02",   "AIBT",   1.1, 0.99)],
     "CMP":     [("CMP-01",   "Ebara",  1.0, 1.00), ("CMP-02",   "AMAT",   1.0, 1.00)],

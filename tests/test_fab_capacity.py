@@ -271,8 +271,14 @@ def test_F1_loss_decomposition(env):
     r = _ask(env, "OEE 的三大損失（可用率、表現、良率）各損失多少百分點？")
     assert r.result_table is not None and "損失百分點" in r.result_table.columns
     assert len(r.result_table) == 3
-    # availability is the biggest fab-wide loss
-    assert r.result_table.iloc[0]["因子"].startswith("可用率")
+    # Round 178: ETCH-02 is now a strong yield detractor, so 良率(Q) loss rivals/
+    # leads 可用率(A) — the two dominant fab-wide OEE losses. Table is sorted
+    # worst-first; assert the top loss is one of those two (not 表現P) and the
+    # losses are in descending order.
+    factors = list(r.result_table["因子"])
+    losses = list(r.result_table["損失百分點"])
+    assert factors[0].startswith(("可用率", "良率"))
+    assert losses == sorted(losses, reverse=True)
 
 
 def test_F3_performance_loss_tool(env):

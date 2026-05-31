@@ -467,6 +467,16 @@ class NL2ProposalService:
         # ------------------------------------------------------------------ #
         # Single intent dispatch
         # ------------------------------------------------------------------ #
+        # Round 178 (S3): commonality ("are the failing wafers all on the same
+        # tool?") is a high-confidence, specific ask — route it FIRST so a
+        # "<80%" yield cut isn't mis-read as a count/value filter by the LLM
+        # intent (which silently returned a wrong "100 wafers" answer). Falls
+        # through if _answer_commonality can't handle the prompt.
+        if _looks_like_commonality(prompt, normalized):
+            cm = self._answer_commonality(prompt, normalized, report, contracts)
+            if cm is not None:
+                return cm
+
         if intent == "style_change":
             color_name = params.get("color", "")
             augmented = f"{prompt} {color_name}" if color_name else prompt

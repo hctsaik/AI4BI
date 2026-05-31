@@ -23,7 +23,10 @@ def test_overall_yield_reasonable():
     q = VisualQuerySpec("t", [BlockRef("fab_wafer_yield")],
                         metrics=[MetricRef("fab_wafer_yield", "weighted_yield_pct", "y")])
     y = ex.run(q)["y"].iloc[0]
-    assert 90 < y < 100
+    # Round 178: ETCH-02 is now a clear yield detractor (~84% vs ETCH-01 ~93%),
+    # so fab-wide yield sits in the high-80s — realistic for a fab with a problem
+    # tool, and still a sane wafer yield (not summed/garbage).
+    assert 80 < y < 95
 
 
 def test_etch_is_the_bottleneck():

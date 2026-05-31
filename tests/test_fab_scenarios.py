@@ -27,7 +27,8 @@ def _ask(env, prompt):
 def test_overall_yield_answer(env):
     r = _ask(env, "整體良率多少？")
     assert r.direct_answer is not None
-    assert 90 < r.direct_answer.value < 100
+    # Round 178: ETCH-02 yield detractor → fab-wide yield in the high-80s.
+    assert 80 < r.direct_answer.value < 95
 
 
 def test_bottleneck_step_ranking(env):
