@@ -149,6 +149,11 @@ def _build_figure(
             textposition="top center",
             cliponaxis=False,
         )
+    # Round 137: horizontal baseline (mean / custom) reference line.
+    _ycols = [(m.alias or m.metric_name) for m in metrics]
+    _yc = next((c for c in _ycols if c in df.columns), None)
+    if _yc is not None:
+        apply_baseline_line(fig, df[_yc], style.extra)
     _apply_axis_and_legend_format(fig, style)
     return fig
 
@@ -186,6 +191,35 @@ _LEGEND_ANCHORS = {
     "right": dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02),
     "left": dict(orientation="v", yanchor="top", y=1, xanchor="right", x=-0.1),
 }
+
+
+def apply_baseline_line(fig, series, extra) -> None:
+    """Round 137: draw a horizontal baseline/reference line (Power BI parity).
+
+    extra['baseline'] == 'mean'   → line at the average of `series`.
+    extra['baseline'] == 'custom' → line at extra['baseline_value'].
+    Used as a data baseline to see which points sit above/below it.
+    """
+    base = (extra or {}).get("baseline")
+    if not base:
+        return
+    yv = None
+    if base == "mean":
+        try:
+            yv = float(pd.Series(series).dropna().mean())
+        except Exception:  # noqa: BLE001
+            yv = None
+    elif base == "custom":
+        try:
+            v = extra.get("baseline_value")
+            yv = float(v) if v is not None and str(v) != "" else None
+        except Exception:  # noqa: BLE001
+            yv = None
+    if yv is None:
+        return
+    label = f"平均 {yv:,.2f}" if base == "mean" else f"基準 {yv:,.2f}"
+    fig.add_hline(y=yv, line_dash="dot", line_color="#E45756", line_width=2,
+                  annotation_text=label, annotation_position="top left")
 
 
 def apply_legend_position(fig, extra) -> None:

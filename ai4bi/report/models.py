@@ -554,6 +554,8 @@ _ALLOWLISTED_VISUAL_EXTRA_KEYS = {
     "target", "target_good_if",  # KPI goal / pacing (Round 084)
     # Round 160: chart Format pane — axis range/scale, legend placement
     "y_min", "y_max", "y_scale", "legend_position",
+    # Round 137: horizontal baseline / reference line (mean or custom value)
+    "baseline", "baseline_value",
 }
 
 

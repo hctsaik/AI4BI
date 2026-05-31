@@ -1999,6 +1999,33 @@ def _render_format_controls(component_id, visual, report, cache) -> None:
             _patch_visual_extra(page_id, component_id, "legend_position", extra.get("legend_position"), new_leg)
             cache.invalidate_all(); st.rerun()
 
+    # ── baseline / reference line (line/bar) — a horizontal line to read points against ──
+    if vtype in _FMT_VTYPES["baseline"]:
+        _BASE = {"無": None, "平均值": "mean", "自訂值": "custom"}
+        cur_base = extra.get("baseline")
+        inv = {v: k for k, v in _BASE.items()}
+        b1, b2 = st.columns([2, 2])
+        pick = b1.selectbox("基準線", list(_BASE.keys()),
+                            index=list(_BASE.keys()).index(inv.get(cur_base, "無")),
+                            key=f"fmt_base_{component_id}",
+                            help="畫一條水平線當基準（平均值或自訂數值），方便看哪些點高於/低於它")
+        new_base = _BASE[pick]
+        cur_val = extra.get("baseline_value")
+        new_val = cur_val
+        if new_base == "custom":
+            raw = b2.text_input("基準值", value=("" if cur_val is None else str(cur_val)),
+                                key=f"fmt_baseval_{component_id}", placeholder="輸入數值")
+            try:
+                new_val = float(raw) if raw.strip() != "" else None
+            except ValueError:
+                new_val = None
+        elif new_base != "custom":
+            new_val = None
+        if new_base != cur_base or new_val != cur_val:
+            _patch_visual_extra(page_id, component_id, "baseline", extra.get("baseline"), new_base)
+            _patch_visual_extra(page_id, component_id, "baseline_value", extra.get("baseline_value"), new_val)
+            cache.invalidate_all(); st.rerun()
+
 
 _GRAIN_LABELS = {
     "day": "日", "week": "週", "month": "月", "quarter": "季", "year": "年",

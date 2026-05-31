@@ -345,6 +345,18 @@ def main() -> int:
                   editing and bool(sticky), f"editing={editing} sticky={sticky}")
             pg.close()
 
+            # S12 — baseline: a horizontal mean reference line appears on the chart.
+            pg = fresh()
+            _select_visual(pg, BAR)
+            _set_select(pg, "基準線", "平均值")
+            pg.wait_for_timeout(3_000)
+            has_hline = pg.evaluate(
+                """() => Array.from(document.querySelectorAll('.js-plotly-plot'))
+                    .some(d => ((d.layout && d.layout.shapes) || [])
+                        .some(s => s.type === 'line' && s.y0 === s.y1))""")
+            check("S12 baseline (mean) draws horizontal line", bool(has_hline), str(has_hline))
+            pg.close()
+
             br.close()
     finally:
         proc.terminate()

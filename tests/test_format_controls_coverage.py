@@ -23,7 +23,7 @@ from ai4bi.ui.components.pie_chart import _build_figure as _pie_fig
 # Controls whose effect is visible on the Plotly figure (so a renderer test can
 # assert them). "sort" is applied in the query/executor (not the figure) and
 # "table" has no Plotly figure, so they're verified elsewhere.
-_FIGURE_CONTROLS = {"data_labels", "legend_position", "y_axis"}
+_FIGURE_CONTROLS = {"data_labels", "legend_position", "y_axis", "baseline"}
 
 _MATRIX = [
     (control, vtype)
@@ -79,3 +79,14 @@ def test_offered_format_control_is_honored(control: str, vtype: str):
         assert list(fig.layout.yaxis.range) == [5, 25], f"{vtype} ignores Y range"
         fig_log = _figure(vtype, y_scale="log")
         assert fig_log.layout.yaxis.type == "log", f"{vtype} ignores log scale"
+
+    elif control == "baseline":
+        # mean of [10,20,30] == 20 → a horizontal line shape at y=20
+        fig = _figure(vtype, baseline="mean")
+        lines = [s for s in fig.layout.shapes if s.type == "line"]
+        assert any(abs((s.y0 or 0) - 20) < 1e-6 for s in lines), \
+            f"{vtype} ignores baseline=mean"
+        fig_c = _figure(vtype, baseline="custom", baseline_value=7)
+        lines_c = [s for s in fig_c.layout.shapes if s.type == "line"]
+        assert any(abs((s.y0 or 0) - 7) < 1e-6 for s in lines_c), \
+            f"{vtype} ignores baseline=custom"

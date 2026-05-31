@@ -20,6 +20,7 @@ FORMAT_CONTROL_VTYPES: dict[str, tuple[str, ...]] = {
     "y_axis": ("line_chart", "bar_chart"),          # y_min / y_max / y_scale
     "data_labels": ("bar_chart", "line_chart", "pie_chart"),
     "legend_position": ("line_chart", "bar_chart", "pie_chart"),
+    "baseline": ("line_chart", "bar_chart"),       # horizontal mean/custom reference line
 }
 
 
