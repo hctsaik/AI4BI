@@ -93,6 +93,28 @@ def schema_rows(contract) -> list[dict[str, Any]]:
     return rows
 
 
+# ── Column display prefs (Round 176, scenario S4) ───────────────────────────
+# Per-source friendly names + hidden columns. Scoped to display/preview so the
+# user can tidy how data LOOKS in the workspace without touching the data.
+_COL_PREFS_KEY = "_col_prefs"
+
+
+def apply_column_prefs(df: pd.DataFrame, alias: dict, hidden: list) -> pd.DataFrame:
+    """Pure: drop hidden columns and rename via the alias map (for the preview)."""
+    hide = set(hidden or [])
+    keep = [c for c in df.columns if c not in hide]
+    out = df[keep]
+    ren = {k: v for k, v in (alias or {}).items() if v and k in out.columns}
+    return out.rename(columns=ren) if ren else out
+
+
+def get_column_prefs(block_id: str) -> dict:
+    """Session-stored {'alias': {col: name}, 'hidden': [col]} for a source."""
+    import streamlit as st
+    store = st.session_state.setdefault(_COL_PREFS_KEY, {})
+    return store.setdefault(block_id, {"alias": {}, "hidden": []})
+
+
 def profile_sample(sample: pd.DataFrame) -> list[dict[str, Any]]:
     """Per-column profile computed on the SAMPLE only (cheap, approximate).
 
@@ -222,6 +244,30 @@ def render_source_inspector(contract, *, display_name: str, origin: str,
         else:
             st.caption("此來源未宣告欄位結構。")
 
+        # --- column display prefs (S4): rename / hide for the workspace view ---
+        prefs = get_column_prefs(shape.block_id) if embedded else None
+        if embedded and rows:
+            with st.expander("⚙️ 欄位顯示（改名稱／隱藏）", expanded=False):
+                st.caption("把欄位改成看得懂的名稱，或隱藏不需要的欄位（只影響此處的顯示與預覽）。")
+                for col in [c.name for c in getattr(contract, "columns", [])]:
+                    cc1, cc2 = st.columns([3, 1])
+                    with cc1:
+                        new = st.text_input(
+                            f"`{col}`", value=prefs["alias"].get(col, ""),
+                            key=f"{key_prefix}_alias_{col}", placeholder="（顯示名稱，留空＝原名）",
+                        ).strip()
+                        if new:
+                            prefs["alias"][col] = new
+                        else:
+                            prefs["alias"].pop(col, None)
+                    with cc2:
+                        hidden_now = st.checkbox(
+                            "隱藏", value=col in prefs["hidden"], key=f"{key_prefix}_hide_{col}")
+                        if hidden_now and col not in prefs["hidden"]:
+                            prefs["hidden"].append(col)
+                        elif not hidden_now and col in prefs["hidden"]:
+                            prefs["hidden"].remove(col)
+
         # --- opt-in sampled preview (the only path that touches data) ---
         if shape.is_large:
             st.caption("⚠️ 大型資料：預覽只會載入取樣的前幾列,不會整表載入或掃描。")
@@ -238,6 +284,8 @@ def render_source_inspector(contract, *, display_name: str, origin: str,
             if sample is None or sample.empty:
                 st.info("沒有可預覽的資料。")
                 return
+            if prefs and (prefs["alias"] or prefs["hidden"]):
+                sample = apply_column_prefs(sample, prefs["alias"], prefs["hidden"])
             st.dataframe(sample, width="stretch", hide_index=True)
             st.caption(f"以下統計為**取樣估計**（基於前 {len(sample)} 列,非全表,僅供概覽）：")
             st.dataframe(pd.DataFrame(prof), width="stretch", hide_index=True)

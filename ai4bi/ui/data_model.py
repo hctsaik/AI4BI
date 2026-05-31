@@ -294,6 +294,51 @@ def cardinality_from_keys(left_unique: "bool | None",
     return "N:N", True
 
 
+def compare_columns(cols_a: list[str], cols_b: list[str]) -> dict:
+    """Pure: column-set diff between two sources (scenario S3) — what they share,
+    and what's unique to each. Used to tell the user whether two datasets line up
+    and can be linked."""
+    sa, sb = set(cols_a), set(cols_b)
+    return {
+        "common": sorted(sa & sb),
+        "only_a": sorted(sa - sb),
+        "only_b": sorted(sb - sa),
+    }
+
+
+def render_compare_panel(report_sources: "dict | None" = None) -> None:
+    """Side-by-side column comparison of two sources (S3) — metadata only, so it's
+    free even for large data. Flags a candidate join key when one exists."""
+    sources = dict(report_sources or {})
+    if len(sources) < 2:
+        return
+    names = {bid: (getattr(c, "description", None) or bid) for bid, c in sources.items()}
+    with st.expander("🔍 比較兩份資料（看欄位差異、能不能對得起來）", expanded=False):
+        ids = list(sources.keys())
+        c1, c2 = st.columns(2)
+        with c1:
+            a = st.selectbox("資料 A", ids, format_func=lambda b: names[b], key="cmp_a")
+        with c2:
+            b_opts = [x for x in ids if x != a] or ids
+            b = st.selectbox("資料 B", b_opts, format_func=lambda b: names[b], key="cmp_b")
+        ca, cb = sources[a], sources[b]
+        diff = compare_columns([c.name for c in ca.columns], [c.name for c in cb.columns])
+        st.caption(f"**共同欄位（{len(diff['common'])}）**：" +
+                   ("、".join(f"`{c}`" for c in diff["common"]) or "（無）"))
+        d1, d2 = st.columns(2)
+        with d1:
+            st.caption(f"只在「{names[a]}」（{len(diff['only_a'])}）")
+            st.caption("、".join(f"`{c}`" for c in diff["only_a"]) or "—")
+        with d2:
+            st.caption(f"只在「{names[b]}」（{len(diff['only_b'])}）")
+            st.caption("、".join(f"`{c}`" for c in diff["only_b"]) or "—")
+        cand = _auto_detect_join_cols(ca, cb)
+        if cand:
+            st.success(f"✅ 這兩份可用 `{cand[0][0]}` ↔ `{cand[0][1]}` 關聯 — 到「🔗 關聯」建立。")
+        else:
+            st.info("找不到明顯的共同鍵，可能無法直接關聯。")
+
+
 def detect_cardinality(from_contract, from_col: str, to_contract, to_col: str,
                        *, sample_n: int = 2000) -> tuple[str, bool]:
     """Infer join cardinality from SAMPLES only (resource-safe — never loads a

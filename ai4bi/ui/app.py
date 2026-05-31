@@ -42,7 +42,7 @@ from ai4bi.ai.suggestions import generate_suggestions, detect_anomalies, Anomaly
 from ai4bi.report.retail_template import (
     build_retail_demo_report, build_retail_sales_block, build_store_staffing_block,
 )
-from ai4bi.ui.data_model import render_join_builder, render_data_model_view, get_user_semantic_model, render_data_source_manager
+from ai4bi.ui.data_model import render_join_builder, render_data_model_view, get_user_semantic_model, render_data_source_manager, render_compare_panel
 from ai4bi.ui.create_data import render_create_data_panel  # Round 176
 from ai4bi.ui.workspace_manager import render_workspace_panel  # Round 039
 from ai4bi.ui.audit_trail import render_audit_trail, record_change  # Round 040
@@ -2707,6 +2707,7 @@ def main() -> None:
                 if render_staged_upload_preview():  # just-uploaded file (pre-import)
                     st.markdown("---")
                 render_data_source_manager(_report_block_contracts(report))
+                render_compare_panel(_report_block_contracts(report))
             with _ws_rel:
                 st.caption("把多份資料用共同欄位關聯起來（類似 Power BI 的關係檢視）。")
                 render_join_builder(expanded=True)
