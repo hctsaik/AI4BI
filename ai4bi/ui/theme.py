@@ -420,11 +420,20 @@ def app_css(theme: Optional[Theme] = None) -> str:
 }}
 .stApp {{ background-color: {th.bg_color}; }}
 section[data-testid="stSidebar"] {{ background-color: {th.secondary_bg_color}; }}
-/* Body text (incl. the dark midnight theme). Buttons/colored surfaces below
-   re-assert their own contrast-checked text with !important so this can't
-   wash them out. */
-.stApp p, .stApp label, .stApp span, .stApp li,
-.stApp h1, .stApp h2, .stApp h3, .stApp h4 {{ color: {th.chrome_text_color}; }}
+/* Body/content text (markdown, headings, widget labels) — scoped to content
+   containers, NOT raw span/p, so it never bleeds into BaseWeb widget internals
+   (e.g. multiselect tag pills) and wash out their own text color. Buttons below
+   re-assert their label color with !important. */
+.stApp [data-testid="stMarkdownContainer"],
+.stApp [data-testid="stMarkdownContainer"] p,
+.stApp [data-testid="stMarkdownContainer"] li,
+.stApp [data-testid="stMarkdownContainer"] h1,
+.stApp [data-testid="stMarkdownContainer"] h2,
+.stApp [data-testid="stMarkdownContainer"] h3,
+.stApp [data-testid="stMarkdownContainer"] h4,
+.stApp [data-testid="stHeading"],
+.stApp [data-testid="stWidgetLabel"] p,
+.stApp [data-testid="stWidgetLabel"] label {{ color: {th.chrome_text_color}; }}
 body, .stApp {{ font-family: {th.font_family}; }}
 /* Buttons: colored background → contrast-checked text. Streamlit 1.5x marks the
    button kind with data-testid="stBaseButton-<kind>" (NOT kind="..."), so we

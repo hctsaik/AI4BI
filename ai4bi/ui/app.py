@@ -36,7 +36,7 @@ from ai4bi.ui.viewer import get_draft_path_from_params, is_readonly_mode, render
 from ai4bi.report.metric_catalog import MetricCatalogService, MetricZone
 from ai4bi.report.block_library import build_block_library, LIFECYCLE_BADGE
 from ai4bi.blocks.contracts import LifecycleStatus
-from ai4bi.ui.upload import render_upload_panel, _USER_BLOCKS_KEY, _USER_BLOCK_META_KEY, _PENDING_NEW_BLOCK_KEY
+from ai4bi.ui.upload import render_upload_panel, render_staged_upload_preview, _USER_BLOCKS_KEY, _USER_BLOCK_META_KEY, _PENDING_NEW_BLOCK_KEY
 from ai4bi.report.user_report import build_report_from_block
 from ai4bi.ai.suggestions import generate_suggestions, detect_anomalies, AnomalyObservation, ChartSuggestion
 from ai4bi.report.retail_template import (
@@ -2681,10 +2681,12 @@ def main() -> None:
                 st.subheader("跨資料表計算結果")
                 render_cross_fact_results()
         elif "資料" in _nav_mode:
-            # Round 168r: data-source overview (schema + sampled preview) in the
-            # WIDE canvas — the preview tables were cramped in the sidebar.
+            # Round 168r/173: data-source overview + staged-upload preview in the
+            # WIDE canvas — preview tables were cramped in the sidebar.
             _render_canvas(report, cache, executor, active_filters)
             st.markdown("---")
+            if render_staged_upload_preview():  # just-uploaded file (pre-import)
+                st.markdown("---")
             st.subheader("資料來源")
             render_data_source_manager(_report_block_contracts(report))
         else:

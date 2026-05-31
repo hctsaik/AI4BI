@@ -322,6 +322,7 @@ def render_upload_panel() -> None:
             label_visibility="collapsed",
         )
         if uploaded is None:
+            st.session_state.pop("_upload_preview", None)  # clear the canvas preview
             _render_existing_blocks()
             return
 
@@ -345,9 +346,14 @@ def render_upload_panel() -> None:
         )
         block_id = _slugify(data_name) or default_id
 
-        # Preview
-        st.caption(f"資料預覽（前 5 行，共 {len(df):,} 行 × {len(df.columns)} 欄）")
-        st.dataframe(df.head(5), use_container_width=True, hide_index=True)
+        # Preview — Round 173: render it in the WIDE main canvas (a 13-column
+        # table is unreadable in the narrow sidebar). Stash it; the 資料-mode
+        # canvas renders it via render_staged_upload_preview().
+        st.session_state["_upload_preview"] = {
+            "name": data_name, "rows": int(len(df)), "cols": int(len(df.columns)),
+            "head": df.head(5),
+        }
+        st.caption(f"資料預覽（前 5 行，共 {len(df):,} 行 × {len(df.columns)} 欄）👉 顯示在右側主畫布")
 
         # Round 032: Data Health Check
         classifications = classify_df(df)
@@ -383,9 +389,27 @@ def render_upload_panel() -> None:
             }
             # Round 033: signal app.py to auto-build report immediately
             st.session_state[_PENDING_NEW_BLOCK_KEY] = block_id
+            st.session_state.pop("_upload_preview", None)
             st.rerun()
 
         _render_existing_blocks()
+
+
+def render_staged_upload_preview() -> bool:
+    """Round 173: render the staged-upload preview WIDE in the main canvas.
+
+    Returns True if something was rendered. The upload controls (picker / name /
+    health check / import) stay in the sidebar; only the wide table preview lives
+    here so a many-column file is readable.
+    """
+    prev = st.session_state.get("_upload_preview")
+    if not prev:
+        return False
+    st.markdown(f"**📤 待匯入預覽：{prev['name']}**")
+    st.caption(f"前 5 行，共 {prev['rows']:,} 行 × {prev['cols']} 欄"
+               "（在左側「上傳資料」按「✅ 確認並匯入」完成匯入）")
+    st.dataframe(prev["head"], width="stretch", hide_index=True)
+    return True
 
 
 def _render_existing_blocks() -> None:
