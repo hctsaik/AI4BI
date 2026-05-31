@@ -73,18 +73,20 @@ def render_small_multiples(
     facet, x, y = layout
     wrap = int((style.extra or {}).get("facet_wrap", 3))
 
+    from ai4bi.ui.theme import apply_to_fig, colorway
     if x is not None:
         fig = px.line(df.sort_values([facet, x]), x=x, y=y,
                       facet_col=facet, facet_col_wrap=wrap, height=style.height_px,
-                      title=style.title or "")
+                      title=style.title or "", color_discrete_sequence=colorway())
     else:
         # single dimension → a small bar per facet value
         fig = px.bar(df, x=facet, y=y, facet_col=facet, facet_col_wrap=wrap,
-                     height=style.height_px, title=style.title or "")
+                     height=style.height_px, title=style.title or "",
+                     color_discrete_sequence=colorway())
     # Trim the "facet=value" annotation prefix for a cleaner look.
     fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
-    fig.update_layout(template="plotly_white", paper_bgcolor="rgba(0,0,0,0)",
-                      margin=dict(l=20, r=20, t=50, b=20), showlegend=False)
+    fig.update_layout(margin=dict(l=20, r=20, t=50, b=20), showlegend=False)
+    apply_to_fig(fig)  # Round 164: active theme
     fig.update_yaxes(matches=None)  # independent y per panel reads better for SMB
 
     st.plotly_chart(fig, width="stretch", key=f"sm_{query_spec.spec_id}")

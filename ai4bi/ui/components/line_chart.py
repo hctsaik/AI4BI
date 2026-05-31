@@ -44,13 +44,11 @@ from ai4bi.query_spec import DimensionRef, MetricRef, VisualQuerySpec, Visualiza
 
 logger = logging.getLogger(__name__)
 
+from ai4bi.ui.theme import apply_to_fig, colorway
+
 _CROSS_FILTER_KEY = "cross_filters"
 _LEGACY_CROSS_FILTER_KEY = "cross_filter"
 _CURRENT_PAGE_KEY = "_current_render_page_id"
-_PLOTLY_COLORS = [
-    "#636EFA", "#EF553B", "#00CC96", "#AB63FA",
-    "#FFA15A", "#19D3F3", "#FF6692", "#B6E880",
-]
 
 
 def _future_x(xs: list, n: int) -> list:
@@ -101,6 +99,7 @@ def _build_figure(
 ) -> go.Figure:
     """Construct a Plotly Figure with one trace per metric."""
     fig = go.Figure()
+    palette = colorway()
 
     for idx, metric in enumerate(metrics):
         y_col = metric.alias or metric.metric_name
@@ -111,14 +110,14 @@ def _build_figure(
             continue
 
         prompted_color = style.extra.get("line_color") if idx == 0 else None
-        color = prompted_color or _PLOTLY_COLORS[idx % len(_PLOTLY_COLORS)]
+        color = prompted_color or palette[idx % len(palette)]
         fig.add_trace(
             go.Scatter(
                 x=df[x_col],
                 y=df[y_col],
                 mode="lines+markers",
                 name=metric.alias or metric.metric_name,
-                line=dict(color=color, width=2),
+                line=dict(color=color, width=2.5),  # R164: thicker = legible at small size / on projectors
                 marker=dict(size=6),
                 hovertemplate=f"<b>{y_col}</b>: %{{y:,.0f}}<extra></extra>",
             )
@@ -154,6 +153,7 @@ def _build_figure(
     _yc = next((c for c in _ycols if c in df.columns), None)
     if _yc is not None:
         apply_baseline_line(fig, df[_yc], style.extra)
+    apply_to_fig(fig)  # Round 164: stamp active theme (fonts/bg/grid/colorway)
     _apply_axis_and_legend_format(fig, style)
     return fig
 

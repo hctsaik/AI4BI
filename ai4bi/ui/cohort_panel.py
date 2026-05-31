@@ -129,8 +129,11 @@ def render_cohort_results() -> bool:
         st.caption("回購漏斗：購買達 N 次的客戶數")
         try:
             import plotly.express as px
-            fig = px.funnel(funnel, x="customers", y="stage", template="plotly_white")
+            from ai4bi.ui.theme import apply_to_fig, colorway
+            fig = px.funnel(funnel, x="customers", y="stage",
+                            color_discrete_sequence=colorway())
             fig.update_layout(height=260, margin=dict(l=40, r=20, t=20, b=20))
+            apply_to_fig(fig)  # Round 164: active theme
             st.plotly_chart(fig, width="stretch", key="cohort_funnel_chart")
         except Exception:  # noqa: BLE001
             st.dataframe(funnel, width="stretch", hide_index=True)

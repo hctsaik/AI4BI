@@ -80,6 +80,7 @@ def _build_figure(df: pd.DataFrame, val_col: str, name_col, style: Visualization
     if style.extra.get("data_labels"):
         text_info = text_info + "+value"
 
+    from ai4bi.ui.theme import apply_to_fig, colorway
     fig = px.pie(
         df,
         values=val_col,
@@ -87,15 +88,14 @@ def _build_figure(df: pd.DataFrame, val_col: str, name_col, style: Visualization
         hole=hole,
         title=style.title or "",
         height=style.height_px,
-        color_discrete_sequence=px.colors.qualitative.Plotly,
+        color_discrete_sequence=colorway(),
     )
     fig.update_traces(textinfo=text_info, pull=0.02)
     fig.update_layout(
-        template="plotly_white",
-        paper_bgcolor="rgba(0,0,0,0)",
         margin=dict(l=20, r=20, t=40, b=20),
         showlegend=style.show_legend,
     )
+    apply_to_fig(fig)  # Round 164: active theme (fonts/bg/colorway)
     # Round 135: shared legend placement (圖例位置) — previously ignored on pies.
     from ai4bi.ui.components.line_chart import apply_legend_position
     apply_legend_position(fig, style.extra)

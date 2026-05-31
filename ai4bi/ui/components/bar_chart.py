@@ -38,6 +38,7 @@ import plotly.express as px
 import streamlit as st
 
 from ai4bi.query_spec import DimensionRef, MetricRef, VisualQuerySpec, VisualizationSpec
+from ai4bi.ui.theme import apply_to_fig, colorway
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +139,7 @@ def _build_figure(
     style       : VisualizationSpec for layout hints.
     """
     bar_color = style.extra.get("bar_color")
-    color_sequence = px.colors.qualitative.Plotly
+    color_sequence = colorway()  # Round 164: active theme palette
     if color_col is None and isinstance(bar_color, str) and bar_color:
         color_sequence = [bar_color]
 
@@ -149,7 +150,6 @@ def _build_figure(
         barmode=bar_mode,
         title=style.title or "",
         height=style.height_px,
-        template="plotly_white",
     )
 
     if orientation == "horizontal":
@@ -179,6 +179,9 @@ def _build_figure(
     )
     fig.update_xaxes(showgrid=True, gridcolor="rgba(128,128,128,0.15)")
     fig.update_yaxes(showgrid=True, gridcolor="rgba(128,128,128,0.15)")
+    # Round 164: thin white seam between segments so adjacent colors (esp. in
+    # stacked/grouped bars) read as separate blocks even for CVD users.
+    fig.update_traces(marker_line_color="rgba(255,255,255,0.9)", marker_line_width=0.6)
 
     # Round 058: optional data labels on bars (Power BI parity)
     if style.extra.get("data_labels"):
@@ -198,6 +201,7 @@ def _build_figure(
         if y_col in df.columns:
             apply_baseline_line(fig, df[y_col], style.extra)  # Round 137: baseline
         _apply_axis_and_legend_format(fig, style)
+    apply_to_fig(fig)  # Round 164: stamp active theme
     return fig
 
 

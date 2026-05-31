@@ -62,6 +62,7 @@ from ai4bi.ui.basket_panel import render_basket_panel, render_basket_results  # 
 from ai4bi.ui.rfm_panel import render_rfm_panel, render_rfm_results  # Round 082
 from ai4bi.ui.trend_streak_panel import render_trend_streak_panel, render_trend_streak_results  # Round 085
 from ai4bi.ui.format_controls import FORMAT_CONTROL_VTYPES as _FMT_VTYPES  # Round 135
+from ai4bi.ui import theme as _theme  # Round 164: design-system / themes
 from ai4bi.report.share_auth import hash_password, verify_password  # Round 064
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
@@ -885,6 +886,9 @@ def _render_draft_controls(
             if st.button("🗑 快取", disabled=report.read_only, width="stretch"):
                 cache.invalidate_all()
                 st.rerun()
+
+        # Round 164: global appearance / theme picker (always visible).
+        _render_theme_picker()
 
         # ── View-mode selector (Round 147 — Power BI-style view modes) ─────
         # Replaces the old flat ~25-panel scroll. Each mode shows only its
@@ -2191,8 +2195,47 @@ def _render_canvas(
     _render_page(report, chosen, cache, executor, active_filters)
 
 
+def _render_theme_picker() -> None:
+    """Round 164: live theme switcher (sidebar). Re-skins chrome + charts
+    without an app restart. The five saved presets (top-5 from the UI/UX
+    review) lead the list; the dark 'midnight' theme is offered last for
+    low-light / control-room screens."""
+    # presets first (recommended default leads), then any extra themes (dark).
+    preset_keys = list(_theme.PRESET_ORDER)
+    extra_keys = [k for k in _theme.all_themes() if k not in preset_keys]
+    keys = preset_keys + extra_keys
+    current = st.session_state.get(_theme._SESSION_KEY, _theme.DEFAULT_THEME_KEY)
+    if current not in keys:
+        current = keys[0]
+
+    def _fmt(k: str) -> str:
+        label = _theme.get_theme(k).label
+        if k == _theme.DEFAULT_THEME_KEY:
+            return f"{label}（推薦）"
+        if k not in preset_keys:
+            return f"{label}（深色監控）"
+        return label
+
+    with st.expander("🎨 外觀主題", expanded=False):
+        chosen = st.selectbox(
+            "選擇配色主題",
+            keys,
+            index=keys.index(current),
+            format_func=_fmt,
+            key="_theme_picker",
+            label_visibility="collapsed",
+        )
+        st.caption(_theme.get_theme(chosen).description)
+        if chosen != current:
+            _theme.set_active_theme(chosen)
+            st.rerun()
+
+
 def main() -> None:
     st.set_page_config(page_title="AI for BI", page_icon="📊", layout="wide")
+    # Round 164: re-skin the Streamlit chrome to the active theme on every run
+    # (config.toml only sets the startup look; this enables live switching).
+    st.markdown(_theme.app_css(), unsafe_allow_html=True)
 
     # Determine read-only mode from URL query parameters (?mode=readonly&draft=<path>)
     readonly = is_readonly_mode()

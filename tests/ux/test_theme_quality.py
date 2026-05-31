@@ -1,0 +1,67 @@
+"""
+tests.ux.test_theme_quality — regression guard for the goal-3 theme system.
+
+Locks in the UI/UX quality bar reached by the multi-agent review (Round 164):
+  * every saved preset passes the hard accessibility gate (WCAG-AA text,
+    distinctness, color-blind safety, palette depth),
+  * every preset's objective score is >= 95,
+  * all five presets exist and the default is among them,
+  * every chart-usage scenario scores >= 95 with its recommended theme.
+
+These assertions fail loudly if a future palette tweak regresses contrast or
+color-blind separation.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from ai4bi.ui import theme
+from tests.ux.theme_score import score_theme
+from tests.ux.scenarios import SCENARIOS, score_scenario
+
+
+def test_presets_exist_and_default_is_preset():
+    assert len(theme.PRESET_ORDER) == 5
+    assert theme.DEFAULT_THEME_KEY in theme.PRESET_ORDER
+    for key in theme.PRESET_ORDER:
+        assert key in theme.all_themes()
+
+
+@pytest.mark.parametrize("key", theme.PRESET_ORDER)
+def test_preset_passes_accessibility(key):
+    score, metrics = score_theme(theme.get_theme(key))
+    assert metrics.passes_accessibility(), (
+        f"{key} fails accessibility: txt_bg={metrics.text_contrast_bg:.2f} "
+        f"txt_card={metrics.text_contrast_card:.2f} palΔE={metrics.palette_min_de:.1f} "
+        f"cvdΔE={metrics.cvd_min_de:.1f} depth={metrics.palette_depth}"
+    )
+    assert score >= 95.0, f"{key} objective score {score} < 95"
+
+
+def test_all_themes_pass_accessibility():
+    # even the non-preset dark theme must clear the accessibility gate.
+    for key, th in theme.all_themes().items():
+        _, m = score_theme(th)
+        assert m.passes_accessibility(), f"{key} fails accessibility gate"
+
+
+@pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda s: s.sid)
+def test_scenario_scores_at_least_95(scenario):
+    score, used = score_scenario(scenario)
+    assert score >= 95.0, f"scenario {scenario.sid} ({used}) scored {score} < 95"
+
+
+def test_scenario_average_above_95():
+    scores = [score_scenario(s)[0] for s in SCENARIOS]
+    assert sum(scores) / len(scores) >= 95.0
+
+
+def test_no_palette_color_equals_text_color():
+    # a categorical color must not masquerade as the body text color.
+    from tests.ux.theme_score import delta_e
+    for key, th in theme.all_themes().items():
+        for c in th.qualitative[:6]:
+            assert delta_e(c, th.text_color) >= 12, (
+                f"{key}: series color {c} too close to text {th.text_color}"
+            )

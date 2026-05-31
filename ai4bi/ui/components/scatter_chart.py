@@ -26,6 +26,7 @@ import plotly.express as px
 import streamlit as st
 
 from ai4bi.query_spec import DimensionRef, MetricRef, VisualQuerySpec, VisualizationSpec
+from ai4bi.ui.theme import apply_to_fig, colorway
 
 logger = logging.getLogger(__name__)
 
@@ -119,16 +120,16 @@ def render_scatter_chart(
             x=x_col,
             y=y_col,
             color=color_col,
+            symbol=color_col,  # Round 164: shape-code groups → CVD-safe even if colors confuse
             size=size_col,
             trendline=trendline,
             title=style.title or "",
             height=style.height_px,
-            template="plotly_white",
             labels={
                 x_col: style.x_axis_label or x_col,
                 y_col: style.y_axis_label or y_col,
             },
-            color_discrete_sequence=px.colors.qualitative.Plotly,
+            color_discrete_sequence=colorway(),
         )
     except Exception as exc:  # noqa: BLE001
         # trendline requires statsmodels; fall back gracefully
@@ -138,15 +139,15 @@ def render_scatter_chart(
             x=x_col,
             y=y_col,
             color=color_col,
+            symbol=color_col,  # Round 164: shape-code groups (CVD-safe)
             size=size_col,
             title=style.title or "",
             height=style.height_px,
-            template="plotly_white",
             labels={
                 x_col: style.x_axis_label or x_col,
                 y_col: style.y_axis_label or y_col,
             },
-            color_discrete_sequence=px.colors.qualitative.Plotly,
+            color_discrete_sequence=colorway(),
         )
 
     fig.update_layout(
@@ -156,8 +157,9 @@ def render_scatter_chart(
         showlegend=style.show_legend and color_col is not None,
         dragmode="select",
     )
-    fig.update_xaxes(showgrid=True, gridcolor="rgba(128,128,128,0.15)")
-    fig.update_yaxes(showgrid=True, gridcolor="rgba(128,128,128,0.15)")
+    fig.update_xaxes(showgrid=True)
+    fig.update_yaxes(showgrid=True)
+    apply_to_fig(fig)  # Round 164: active theme
 
     event = st.plotly_chart(
         fig,

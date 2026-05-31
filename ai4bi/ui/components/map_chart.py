@@ -68,6 +68,8 @@ def render_map(
     size_col = _resolve_col(query_spec.metrics[0], df) if query_spec.metrics else None
     dropped = len(df) - len(geo)
 
+    from ai4bi.ui.theme import get_active_theme
+    _theme = get_active_theme()
     fig = px.scatter_map(
         geo,
         lat="_lat",
@@ -78,12 +80,14 @@ def render_map(
         size_max=40,
         zoom=6,
         height=style.height_px,
-        color_continuous_scale="Blues",
+        color_continuous_scale=_theme.sequential,  # Round 164: themed ramp
     )
     fig.update_layout(
-        map_style="open-street-map",
+        map_style="carto-darkmatter" if _theme.base == "dark" else "carto-positron",
         margin=dict(l=0, r=0, t=40, b=0),
         title=style.title or "",
+        font=dict(family=_theme.font_family, color=_theme.text_color),
+        paper_bgcolor=_theme.paper_bg,
     )
     st.plotly_chart(fig, width="stretch", key=f"map_{query_spec.spec_id}")
     if dropped:

@@ -43,22 +43,21 @@ def render_histogram(
             st.info("沒有可用的數值資料。", icon="📊")
         return
 
+    from ai4bi.ui.theme import apply_to_fig, colorway
     bins = int(style.extra.get("bins", 20))
     fig = px.histogram(
         df, x=col, nbins=bins,
         title=style.title or "",
         height=style.height_px,
-        template="plotly_white",
-        color_discrete_sequence=[style.extra.get("bar_color") or "#4C78A8"],
+        color_discrete_sequence=[style.extra.get("bar_color") or colorway()[0]],
     )
     fig.update_layout(
         bargap=0.05,
         xaxis_title=style.x_axis_label or col,
         yaxis_title=style.y_axis_label or "筆數",
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
         margin=dict(l=40, r=20, t=40, b=40),
     )
+    apply_to_fig(fig)  # Round 164: active theme
     st.plotly_chart(fig, width="stretch", key=f"hist_{query_spec.spec_id}")
 
     # quick distribution stats below the chart

@@ -1,0 +1,12 @@
+# AI4BI app chrome — startup theme (Round 164).
+# This sets the colors Streamlit uses before the first script run. The live
+# theme picker (sidebar 🎨 外觀主題) re-skins on top of this via injected CSS,
+# so changing themes at runtime does not require an app restart. Keep these in
+# sync with the DEFAULT_THEME (executive) in ai4bi/ui/theme.py.
+[theme]
+base = "light"
+primaryColor = "#1F4E79"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F4F7FB"
+textColor = "#1B2A38"
+font = "sans serif"
