@@ -493,13 +493,14 @@ def render_upload_panel() -> None:
         block_id = _slugify(data_name) or default_id
 
         # Preview — Round 173: render it in the WIDE main canvas (a 13-column
-        # table is unreadable in the narrow sidebar). Stash it; the 資料-mode
-        # canvas renders it via render_staged_upload_preview().
+        # table is unreadable here). Stash it; render_staged_upload_preview()
+        # renders the wide table just below (Round 176: in the same 新增資料 tab,
+        # so the preview appears where the user uploaded — no more cross-tab hunt).
         st.session_state["_upload_preview"] = {
             "name": data_name, "rows": int(len(df)), "cols": int(len(df.columns)),
             "head": df.head(5),
         }
-        st.caption(f"資料預覽（前 5 行，共 {len(df):,} 行 × {len(df.columns)} 欄）👉 顯示在右側主畫布")
+        st.caption(f"資料預覽（前 5 行，共 {len(df):,} 行 × {len(df.columns)} 欄）👇 顯示在下方")
 
         # Round 032: Data Health Check
         classifications = classify_df(df)

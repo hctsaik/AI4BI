@@ -2578,15 +2578,24 @@ def main() -> None:
     # so the canvas (rendered next) reflects the latest parameter values.
     executor._parameters = get_parameters()
 
-    st.title(report.title)
+    # Round 176: in the Data Workspace the page header is the WORKSPACE, not the
+    # report — otherwise the big report title looms over data management and the
+    # two feel "mixed". Other modes keep the report title + breadcrumb.
+    _mode = st.session_state.get("_nav_mode", "🔍 探索")
+    _in_data_ws = (not readonly) and ("資料" in _mode)
+    st.title("🗂️ 資料工作區" if _in_data_ws else report.title)
 
     # Show read-only banner or normal caption
     if readonly:
         render_readonly_banner()
+    elif _in_data_ws:
+        _dirty_tag = "　·　🟠 有未儲存變更" if _hub_is_dirty(report) else ""
+        st.caption(
+            f"整理資料來源、關聯與新增資料。　目前報表：{_report_badge(report)}"
+            f"　·　看報表請切到「🔍 探索」。{_dirty_tag}")
     else:
         # Round 168: breadcrumb — which report am I in, and which mode (markdown,
         # not caption, so "which report" is prominent enough to always notice).
-        _mode = st.session_state.get("_nav_mode", "🔍 探索")
         _dirty_tag = "　·　🟠 有未儲存變更" if _hub_is_dirty(report) else ""
         st.markdown(
             f"📋 **{_report_badge(report)}**　·　目前在「{_mode}」"
@@ -2700,13 +2709,18 @@ def main() -> None:
             # and "create new data" in one place (absorbs the old 🔗 模型 mode).
             # Wide sub-tabs; the report's own charts stay in 探索, so this view is
             # dedicated to data management.
-            st.subheader("🗂️ 資料工作區")
-            st.caption("看內容、建立關聯、新增／合併資料 — 都在這裡。")
+            # (page title is already "🗂️ 資料工作區" — no duplicate subheader)
             _ws_src, _ws_rel, _ws_new = st.tabs(["📋 來源與預覽", "🔗 關聯", "➕ 新增資料"])
             with _ws_src:
                 if render_staged_upload_preview():  # just-uploaded file (pre-import)
                     st.markdown("---")
-                render_data_source_manager(_report_block_contracts(report))
+                # block_ids the report's visuals actually reference → 🟢 報表使用中
+                # (vs 🟡 評估中 for loaded-but-unused sources).
+                _in_use_ids = {
+                    ref.block_id for page in report.pages.values()
+                    for v in page.visuals.values() for ref in v.query.block_refs
+                }
+                render_data_source_manager(_report_block_contracts(report), in_use_ids=_in_use_ids)
                 render_compare_panel(_report_block_contracts(report))
             with _ws_rel:
                 st.caption("把多份資料用共同欄位關聯起來（類似 Power BI 的關係檢視）。")
@@ -2720,6 +2734,10 @@ def main() -> None:
             with _ws_new:
                 st.caption("上傳檔案、連接資料庫／服務，或從既有資料新產生欄位／資料表。")
                 render_upload_panel()
+                # Round 176: show the just-uploaded preview RIGHT HERE (where the
+                # user uploaded) instead of only on the 來源與預覽 tab — they were
+                # losing it across tabs and the "右側主畫布" hint was stale.
+                render_staged_upload_preview()
                 render_connector_panel()
                 render_calc_metric_panel(_report_block_contracts(report))
                 render_create_data_panel(_report_block_contracts(report))

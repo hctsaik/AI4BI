@@ -58,34 +58,49 @@ def _friendly_time(ts: "str | None") -> "str | None":
         return ts
 
 
-def _source_entries(report_sources: dict, meta: dict, uploads: dict) -> dict:
+def _source_entries(report_sources: dict, meta: dict, uploads: dict,
+                    in_use_ids: "set | None" = None) -> dict:
     """Round 176: unified {block_id: entry} of EVERY source powering the report.
 
-    entry = {contract, name, icon, origin, subtitle, removable}. Metadata only —
-    builds no frames. Built-in/demo blocks (report blocks the user didn't upload)
-    come first, then user-loaded (upload / DB import, meta-tracked, removable).
+    entry = {contract, name, icon, origin, subtitle, removable, status_icon,
+    status_label}. Metadata only — builds no frames. Built-in/demo blocks come
+    first, then user-loaded (upload / DB import, removable).
+
+    ``status`` distinguishes a source the report actually USES (🟢 報表使用中) from
+    one merely loaded and still being checked (🟡 評估中) — a lifecycle STATUS, not
+    a separate place. ``in_use_ids`` (block_ids referenced by a report visual) is
+    the source of truth; without it, built-in blocks default to in-use.
     """
+    def _status(bid: str, default_in_use: bool) -> tuple[str, str]:
+        in_use = (bid in in_use_ids) if in_use_ids is not None else default_in_use
+        return ("🟢", "報表使用中") if in_use else ("🟡", "評估中")
+
     entries: dict = {}
     builtin = {bid: c for bid, c in report_sources.items() if bid not in meta}
     for bid, c in builtin.items():
+        dot, label = _status(bid, True)
         entries[bid] = {
             "contract": c, "name": getattr(c, "description", None) or bid,
             "icon": "📊", "origin": "📊 內建／示範資料",
             "subtitle": None, "removable": False,
+            "status_icon": dot, "status_label": label,
         }
     for bid, c in uploads.items():
         m = meta.get(bid, {})
         origin = _SOURCE_BADGE.get(str(m.get("source", "")).lower(), "📄 上傳檔案")
         up = _friendly_time(m.get("uploaded_at"))
+        dot, label = _status(bid, False)
         entries[bid] = {
             "contract": c, "name": m.get("display_name", bid),
             "icon": origin.split()[0] if origin else "📄", "origin": origin,
             "subtitle": f"🕒 載入於 {up}" if up else None, "removable": True,
+            "status_icon": dot, "status_label": label,
         }
     return entries
 
 
-def render_data_source_manager(report_sources: "dict | None" = None) -> None:
+def render_data_source_manager(report_sources: "dict | None" = None,
+                               in_use_ids: "set | None" = None) -> None:
     """Round 147/166/176: unified data-source workspace — a master-detail view of
     EVERY source powering the current report.
 
@@ -101,7 +116,7 @@ def render_data_source_manager(report_sources: "dict | None" = None) -> None:
     meta: dict = st.session_state.get(_USER_BLOCK_META_KEY, {})
     uploads = _user_loaded_blocks()  # genuinely user-loaded (meta-tracked)
     report_sources = dict(report_sources or {})
-    entries = _source_entries(report_sources, meta, uploads)
+    entries = _source_entries(report_sources, meta, uploads, in_use_ids)
 
     total = len(entries)
     if total == 0:
@@ -138,17 +153,21 @@ def render_data_source_manager(report_sources: "dict | None" = None) -> None:
         e = entries[bid]
         sh = source_shape(e["contract"])  # metadata only — no rows loaded
         rc = "?" if sh.row_count is None else f"{sh.row_count:,}"
-        return f"{e['icon']} {e['name']}　{_DOT[sh.cost_tier]} {sh.n_cols}欄·{rc}列"
+        return f"{e['status_icon']} {e['name']}　{_DOT[sh.cost_tier]} {sh.n_cols}欄·{rc}列"
 
     left, right = st.columns([1, 2.4], gap="medium")
     with left:
-        st.caption("📂 選擇資料來源")
+        st.caption("📂 選擇資料來源　🟢 報表使用中　🟡 評估中")
         chosen = st.radio(
             "資料來源", ids, format_func=_fmt, key="_ws_source_sel",
             label_visibility="collapsed",
         )
     with right:
         e = entries[chosen]
+        st.caption(f"{e['status_icon']} **{e['status_label']}**　·　{e['origin']}")
+        if e["status_label"] == "評估中":
+            st.caption("（這份是你載入、還在確認的資料。看過沒問題後，到「➕ 新增資料 → 從這份資料"
+                       "建立新報表」就會開始使用它。）")
         render_source_inspector(
             e["contract"], display_name=e["name"], origin=e["origin"],
             key_prefix=f"ws_{chosen}", subtitle=e.get("subtitle"), embedded=True,

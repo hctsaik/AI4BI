@@ -46,6 +46,22 @@ def test_source_entries_marks_uploads_removable_with_badge():
     assert e["icon"] == "🦆"  # duckdb source badge
 
 
+def test_source_entries_status_defaults_builtin_inuse_upload_eval():
+    c = build_retail_sales_block()
+    builtin = _source_entries({"retail_sales": c}, meta={}, uploads={})
+    assert builtin["retail_sales"]["status_label"] == "報表使用中"
+    up = _source_entries({}, meta={"u": {"display_name": "x"}}, uploads={"u": c})
+    assert up["u"]["status_label"] == "評估中"
+    assert up["u"]["status_icon"] == "🟡"
+
+
+def test_source_entries_in_use_ids_marks_upload_as_inuse():
+    c = build_retail_sales_block()
+    e = _source_entries({}, meta={"u": {}}, uploads={"u": c}, in_use_ids={"u"})
+    assert e["u"]["status_label"] == "報表使用中"
+    assert e["u"]["status_icon"] == "🟢"
+
+
 # --- nav structure --------------------------------------------------------
 
 def test_nav_has_four_modes_no_standalone_model():
