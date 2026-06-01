@@ -44,3 +44,17 @@ def test_join_builder_offers_demo_tool_id_join():
         + [s.value for s in at.success if getattr(s, "value", None)]
         + [i.value for i in at.info if getattr(i, "value", None)])
     assert "tool_id" in blob, "tool_id was not auto-detected as a join key"
+
+
+def test_backwards_pick_auto_corrects_to_safe_n_to_1():
+    """Round 183: a backwards (dimension-as-main) pick must NOT strand the user on
+    a 1:N warning — the builder auto-corrects to the safe N:1 orientation."""
+    at = AppTest.from_file(str(APP_PATH)).run(timeout=60)
+    _load_semi(at)
+    at.session_state["_nav_mode"] = "🗂️ 資料"
+    at.run(timeout=60)
+    assert not at.exception
+    warnings = "\n".join(w.value for w in at.warning if getattr(w, "value", None))
+    # the 1:N "主從接反" warning is the opted-out branch; by default the demo's
+    # tool_dim×process_move_fact pair auto-flips to N:1 and never shows it.
+    assert "主從接反" not in warnings, "1:N pick was not auto-corrected to N:1"

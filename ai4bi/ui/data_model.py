@@ -490,6 +490,26 @@ def render_join_builder(report_blocks: "dict | None" = None, expanded: bool = Fa
             "將兩份資料用共同欄位連結起來，就能在同一張圖表中顯示不同來源的數字。"
         )
 
+        # Round 183: inline manual — a plain-language guide the user can open when
+        # the terms feel unfamiliar (requested alongside auto-correct).
+        with st.expander("📖 怎麼設定關聯？（看不懂時點這）", expanded=False):
+            st.markdown(
+                "**一句話**：把「你要看的數字」那份（主要資料），用一個共同欄位接上"
+                "「拿來分類／補欄位」那份（補充資料）。\n\n"
+                "**主要資料 vs 補充資料**\n"
+                "- 📊 **主要資料**＝你要看的數字（例：生產紀錄、銷售明細）——通常筆數很多。\n"
+                "- 🏷️ **補充資料**＝拿來分類或補欄位（例：機台基本資料、門市清單）——通常一個對象一筆。\n\n"
+                "**為什麼方向很重要？**\n"
+                "- ✅ **很多筆數字 → 對到一筆基本資料**：安全，加總、平均都算對。\n"
+                "- ⚠️ **接反了**（一筆基本資料被複製到很多筆）：加總時數字會被**重複灌大**。"
+                "別擔心——偵測到接反時，系統會**自動幫你對調修正**。\n\n"
+                "**一個欄位還是會重複？用「複合鍵」**\n"
+                "- 例：同一個機台編號在不同廠都有，只用「機台」會對到別廠。改用"
+                "「**廠別＋機台**」一起對（按 ➕ 再加一組對應欄位）就準了。\n\n"
+                "**建立關聯後**：到「🔍 探索」用兩份資料的欄位畫一張圖（例：依機台看平均等待時間），"
+                "或用下方「🔗 跨資料表計算」算跨表數字（人均、轉換率…）。"
+            )
+
         if len(user_blocks) < 2:
             st.info(
                 "上傳至少 **2 份資料** 後，才能設定資料關聯。\n\n"
@@ -618,19 +638,41 @@ def render_join_builder(report_blocks: "dict | None" = None, expanded: bool = Fa
         # Detect cardinality from samples (resource-safe) over the WHOLE key combo.
         card_label, risky = detect_cardinality_multi(
             from_contract, from_cols, to_contract, to_cols)
-        # Round 183: white-language — lead with "does it line up / will the numbers
-        # be right", demote the N:1/1:N code to a small caption.
+
+        # Round 183: AUTO-CORRECT a backwards (1:N) pick — flip main/sub so it
+        # becomes the safe N:1, instead of asking the user to understand "主從" and
+        # click. One swap always converges (1:N→N:1); N:N is never swapped (it
+        # wouldn't help). The user can still opt out per data pair.
+        pair_fs = frozenset({from_bid, to_bid})
+        _no_ac: set = st.session_state.setdefault("_join_no_autocorrect", set())
+        if card_label == "1:N" and pair_fs not in _no_ac:
+            st.session_state["_join_swap_request"] = True
+            st.session_state["_join_autocorrect_pair"] = pair_fs
+            st.rerun()
+        _ac_pair = st.session_state.get("_join_autocorrect_pair")
+
         if card_label in ("1:1", "N:1"):
-            st.success(
-                f"✅ 對得起來了：很多筆「{from_name}」對到一筆「{to_name}」，"
-                "這樣加總、平均都會算對。")
+            if _ac_pair == pair_fs:
+                st.info(
+                    "✅ 已自動幫你把「主要／補充」對調好（你原本接反了）——"
+                    "這樣加總才不會被重複灌大。")
+                if st.button("其實我要用原本的方向", key="join_undo_autocorrect"):
+                    _no_ac.add(pair_fs)
+                    st.session_state.pop("_join_autocorrect_pair", None)
+                    st.session_state["_join_swap_request"] = True
+                    st.rerun()
+            else:
+                st.success(
+                    f"✅ 對得起來了：很多筆「{from_name}」對到一筆「{to_name}」，"
+                    "這樣加總、平均都會算對。")
             st.caption(f"（技術型態：{card_label}，安全）")
-        elif card_label == "1:N":
+        elif card_label == "1:N":  # only when the user opted out of auto-correct
             st.warning(
                 "⚠️ 主從接反了，數字會被灌大：你把「很多筆 → 一筆」反過來接了，"
                 "加總時同一個數字會被重複算好幾次。👉 按下面的按鈕就修好。")
-            st.caption(f"（技術型態：{card_label}）")
+            st.caption("（技術型態：1:N）")
             if st.button("🔄 一鍵對調，修正它", key="join_swap_btn"):
+                _no_ac.discard(pair_fs)  # re-enable auto-correct for this pair
                 st.session_state["_join_swap_request"] = True
                 st.rerun()
         elif card_label == "N:N":
