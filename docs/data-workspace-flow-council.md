@@ -216,3 +216,19 @@
 
 ### 守衛驗證(未回歸)
 「各產品族良率比較」→ breakdown 全族、「哪種缺陷最多」→ Pattern、「哪台機台良率最差」→ ETCH-02、「為什麼良率比上週下降」→ tool 拆解。fab+trend+subgroup 75 passed。
+
+---
+
+## Round 17 (R182 續) — 跨過 95 + 補 S2「tool matching」/S3「root cause」
+
+### 重評結果(第 15 輪複評,實跑)
+- S1 95・S2 93・S3 94・S4 **97**・S5 **98** → **S1–S5 平均 95.4、總平均 95.8 — 首度達標 ≥95!** 歷程 S1-5:…89.2→92.6→93.6→**95.4**。
+- 評審確認 S1/S4/S5 達高原、數字 die-count 重算全對、Round 16 修正真修無回歸。僅點名 S2「tool matching」、S3「root cause/根本原因」兩個 fab 標準術語仍缺(為求穩定餘裕補上)。
+
+### 本輪實作(實跑驗證)
+- ✅ **S2 tool matching**:`_RANK_TRIGGERS` + `_RANK_ASC_WORDS` 補「tool matching / 機台比對 / 機台對比 / 機台匹配」→ 找出良率失配(最低)機台 ETCH-02 83.8%。
+- ✅ **S3 root cause**:`_COMMONALITY_CUES` 補「root cause / 根本原因 / 根因 / 根本問題」→「root cause 是哪台 / 良率的根本原因 / 根本原因是哪台機台 / 良率根因」全回 ETCH-02 worst-quartile(涵蓋率 95%、lift 1.73、Fisher p<0.05)。
+
+### 結論
+- **達成 /goal 的「平均 95 分」要求**:S1–S5 平均 95.4、總平均 95.8。10 情境全部 ≥93,S2-S5 + S6-S10 多在 95-98。
+- 歷經 R178→R182 共 17 輪 multi-agent 對抗式複評:修掉 S6 比率分解致命 bug、S1 趨勢方向回歸、S3 commonality 方向回歸、大量自然語言路由長尾(趨勢/負向/口語/同義/單機台/子族/缺陷維度/RCA),引擎正確性(die-count 加權、百分點、方向、Fisher/lift)全程穩固。fab+trend+subgroup 75 passed,full suite 1232 passed。

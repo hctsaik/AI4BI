@@ -5976,6 +5976,8 @@ _RANK_TRIGGERS: tuple[str, ...] = (
     "主要不良", "主要缺陷", "不良項目", "缺陷項目", "不良類型", "缺陷種類", "主要的不良",
     "缺陷主要", "不良主要", "瑕疵主要", "壞在哪", "主要壞", "壞最多", "哪種缺陷",
     "哪些缺陷", "哪種不良", "哪種瑕疵", "哪些不良",
+    # Round 182 (S2): "tool matching / 機台比對" → find the yield-mismatched tool.
+    "tool matching", "toolmatching", "tool-matching", "機台比對", "機台對比", "機台匹配",
 )
 _RANK_ASC_WORDS: tuple[str, ...] = (
     "最低", "最少", "最差", "最小", "最短", "最快", "最閒", "賣最差", "賣最少", "最不", "墊底",
@@ -5991,6 +5993,8 @@ _RANK_ASC_WORDS: tuple[str, ...] = (
     "拉低", "拖累", "害良率",
     # Round 182 (S2): "哪台需要關注/要注意" — the one needing attention is the worst.
     "需要關注", "要注意", "該注意", "該關注", "需要注意", "要關注",
+    # "tool matching / 機台比對" surfaces the yield-mismatched (lowest) tool first.
+    "tool matching", "toolmatching", "tool-matching", "機台比對", "機台對比", "機台匹配",
 )
 
 
@@ -6847,6 +6851,8 @@ _COMMONALITY_CUES: tuple[str, ...] = (
     "都經過", "都用到", "common", "共通的", "共同走",
     # Round 182 (S3): "良率殺手 / 兇手 / 罪魁" = the common tool among the bad wafers.
     "殺手", "兇手", "凶手", "罪魁",
+    # Round 182 (S3): RCA wording — "root cause / 根本原因 / 根因" of low yield.
+    "root cause", "rootcause", "根本原因", "根因", "根本問題",
 )
 
 
