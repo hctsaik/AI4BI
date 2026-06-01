@@ -1587,7 +1587,20 @@ class NL2ProposalService:
                 if col not in df.columns:
                     continue
                 low = df[col].astype(str).str.lower()
-                grp = low.str.startswith(pref)
+                # Round 182 (S5): if the prompt names an EXACT sub-family value
+                # ("Memory-Y 的良率"), filter to that value rather than the broad
+                # prefix group (which would report the whole Memory family).
+                exact = None
+                for _v in df[col].dropna().astype(str).unique():
+                    _vl = _v.lower()
+                    if len(_vl) >= 3 and _vl in hay and (exact is None or len(_vl) > len(exact[1])):
+                        exact = (_v, _vl)
+                if exact is not None:
+                    grp = df[col].astype(str) == exact[0]
+                    disp_exact = exact[0]
+                else:
+                    grp = low.str.startswith(pref)
+                    disp_exact = None
                 if not grp.any() or grp.all():
                     continue  # need a proper non-trivial subset
                 if (is_yield_q or True) and {"good_die", "tested_die"} <= cols:
@@ -1607,11 +1620,14 @@ class NL2ProposalService:
                         f"{'個百分點' if pp else ''}）") if pp else \
                        f"（全廠 {ov:.2f}{u}）"
                 # show the matched family label in the user's own wording (prefer
-                # the longest matching token so "memory" wins over "mem").
-                disp = max((k for k in _ALIAS if k in hay and _ALIAS[k] == pref),
-                           key=len, default=pref)
+                # the longest matching token so "memory" wins over "mem"); an exact
+                # sub-family value is shown verbatim.
+                disp = disp_exact or max(
+                    (k for k in _ALIAS if k in hay and _ALIAS[k] == pref),
+                    key=len, default=pref)
                 sentence = f"「{disp}」的{label}為 {gv:.2f}{u}{tail}。"
-                notes = [f"以「{col}」前綴 = {pref} 過濾後計算{label}，來源：{bid}。"]
+                _filt = (f"{col} = {disp_exact}" if disp_exact else f"{col} 前綴 = {pref}")
+                notes = [f"以「{_filt}」過濾後計算{label}，來源：{bid}。"]
                 intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                                   trust_notes=notes, risk_level="low")
                 return NL2ProposalResult(intent=intent, message=sentence,
@@ -3702,8 +3718,14 @@ class NL2ProposalService:
         if match is None:
             # Round 182 (S1): a bare "有在下降嗎 / 還在掉嗎" names no measure — in a
             # yield-centric fab report it means yield. Retry with an implicit yield
-            # measure instead of refusing.
-            match = idx.best_metric_match("良率 yield", "liang lv yield")
+            # measure — UNLESS another metric is named (e.g. "OEE 趨勢如何"), in
+            # which case answering with yield would be answering the wrong question.
+            _hay_t = f"{prompt.lower()} {normalized}"
+            _other_metric = any(w in _hay_t for w in (
+                "oee", "可用率", "稼動", "利用率", "queue", "等待", "cycle", "週期",
+                "產能", "throughput", "move", "移動", "wip", "uptime", "稼動率"))
+            if not _other_metric:
+                match = idx.best_metric_match("良率 yield", "liang lv yield")
         if match is None:
             return None
         block_id, metric_name, alias = match.block_id, match.metric_name, match.alias
@@ -6385,6 +6407,12 @@ _SUBGROUP_CMP_CUES = (
 
 def _looks_like_subgroup_compare(prompt: str, normalized: str) -> bool:
     hay = f" {prompt.lower()} {normalized} "
+    # Round 182 (S5): "各/所有/每個 X 良率比較" is an ALL-group comparison — defer to
+    # the breakdown/ranking engine (lists every group, die-weighted), not the
+    # two-extreme subgroup compare which reports only the top vs bottom with a
+    # raw-% gap on mean(yield_pct).
+    if any(t in hay for t in ("各", "所有", "每個", "每一", "全部", "各個", "每種", "每類")):
+        return False
     has_flag = any(k in hay for kws, _ in _SUBGROUP_FLAGS for k in kws)
     has_measure = any(k in hay for kws, _ in _SUBGROUP_MEASURES for k in kws)
     has_cmp = any(c in hay for c in _SUBGROUP_CMP_CUES)
@@ -6721,7 +6749,8 @@ def _looks_like_commonality(prompt: str, normalized: str) -> bool:
     # ranking ("哪台良率差"), and is skipped in a vs-period context (那走 explain_change).
     which_station = any(w in hay for w in (
         "哪一站", "哪站", "哪一台", "哪台", "哪臺", "哪個機台", "哪個站", "哪個站點",
-        "哪個製程", "哪一個站", "哪個設備", "哪部機", "站點", "製程站", "誰"))
+        "哪個製程", "哪一個站", "哪個設備", "哪部機", "站點", "製程站", "誰",
+        "什麼", "甚麼", "啥"))
     bad_yield = any(w in hay for w in (
         "良率掉", "良率低", "良率差", "不良", "低良", "良率下降", "良率不好",
         "拉低良率", "良率出問題", "良率有問題", "良率"))

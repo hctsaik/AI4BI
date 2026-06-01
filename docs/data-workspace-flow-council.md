@@ -142,3 +142,19 @@
 
 ### 已知殘留(非常見/資料限制)
 - 「是什麼拖累了良率」(「是什麼」非 which-station)→ 仍走 OEE(仍答 ETCH-02);英文 Memory/Logic label 顯小寫;「哪個 area 造成下降」yield fact 無 area 欄(跨 fact,屬限制)。皆罕見或資料結構限制,非常見問法。
+
+---
+
+## Round 12 (R182 續) — S5 多族/子族比較 + S1 具名 OEE 趨勢守衛 + S3「什麼」口語
+
+### 重評觸發(第 10 輪複評,實跑)
+- S1 88・S2 **97**・S3 89・S4 **97**・S5 86 → S1–S5 平均 **91.4**(+2.4);總平均 ≈ 93.8。S2/S4 已達高原(8/8、7/7 全過)。評審點名 4 條常見問法仍需修。
+
+### 本輪實作(實跑驗證)
+- ✅ **S5 多族比較單位錯(常見,高優先)**:「各產品族良率比較」原走 subgroup-compare 只取頭尾兩族、用「相差 5.77%」(百分比,違 rubric)。`_looks_like_subgroup_compare` 加「各/所有/每個/每一/全部」守衛 → 改走 breakdown,列全 5 組、die-weighted weighted_yield_pct(Logic-A 90.31 最高)。
+- ✅ **S5 子族名降級(中度常見)**:`_answer_single_group_metric` 先比對欄位**精確 distinct 值**——「Memory-Y 的良率」→ 過濾到 Memory-Y(84.55%,低 3.2pp),「Logic-A 良率」→ 90.31%;無精確值時(中文「記憶體/邏輯」)仍用前綴分組(記憶體 86.82 / 邏輯 90.02 = 整族)。
+- ✅ **S1 具名 OEE 趨勢誤回良率(常見)**:`_answer_trend_direction` 的良率預設加 other-metric 守衛(OEE/可用率/queue/cycle/產能…)→「OEE 趨勢如何 / OEE 在惡化嗎」不再回良率趨勢,改由 OEE 引擎回 ETCH-02 OEE 45.8%。
+- ✅ **S3「什麼」口語(常見)**:`_looks_like_commonality` which-station 補「什麼/甚麼/啥」→「是什麼拖累良率 / 什麼造成良率低 / 什麼搞鬼」→ commonality ETCH-02(涵蓋率 95%、lift 1.73、Fisher p<0.05)。
+
+### 守衛驗證(未回歸)
+記憶體 vs 邏輯雙族比較(3.2pp)、Memory 比 Logic、哪台可用率拖累→OEE、有重工的批良率比較差→subgroup-compare(無「各」)、良率趨勢→ETCH-01 點名。fab+compare 套件 70 passed。
