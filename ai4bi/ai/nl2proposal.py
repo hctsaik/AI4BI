@@ -3841,6 +3841,13 @@ class NL2ProposalService:
                         break
             if meas_col:
                 break
+        # Round 184 (S14): a shift comparison with no measure named ("白天班 vs 夜班
+        # 比較") defaults to wait time — the metric a fab engineer means by default.
+        if flag_col == "shift" and not meas_col:
+            for bid, c in contracts.items():
+                if "queue_time_hr" in {x.name for x in getattr(c, "columns", [])}:
+                    meas_col, meas_block = "queue_time_hr", bid
+                    break
         if not flag_col or not meas_col:
             return None
         try:
@@ -6718,8 +6725,8 @@ def _looks_like_category_compare(prompt: str, normalized: str) -> bool:
 _SUBGROUP_FLAGS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("重工", "返工", "rework"), "rework_flag"),
     (("被hold", "被 hold", "hold 住", "hold住", "hold", "保留", "扣留", "held", "卡住"), "hold_flag"),
-    (("日班", "夜班", "白班", "晚班", "早班", "班別", "shift", "day班", "night班",
-      "day 班", "night 班"), "shift"),
+    (("日班", "夜班", "白班", "白天班", "晚班", "早班", "大夜", "班別", "shift", "day班",
+      "night班", "day 班", "night 班"), "shift"),
     (("優先", "priority", "hot", "急件", "趕貨"), "priority"),
     (("供應商", "廠商", "設備商", "vendor", "供货商", "原廠"), "vendor"),
     (("產品", "product", "品項", "產品別", "product family"), "product_family"),
@@ -6735,6 +6742,13 @@ _SUBGROUP_CMP_CUES = (
     "比較", "有差", "有沒有差", "差異", "差別", "是不是", "會不會", "vs", "versus",
     "對比", "相比", "比一般", "短嗎", "長嗎", "高嗎", "低嗎", "快嗎", "慢嗎",
     "多嗎", "少嗎", "更差", "更好", "更高", "更低", "更長", "更短")
+_SHIFT_WORDS = ("日班", "夜班", "白班", "白天班", "晚班", "早班", "大夜", "班別",
+                "day班", "night班", "day 班", "night 班")
+# Round 184 (S14): a BROADER compare cue set used only for shift questions (so a
+# default wait-time comparison fires); kept OUT of the general cues above because
+# "哪個/誰" are which-words that would steal a plain ranking ("哪個產品良率最差").
+_SHIFT_CMP_CUES = _SUBGROUP_CMP_CUES + (
+    "差多少", "差幾", "哪個", "誰", "比一比", "久嗎", "比較久", "誰高", "誰久", "久", "比")
 
 
 def _looks_like_subgroup_compare(prompt: str, normalized: str) -> bool:
@@ -6745,6 +6759,11 @@ def _looks_like_subgroup_compare(prompt: str, normalized: str) -> bool:
     # raw-% gap on mean(yield_pct).
     if any(t in hay for t in ("各", "所有", "每個", "每一", "全部", "各個", "每種", "每類")):
         return False
+    # Round 184 (S14): a SHIFT comparison defaults to wait time when no measure is
+    # named ("白天班 vs 夜班 比較") — the handler picks queue_time_hr. Uses the
+    # broader shift cue set, but ONLY when shift words are present.
+    if any(s in hay for s in _SHIFT_WORDS) and any(c in hay for c in _SHIFT_CMP_CUES):
+        return True
     has_flag = any(k in hay for kws, _ in _SUBGROUP_FLAGS for k in kws)
     has_measure = any(k in hay for kws, _ in _SUBGROUP_MEASURES for k in kws)
     has_cmp = any(c in hay for c in _SUBGROUP_CMP_CUES)

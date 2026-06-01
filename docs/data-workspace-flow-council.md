@@ -337,3 +337,16 @@ A 載入整備預覽 S01-03;B 關聯/複合鍵 S04-06;C 核心分析 S07-14(良�
 
 ### 後續
 重評 20 情境。殘留小瑕:S19 裸「不良率」、S14「依班別cycle time」缺指標詞、S19 加圖意圖。視 re-score 決定續修或宣告達標(目標常見問法全綠+平均≥95)。
+
+## Round 5 (R184) — R4 後重評 + S14 班別比較預設指標
+
+### 重評(實跑)
+- R4 後:S01-S10 **96.1**、S11-S20 **91.4** → 總平均 **93.75**。3 個真 bug(S14 單位/S17 英文/S18 capacity)經 fresh 評審**確認全修**;S18 衝到 98、S01-S10 穩 ~96。
+- 兩個錨點:**S14(76)**——班別比較觸發詞太窄(需明寫指標;「白天班夜班比較/差多少/比一比/哪個久」全 unsupported);**S17(80)**——「本期跟上期」unsupported。
+
+### Round 5 共識 + 實作
+- ✅ **S14 班別比較預設等待時間**:`_looks_like_subgroup_compare` 對「班別/白天班/夜班…+ 比較cue」即觸發(不必明寫指標);`_answer_subgroup_compare` flag=shift 且無指標時**預設 queue_time_hr**(fab 班別比較的自然指標)。`_SUBGROUP_CMP_CUES` 補「差多少/哪個/比一比/久嗎/誰高/誰久」、shift flags 補「白天班/大夜」。「白天班夜班比較/Day班跟Night班差多少/比一比/夜班等待比白天久嗎/哪個等待久」全 → Day 2.52 vs Night 2.89 相差 0.37 hr + Welch t。守衛:有重工→yield subgroup、被hold→cycle subgroup 不受影響。
+- ✅ **S17 本期/環比**(R4 已補,本輪確認):「本期良率跟上期比/這期比上期/良率環比變化」→ WoW(最近7天 vs 前7天)。
+
+### 後續
+重評 20 情境;殘留 S14「依班別cycle time」(cross-fact,cycle在yield fact、shift在move fact)、S19 加圖意圖被分析路由先搶 屬結構/次要。視結果宣告達標或續修。
