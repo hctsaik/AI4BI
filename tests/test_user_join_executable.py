@@ -17,6 +17,7 @@ from ai4bi.analysis.executor import Executor
 from ai4bi.blocks.contracts import BlockType
 from ai4bi.query_spec import BlockRef, DimensionRef, MetricRef, VisualQuerySpec
 from ai4bi.ui import data_model
+from ai4bi.ui.data_model import detect_cardinality_multi
 from ai4bi.ui.upload import _USER_BLOCKS_KEY, infer_block
 
 
@@ -113,3 +114,18 @@ def test_composite_key_relationship(session):
     hint = [h for h in session[_USER_BLOCKS_KEY]["f"].relationships
             if h.target_block_id == "d"][0]
     assert set(hint.allowed_join_keys) == {"region", "store"}
+
+
+def test_composite_cardinality_combo_unique():
+    # neither column alone is unique on the dim, but the (region, store) COMBO is →
+    # composite key restores a safe N:1 (this is the user's "需要多欄位才不重複").
+    fact = _contract(pd.DataFrame({
+        "region": ["N", "N", "S", "S"], "store": [1, 1, 2, 2], "amt": [1, 2, 3, 4]}), "f")
+    dim = _contract(pd.DataFrame({
+        "region": ["N", "N", "S", "S"], "store": [1, 2, 1, 2], "mgr": list("abcd")}), "d")
+    # single key 'region' alone → both sides non-unique → N:N (risky)
+    single = data_model.detect_cardinality(fact, "region", dim, "region")
+    assert single == ("N:N", True)
+    # composite (region, store) → dim unique → N:1 (safe)
+    combo, risky = detect_cardinality_multi(fact, ["region", "store"], dim, ["region", "store"])
+    assert combo == "N:1" and risky is False

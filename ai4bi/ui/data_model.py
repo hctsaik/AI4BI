@@ -431,26 +431,40 @@ def render_compare_panel(report_sources: "dict | None" = None) -> None:
             st.info("找不到明顯的共同鍵，可能無法直接關聯。")
 
 
+def _combo_unique(contract, cols: list[str], *, sample_n: int = 2000) -> "bool | None":
+    """Round 182: is the COMBINATION of ``cols`` unique within a sample? (composite
+    key support). None when the sample/columns can't be read. Resource-safe."""
+    from ai4bi.blocks.datastore import sample_dataframe
+    try:
+        df = sample_dataframe(contract, sample_n)
+    except Exception:  # noqa: BLE001 — detection must never break the page
+        return None
+    if df is None or not cols or any(c not in getattr(df, "columns", []) for c in cols):
+        return None
+    sub = df[cols].dropna()
+    if len(sub) == 0:
+        return None
+    return not bool(sub.duplicated().any())
+
+
 def detect_cardinality(from_contract, from_col: str, to_contract, to_col: str,
                        *, sample_n: int = 2000) -> tuple[str, bool]:
     """Infer join cardinality from SAMPLES only (resource-safe — never loads a
     full table). Returns (label, is_risky). See cardinality_from_keys."""
-    from ai4bi.blocks.datastore import sample_dataframe
+    return cardinality_from_keys(
+        _combo_unique(from_contract, [from_col], sample_n=sample_n),
+        _combo_unique(to_contract, [to_col], sample_n=sample_n))
 
-    def _uniq(contract, col) -> "bool | None":
-        try:
-            df = sample_dataframe(contract, sample_n)
-        except Exception:  # noqa: BLE001 — detection must never break the page
-            return None
-        if df is None or col not in getattr(df, "columns", []):
-            return None
-        s = df[col].dropna()
-        if len(s) == 0:
-            return None
-        return int(s.nunique()) == int(len(s))
 
-    return cardinality_from_keys(_uniq(from_contract, from_col),
-                                 _uniq(to_contract, to_col))
+def detect_cardinality_multi(from_contract, from_cols: list[str],
+                             to_contract, to_cols: list[str],
+                             *, sample_n: int = 2000) -> tuple[str, bool]:
+    """Round 182: cardinality for a COMPOSITE key — uniqueness is judged on the
+    whole column COMBINATION per side, so "(廠別, 機台)" can be unique even when
+    neither column is unique alone. Returns (label, is_risky)."""
+    return cardinality_from_keys(
+        _combo_unique(from_contract, list(from_cols), sample_n=sample_n),
+        _combo_unique(to_contract, list(to_cols), sample_n=sample_n))
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +501,28 @@ def render_join_builder(report_blocks: "dict | None" = None, expanded: bool = Fa
 
         block_ids = list(user_blocks.keys())
 
+        def _nm(bid: str) -> str:
+            c = user_blocks.get(bid)
+            return getattr(c, "description", None) or bid
+
+        # Round 183: after a relationship is created, show a "what's next" card so
+        # the user isn't stranded ("建立 link 後不知道要做什麼").
+        _jc = st.session_state.pop("_just_created_rel", None)
+        if _jc is not None:
+            st.success(
+                f"關聯建好了！🎉　「{_jc['from']}」和「{_jc['to']}」現在可以一起分析了。"
+            )
+            st.caption("接下來你可以——")
+            nb1, nb2 = st.columns(2)
+            with nb1:
+                if st.button("💬 用這個關聯問問題", key="join_next_ask", type="primary",
+                             help="例如「依機台比較平均等待時間」「每個機台的生產筆數」"):
+                    st.session_state["_pending_nav_mode"] = "🔍 探索"
+                    st.rerun()
+            with nb2:
+                st.caption("或往下捲到 **🔗 跨資料表計算**，做一個跨表數字（人均、轉換率…）。")
+            st.markdown("---")
+
         st.caption("**建立新的關聯**")
         # Round 176: a 1:N detection means main/sub are likely swapped; the swap
         # button sets this flag, drained BEFORE the selectboxes re-instantiate.
@@ -495,80 +531,121 @@ def render_join_builder(report_blocks: "dict | None" = None, expanded: bool = Fa
             if _fb and _tb:
                 st.session_state["join_from_block"] = _tb
                 st.session_state["join_to_block"] = _fb
+        st.caption("📊 主要資料 = 你要看的數字　🏷️ 補充資料 = 拿來分類／補欄位的")
         col_l, col_r = st.columns(2)
         with col_l:
-            from_bid = st.selectbox("主表（事實資料）", block_ids, key="join_from_block")
+            from_bid = st.selectbox(
+                "要分析的主要資料", block_ids, key="join_from_block",
+                format_func=_nm,
+                help="你最想看數字的那份，例如「生產紀錄」「銷售明細」（技術上＝事實表）")
         with col_r:
             to_options = [b for b in block_ids if b != from_bid]
             if not to_options:
                 st.warning("需要至少兩份不同的資料才能建立關聯。")
                 return
-            to_bid = st.selectbox("副表（維度資料）", to_options, key="join_to_block")
+            to_bid = st.selectbox(
+                "補充說明用的資料", to_options, key="join_to_block",
+                format_func=_nm,
+                help="拿來補欄位／分類的那份，例如「機台基本資料」「門市清單」（技術上＝維度表）")
 
         from_contract = user_blocks.get(from_bid)
         to_contract = user_blocks.get(to_bid)
         if from_contract is None or to_contract is None:
             return
+        from_name, to_name = _nm(from_bid), _nm(to_bid)
 
-        # Auto-detect common columns
+        # Auto-detect common columns (top match per row default)
         candidates = _auto_detect_join_cols(from_contract, to_contract)
-
         if candidates:
             top_a, top_b, confidence = candidates[0]
             conf_pct = int(confidence * 100)
-            if confidence >= 0.9:
-                st.success(
-                    f"✅ AI 偵測到最佳連接欄位：`{from_bid}.{top_a}` ↔ `{to_bid}.{top_b}`"
-                    f"（信心度 {conf_pct}%）"
-                )
-            else:
-                st.info(
-                    f"💡 建議連接欄位：`{from_bid}.{top_a}` ↔ `{to_bid}.{top_b}`"
-                    f"（信心度 {conf_pct}%，請確認是否正確）"
-                )
+            (st.success if confidence >= 0.9 else st.info)(
+                f"{'✅ AI 偵測到最佳連接欄位' if confidence >= 0.9 else '💡 建議連接欄位'}："
+                f"`{top_a}` ↔ `{top_b}`（信心度 {conf_pct}%）")
 
-        # Let user choose columns
         from_col_options = [c.name for c in from_contract.columns]
         to_col_options = [c.name for c in to_contract.columns]
 
-        default_from = candidates[0][0] if candidates else from_col_options[0]
-        default_to = candidates[0][1] if candidates else to_col_options[0]
+        # Round 182: COMPOSITE keys — a list of column pairs that must ALL be equal
+        # for two rows to count as "the same". Reset the rows when the chosen
+        # blocks change (their columns differ, so stale widget values are invalid).
+        ctx = (from_bid, to_bid)
+        if st.session_state.get("_join_pairs_ctx") != ctx:
+            st.session_state["_join_pairs_ctx"] = ctx
+            st.session_state["_join_n_pairs"] = 1
+            for _k in [k for k in list(st.session_state.keys())
+                       if str(k).startswith(("jk_from_", "jk_to_"))]:
+                del st.session_state[_k]
+        n_pairs = int(st.session_state.get("_join_n_pairs", 1))
 
-        col1, col2 = st.columns(2)
-        with col1:
-            from_col = st.selectbox(
-                f"{from_bid} 的連接欄位",
-                from_col_options,
-                index=from_col_options.index(default_from) if default_from in from_col_options else 0,
-                key="join_from_col",
-            )
-        with col2:
-            to_col = st.selectbox(
-                f"{to_bid} 的連接欄位",
-                to_col_options,
-                index=to_col_options.index(default_to) if default_to in to_col_options else 0,
-                key="join_to_col",
-            )
+        key_pairs: list[tuple[str, str]] = []
+        for i in range(n_pairs):
+            st.caption("用哪個欄位把兩份資料對起來？" if i == 0
+                       else "⋯ 而且這個欄位也要同時相等（兩個都相等才算同一筆）：")
+            dft = candidates[i][0] if i < len(candidates) else from_col_options[0]
+            dtt = candidates[i][1] if i < len(candidates) else to_col_options[0]
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                fc = st.selectbox(
+                    f"「{from_name}」的欄位", from_col_options,
+                    index=from_col_options.index(dft) if dft in from_col_options else 0,
+                    key=f"jk_from_{i}")
+            with cc2:
+                tc = st.selectbox(
+                    f"「{to_name}」的欄位", to_col_options,
+                    index=to_col_options.index(dtt) if dtt in to_col_options else 0,
+                    key=f"jk_to_{i}")
+            key_pairs.append((fc, tc))
 
-        # Detect cardinality from samples (resource-safe) and warn on fanout.
-        card_label, risky = detect_cardinality(from_contract, from_col, to_contract, to_col)
-        _CARD_HELP = {
-            "1:1": "✅ 一對一：兩邊的鍵都唯一。",
-            "N:1": "✅ 多對一：多筆主表對應一筆副表（最常見、安全）。",
-            "1:N": "⚠️ 一對多：副表的鍵不唯一 — 通常是主表／副表設反了，建議對調。",
-            "N:N": "🚨 多對多：兩邊的鍵都不唯一，關聯會造成資料「爆量」(fanout)、數字被灌大。",
-            "未知": "❔ 無法判斷關聯型態（資料不足或欄位無法取樣）。",
-        }
+        addc, rmc = st.columns(2)
+        with addc:
+            if st.button(
+                    "➕ 再加一組對應欄位", key="join_add_pair",
+                    help="一個欄位還是對到重複的資料時，多用一個欄位一起比對"
+                         "（例如「廠別＋機台」一起對，才不會混到別廠的同號機台）"):
+                st.session_state["_join_n_pairs"] = n_pairs + 1
+                st.rerun()
+        with rmc:
+            if n_pairs > 1 and st.button("➖ 移除最後一組", key="join_rm_pair"):
+                for _sfx in (f"jk_from_{n_pairs - 1}", f"jk_to_{n_pairs - 1}"):
+                    st.session_state.pop(_sfx, None)
+                st.session_state["_join_n_pairs"] = n_pairs - 1
+                st.rerun()
+
+        from_cols = [f for f, _ in key_pairs]
+        to_cols = [t for _, t in key_pairs]
+
+        # Detect cardinality from samples (resource-safe) over the WHOLE key combo.
+        card_label, risky = detect_cardinality_multi(
+            from_contract, from_cols, to_contract, to_cols)
+        # Round 183: white-language — lead with "does it line up / will the numbers
+        # be right", demote the N:1/1:N code to a small caption.
         if card_label in ("1:1", "N:1"):
-            st.success(f"關聯型態：**{card_label}**　{_CARD_HELP[card_label]}")
+            st.success(
+                f"✅ 對得起來了：很多筆「{from_name}」對到一筆「{to_name}」，"
+                "這樣加總、平均都會算對。")
+            st.caption(f"（技術型態：{card_label}，安全）")
         elif card_label == "1:N":
-            st.warning(f"關聯型態：**{card_label}**　{_CARD_HELP[card_label]}")
-            if st.button("🔄 對調主表／副表", key="join_swap_btn"):
+            st.warning(
+                "⚠️ 主從接反了，數字會被灌大：你把「很多筆 → 一筆」反過來接了，"
+                "加總時同一個數字會被重複算好幾次。👉 按下面的按鈕就修好。")
+            st.caption(f"（技術型態：{card_label}）")
+            if st.button("🔄 一鍵對調，修正它", key="join_swap_btn"):
                 st.session_state["_join_swap_request"] = True
                 st.rerun()
-        else:  # N:N or 未知 — risky
-            st.error(f"關聯型態：**{card_label}**　{_CARD_HELP[card_label]}")
-        st.caption("（型態由前幾列取樣估計，非全表掃描。）")
+        elif card_label == "N:N":
+            st.error(
+                "🚨 這兩份對不太起來，數字會爆量：兩邊的對應欄位都有重複值，"
+                "硬接會讓每筆資料互相相乘、總數被灌得很誇張。")
+            st.info(
+                "💡 通常是「對應欄位選錯」，或「需要再加一組欄位才能對準」——"
+                "試試上面的「➕ 再加一組對應欄位」（例如「廠別＋機台」一起對）。")
+        else:  # 未知
+            st.warning(
+                "❔ 還沒辦法確認對不對得起來（資料太少或欄位取樣不到）。"
+                "可先到「📋 來源與預覽」看看這些欄位的內容。")
+            st.caption(f"（技術型態：{card_label}）")
+        st.caption("（型態由前幾列取樣估計，非全表掃描；若加總後數字異常偏大，可能仍有重複。）")
 
         confirm_ok = True
         if risky:
@@ -576,15 +653,13 @@ def render_join_builder(report_blocks: "dict | None" = None, expanded: bool = Fa
 
         if st.button("✅ 建立關聯", key="join_create_btn", type="primary",
                      disabled=not confirm_ok):
-            _add_relationship(from_bid, to_bid, [(from_col, to_col)],
+            _add_relationship(from_bid, to_bid, key_pairs,
                               cardinality=_CARD_TO_SEMANTIC.get(card_label, "many_to_one"))
-            st.success(
-                f"已建立關聯（{card_label}）：`{from_bid}.{from_col}` → `{to_bid}.{to_col}`\n\n"
-                "現在可以在同一張圖表裡同時使用這兩份資料的欄位。"
-            )
+            st.session_state["_just_created_rel"] = {
+                "from": from_name, "to": to_name, "card": card_label}
             st.rerun()
 
-        # Show existing relationships
+        # Show existing relationships (composite keys shown joined with ＋)
         sm = get_user_semantic_model()
         existing_rels = [
             r for r in sm.get("relationships", [])
@@ -594,14 +669,15 @@ def render_join_builder(report_blocks: "dict | None" = None, expanded: bool = Fa
             st.markdown("---")
             st.caption("**已建立的關聯**")
             for rel in existing_rels:
-                keys = rel.get("keys", [{}])
-                from_k = keys[0].get("from", "?") if keys else "?"
-                to_k = keys[0].get("to", "?") if keys else "?"
+                keys = rel.get("keys", []) or []
+                from_k = "＋".join(str(k.get("from", "?")) for k in keys) or "?"
+                to_k = "＋".join(str(k.get("to", "?")) for k in keys) or "?"
                 card = _SEMANTIC_TO_CARD.get(rel.get("cardinality", ""), "")
                 rel_col, del_col = st.columns([5, 1])
                 with rel_col:
                     st.markdown(
-                        f"`{rel['from_block']}.{from_k}` **─{card}→** `{rel['to_block']}.{to_k}`"
+                        f"`{rel['from_block']}`.({from_k}) **─{card}→** "
+                        f"`{rel['to_block']}`.({to_k})"
                     )
                 with del_col:
                     if st.button("刪除", key=f"del_rel_{rel['relationship_id']}"):
