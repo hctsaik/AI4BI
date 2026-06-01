@@ -31,10 +31,36 @@ def test_suggestions_returns_list():
     assert len(result) > 0
 
 
-def test_suggestions_max_6():
+def test_smart_suggestions_present_and_buildable():
+    """Round 185: with date + ≥2 categories + ≥2 metrics, the generator offers the
+    'smart' analyses (Pareto / moving-average / forecast / pivot / small-multiples)
+    on top of the basic charts — and every suggestion builds without error."""
+    from ai4bi.report.builder import build_visual_from_selection
+    contracts = _sales_contracts()  # has order_date + region/product/channel + revenue/units
+    sgs = generate_suggestions(contracts)
+    titles = " ".join(s.title for s in sgs)
+    assert "柏拉圖" in titles and "移動平均" in titles and "預測" in titles
+    assert any(s.visual_type is VisualType.pivot for s in sgs)
+    assert any(s.visual_type is VisualType.small_multiples for s in sgs)
+    # the analytics ones carry an `extra` (postprocess / trend_line) config
+    assert any(s.extra and "postprocess" in s.extra for s in sgs)        # Pareto / MA
+    assert any(s.extra and "trend_line" in s.extra for s in sgs)         # forecast
+    # every suggestion (incl. 2-dim pivot / small-multiples + extra) must build
+    for i, s in enumerate(sgs):
+        dims = [d for d in (s.dimension_name, s.second_dimension_name) if d]
+        q, v = build_visual_from_selection(
+            f"sg{i}", s.block_id, [s.metric_name], dims, s.visual_type, contracts, None)
+        if s.extra:
+            v.extra = {**(v.extra or {}), **s.extra}
+            assert v.extra  # config carried onto the visualization
+
+
+def test_suggestions_max_cap():
+    # Round 185: cap raised 6 → 12 (added Pareto / moving-avg / forecast / pivot /
+    # small-multiples "smart" suggestions on top of the basic charts).
     contracts = _sales_contracts()
     result = generate_suggestions(contracts)
-    assert len(result) <= 6
+    assert len(result) <= 12
 
 
 def test_suggestions_have_required_fields():

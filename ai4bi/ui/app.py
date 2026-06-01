@@ -861,20 +861,23 @@ def _render_ai_suggestions(report: ExecutableReportSpec, cache: QueryCache) -> N
             return
 
         existing_ids = set(report.pages.get("main", type("_", (), {"visuals": {}})()).visuals.keys())
-        for sg in suggestions[:5]:
+        for si, sg in enumerate(suggestions[:8]):  # Round 185: surface more (was 5)
             icon = _SUGGESTION_ICONS.get(sg.visual_type.value, "📊")
             cols = st.columns([5, 1])
             with cols[0]:
                 st.markdown(f"{icon} **{sg.title}**")
                 st.caption(sg.reason)
             with cols[1]:
-                btn_key = f"sg_create_{sg.block_id}_{sg.metric_name}_{sg.visual_type.value}"
+                # Round 185: include si + extra/second-dim in the key so two
+                # suggestions on the same block+metric+type (e.g. trend vs moving-avg)
+                # get distinct buttons.
+                btn_key = f"sg_create_{si}_{sg.block_id}_{sg.metric_name}_{sg.visual_type.value}"
                 if st.button("建立", key=btn_key):
-                    dim_names = [sg.dimension_name] if sg.dimension_name else []
-                    vid = f"sg_{sg.visual_type.value}_{sg.metric_name}"
+                    dim_names = [d for d in (sg.dimension_name, sg.second_dimension_name) if d]
+                    vid = f"sg_{sg.visual_type.value}_{sg.metric_name}_{si}"
                     c = 1
                     while vid in existing_ids:
-                        vid = f"sg_{sg.visual_type.value}_{sg.metric_name}_{c}"; c += 1
+                        vid = f"sg_{sg.visual_type.value}_{sg.metric_name}_{si}_{c}"; c += 1
                     try:
                         from ai4bi.report.builder import build_add_visual_proposal, build_visual_from_selection
                         q, v = build_visual_from_selection(
@@ -886,6 +889,10 @@ def _render_ai_suggestions(report: ExecutableReportSpec, cache: QueryCache) -> N
                             contracts=contracts,
                             semantic_model=sm,
                         )
+                        # Round 185: apply the suggestion's analytics config (Pareto /
+                        # moving-average / forecast) onto the built visualization.
+                        if sg.extra:
+                            v.extra = {**(v.extra or {}), **sg.extra}
                         workspace.stage_proposal(build_add_visual_proposal("main", vid, q, v))
                         workspace.accept_pending()
                         existing_ids.add(vid)

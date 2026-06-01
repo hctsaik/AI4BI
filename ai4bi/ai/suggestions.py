@@ -39,6 +39,10 @@ class ChartSuggestion:
     dimension_name: Optional[str]   # "block_id.column_name" or None for KPI
     title: str
     reason: str                     # one-line explanation shown to the user
+    # Round 185: optional VisualizationSpec.extra (postprocess/trend_line) so a
+    # suggestion can be a Pareto / moving-average / forecast, not just a raw chart.
+    extra: Optional[dict] = None
+    second_dimension_name: Optional[str] = None  # for pivot / small-multiples
 
 
 _DATE_PREFIXES = ("date_", "time_", "dt_", "ts_")
@@ -93,7 +97,7 @@ def generate_suggestions(
         ]
 
         def _add(s: ChartSuggestion) -> None:
-            if len(suggestions) < 6 and s.title not in seen_titles:
+            if len(suggestions) < 12 and s.title not in seen_titles:
                 suggestions.append(s)
                 seen_titles.add(s.title)
 
@@ -160,6 +164,58 @@ def generate_suggestions(
                 dimension_name=f"{block_id}.{cat_cols[0]}",
                 title=f"{metrics[0]} vs {metrics[1]}",
                 reason=f"相關性：{metrics[0]} 與 {metrics[1]} 的關係",
+            ))
+
+        # ── Round 185: "smart" analysis suggestions (not just raw charts) ──
+        # 7. Pareto / ABC — the 80/20 few-vital categories
+        if cat_cols:
+            _add(ChartSuggestion(
+                block_id=block_id, metric_name=metrics[0],
+                visual_type=VisualType.bar_chart,
+                dimension_name=f"{block_id}.{cat_cols[0]}",
+                title=f"{metrics[0]} 柏拉圖 ({cat_cols[0]})",
+                reason=f"柏拉圖／ABC：少數 {cat_cols[0]} 貢獻大部分 {metrics[0]}",
+                extra={"postprocess": "pareto", "data_labels": True},
+            ))
+        # 8. Moving average — smooth the noise to see the real trend
+        if date_cols:
+            _add(ChartSuggestion(
+                block_id=block_id, metric_name=metrics[0],
+                visual_type=VisualType.line_chart,
+                dimension_name=f"{block_id}.{date_cols[0]}",
+                title=f"{metrics[0]} 移動平均",
+                reason=f"移動平均：平滑波動，看 {metrics[0]} 的真實走勢",
+                extra={"postprocess": "moving_avg", "postprocess_window": 4},
+            ))
+        # 9. Forecast — project the next periods
+        if date_cols:
+            _add(ChartSuggestion(
+                block_id=block_id, metric_name=metrics[0],
+                visual_type=VisualType.line_chart,
+                dimension_name=f"{block_id}.{date_cols[0]}",
+                title=f"{metrics[0]} 預測",
+                reason=f"預測：依趨勢外推 {metrics[0]} 未來幾期（線性，僅供參考）",
+                extra={"trend_line": {"method": "linear", "forecast_periods": 3}},
+            ))
+        # 10. Cross-tab pivot — metric across two categories at once
+        if len(cat_cols) >= 2:
+            _add(ChartSuggestion(
+                block_id=block_id, metric_name=metrics[0],
+                visual_type=VisualType.pivot,
+                dimension_name=f"{block_id}.{cat_cols[0]}",
+                second_dimension_name=f"{block_id}.{cat_cols[1]}",
+                title=f"{metrics[0]} 交叉表 ({cat_cols[0]}×{cat_cols[1]})",
+                reason=f"交叉分析：{metrics[0]} 在 {cat_cols[0]} 與 {cat_cols[1]} 的分布",
+            ))
+        # 11. Small multiples — one trend mini-chart per category
+        if date_cols and cat_cols:
+            _add(ChartSuggestion(
+                block_id=block_id, metric_name=metrics[0],
+                visual_type=VisualType.small_multiples,
+                dimension_name=f"{block_id}.{date_cols[0]}",
+                second_dimension_name=f"{block_id}.{cat_cols[0]}",
+                title=f"{metrics[0]} 分面趨勢 ({cat_cols[0]})",
+                reason=f"分面：各 {cat_cols[0]} 的 {metrics[0]} 走勢並排比較",
             ))
 
     return suggestions
