@@ -268,12 +268,28 @@ def _auto_detect_join_cols(
 
     # Fuzzy: strip common suffixes and match
     _STRIP = re.compile(r"(_id|_key|_code|_no|_num|_name)$", re.I)
+    _exact = {(a, b) for a, b, _ in matches}
     for lower_a, orig_a in a_cols.items():
         stem_a = _STRIP.sub("", lower_a)
         for lower_b, orig_b in b_cols.items():
             stem_b = _STRIP.sub("", lower_b)
-            if stem_a == stem_b and (orig_a, orig_b, 1.0) not in matches:
+            if stem_a == stem_b and (orig_a, orig_b) not in _exact:
                 matches.append((orig_a, orig_b, 0.7))
+
+    # Round 178: qualified-synonym keys — one stem is a suffix/substring of the
+    # other (tool_id ↔ etch_tool_id, lot_id ↔ parent_lot_id). Lower confidence so
+    # the UI asks the user to confirm. Skip generic 1-2 char stems to avoid noise.
+    for lower_a, orig_a in a_cols.items():
+        stem_a = _STRIP.sub("", lower_a)
+        for lower_b, orig_b in b_cols.items():
+            stem_b = _STRIP.sub("", lower_b)
+            if (stem_a and stem_b and stem_a != stem_b
+                    and min(len(stem_a), len(stem_b)) >= 3
+                    and (stem_a.endswith(stem_b) or stem_b.endswith(stem_a)
+                         or stem_a in stem_b or stem_b in stem_a)
+                    and (orig_a, orig_b) not in _exact
+                    and not any(m[0] == orig_a and m[1] == orig_b for m in matches)):
+                matches.append((orig_a, orig_b, 0.6))
 
     # Deduplicate and sort
     seen: set[tuple[str, str]] = set()
@@ -384,14 +400,19 @@ def detect_cardinality(from_contract, from_col: str, to_contract, to_col: str,
 # Round 037: Join Builder UI
 # ---------------------------------------------------------------------------
 
-def render_join_builder(expanded: bool = False) -> None:
+def render_join_builder(report_blocks: "dict | None" = None, expanded: bool = False) -> None:
     """Render the '資料關聯設定' expander — Round 037.
 
     Round 148: ``expanded`` lets the caller open it by default when it is the
     primary panel of the 模型 view (so the headline feature isn't one click away).
-    Round 156: operates on genuinely user-loaded data only (not the demo seed).
+    Round 178: operates on the CURRENT REPORT's blocks (built-in/demo + user
+    uploads) when ``report_blocks`` is passed — so you can join the demo's own
+    tables (e.g. tool_dim ↔ process_move_fact on tool_id), not only files you
+    uploaded yourself. report_block_contracts only includes blocks the report
+    actually references, so other demos' seeds don't leak in.
     """
-    user_blocks: dict[str, DataBlockContract] = _user_loaded_blocks()
+    user_blocks: dict[str, DataBlockContract] = (
+        dict(report_blocks) if report_blocks is not None else _user_loaded_blocks())
 
     with st.expander("🔗 資料關聯設定（把兩份資料用共同欄位連結）", expanded=expanded):
         st.caption(
@@ -546,11 +567,13 @@ _DATA_TYPE_ICON = {
 }
 
 
-def render_data_model_view() -> None:
+def render_data_model_view(report_blocks: "dict | None" = None) -> None:
     """Render the '資料模型' expander — Round 038.
 
-    Round 156: shows genuinely user-loaded data only (not the demo seed)."""
-    user_blocks: dict[str, DataBlockContract] = _user_loaded_blocks()
+    Round 178: shows the CURRENT REPORT's blocks (built-in/demo + uploads) when
+    ``report_blocks`` is passed, matching the join builder."""
+    user_blocks: dict[str, DataBlockContract] = (
+        dict(report_blocks) if report_blocks is not None else _user_loaded_blocks())
     sm = get_user_semantic_model()
 
     with st.expander("🗂️ 資料模型", expanded=False):

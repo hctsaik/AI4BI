@@ -2724,8 +2724,9 @@ def main() -> None:
                 render_compare_panel(_report_block_contracts(report))
             with _ws_rel:
                 st.caption("把多份資料用共同欄位關聯起來（類似 Power BI 的關係檢視）。")
-                render_join_builder(expanded=True)
-                render_data_model_view()
+                _rel_blocks = _report_block_contracts(report)
+                render_join_builder(_rel_blocks, expanded=True)
+                render_data_model_view(_rel_blocks)
                 render_cross_fact_panel(_report_block_contracts(report))
                 if (st.session_state.get("_xf_result") is not None
                         and not st.session_state["_xf_result"].empty):
