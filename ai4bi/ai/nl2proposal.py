@@ -25,7 +25,7 @@ from ai4bi.ai.intent_models import (
     SemanticSelection,
 )
 from ai4bi.ai.llm_adapter import LLMAdapter
-from ai4bi.ai.schema_index import SchemaIndex  # Round 035: dynamic schema lookup
+from ai4bi.ai.schema_index import MetricEntry, SchemaIndex  # Round 035: dynamic schema lookup
 from ai4bi.query_spec import AggFunction, DimensionRef, MetricRef, VisualType
 from ai4bi.report.models import ExecutableReportSpec, ReportChange, ReportProposal, ReportVisualSpec
 
@@ -3378,11 +3378,37 @@ class NL2ProposalService:
         if executor is None or not contracts:
             return None
         idx = SchemaIndex.build(contracts)
+        _conf = any(t in f"{prompt.lower()} {normalized}" for t in (
+            "混淆", "搞混", "誤判", "認錯", "預測成", "搞錯成", "confusion"))
         match = idx.best_metric_match(prompt, normalized)
+        # Round 186 (CV S9): a bare confusion question ("哪兩類最常搞混") names no
+        # metric — default to a count metric on whichever block carries the
+        # true_class × pred_class pair, so it still produces the confusion matrix.
+        if match is None and _conf:
+            # "搞混/誤判/認錯" focuses on the OFF-diagonal (errors) → error_count;
+            # a plain "混淆矩陣" wants the full matrix incl. the diagonal → pred_count.
+            _err_focus = any(t in f"{prompt.lower()} {normalized}"
+                             for t in ("誤判", "搞混", "認錯", "搞錯成"))
+            _prefer = ("error_count", "pred_count") if _err_focus else ("pred_count", "error_count")
+            for _bid, _c in contracts.items():
+                _cn = {x.name for x in getattr(_c, "columns", [])}
+                if {"true_class", "pred_class"} <= _cn:
+                    _names = {m.name for m in getattr(_c, "metrics", [])}
+                    _pick = next((p for p in _prefer if p in _names), None)
+                    if _pick is not None:
+                        match = MetricEntry(_bid, _pick, _pick.replace("_", " ").title())
+                        break
         if match is None:
             return None
         block_id, metric_name, alias = match.block_id, match.metric_name, match.alias
         dims = _resolve_n_dims(idx, prompt, normalized, contracts, block_id, n=2)
+        # Round 186 (CV S9): a confusion question ("最常被誤判成哪類 / 搞混") is a
+        # true_class × pred_class cross-tab — default those two axes when the block
+        # has them and the prompt didn't name two dims explicitly.
+        if len(dims) < 2 and _conf:
+            _cols = {c.name for c in getattr(contracts.get(block_id), "columns", [])}
+            if {"true_class", "pred_class"} <= _cols:
+                dims = ["true_class", "pred_class"]
         if len(dims) < 2:
             return None
         d1, d2 = dims[0], dims[1]
@@ -5983,6 +6009,17 @@ _UNSUPPORTED_CAPABILITIES: tuple[tuple[tuple[str, ...], str], ...] = (
      "目前資料集沒有成本/金額欄位（只有良率、缺陷數、queue/cycle time 等製造指標），"
      "無法換算金錢損失。我可以給：報廢/不良晶圓『數量』、良率損失、缺陷數，"
      "若你提供單片成本，我再幫你乘上數量估算。"),
+    # Round 186 (CV S11): I work on TABLES, not pixels. A "show me the blurry
+    # images / let me look at the photos" ask is a hard boundary — but turn it
+    # into what IS possible: rank by a quantifiable quality column to shortlist.
+    (("看圖", "看影像", "看照片", "看這些圖", "顯示影像", "顯示圖", "秀出圖", "秀圖",
+      "秀給我看", "打開圖", "點開圖", "圖片給我看", "給我看圖", "給我看這些圖", "縮圖",
+      "原圖", "畫質", "清晰度", "像素", "目視", "肉眼", "影像模糊", "圖片模糊",
+      "模糊的影像", "模糊的圖", "很模糊", "糊掉", "挑出來看", "挑出來人工看"),
+     "我分析的是『資料表』不是影像像素，沒辦法直接顯示圖片或判斷模糊/清晰——那需要 "
+     "CV 標註/檢視工具（如 FiftyOne、CVAT）。但只要表裡有可量化的品質欄位，例如 "
+     "blur_score（模糊分數）、qc_flag（品質旗標）、iou（標註一致性）、confidence（信心），"
+     "我就能幫你排序、篩出『最該人工複檢的前 N 張』，把要看的範圍縮到最小。"),
 )
 
 
@@ -6274,6 +6311,8 @@ def _looks_like_breakdown(prompt: str, normalized: str) -> bool:
 _MATRIX_CUES: tuple[str, ...] = (
     "在不同", "交叉", "矩陣", "樞紐", "cross", "matrix", "pivot", "×", " x ",
     "對照", "各...在", "依...與", "兩個維度",
+    # Round 186 (CV S9): a confusion question is a true_class × pred_class cross-tab.
+    "混淆", "搞混", "搞錯成", "誤判成", "認錯", "被預測成", "預測成", "confusion",
 )
 _MULTI_FILTER_CUES: tuple[str, ...] = (
     "且", "並且", "而且", "同時", " and ", "又", "兼",
@@ -6286,6 +6325,13 @@ def _looks_like_matrix(prompt: str, normalized: str) -> bool:
         return True
     # "各 X ... 不同 Y" pattern (two dimension words around 不同)
     if "各" in hay and "不同" in hay:
+        return True
+    # Round 186: "各 X 在 A 跟 B" names the SECOND axis by its values ("各 class 在
+    # train 跟 val", "各類別在 v1 跟 v2") — a cross-tab. Needs a per-group marker +
+    # 在 + a list separator; the handler returns None (→ breakdown) if no real 2nd
+    # dimension resolves, so this can't manufacture a wrong matrix.
+    if (("各" in hay or "每" in hay) and "在" in hay
+            and any(s in hay for s in ("跟", "和", "與", " vs ", "、"))):
         return True
     # Round 139: "各X、各Y" / "每X每Y" — two grouped dimensions = a cross-tab.
     return prompt.count("各") >= 2 or prompt.count("每") >= 2

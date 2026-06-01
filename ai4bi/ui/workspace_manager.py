@@ -94,6 +94,7 @@ def render_workspace_panel(
         st.caption("**從範本建立新報表**")
         template_options = {
             "retail_demo": "🛍️ 零售門市銷售儀表板",
+            "cv_demo": "🖼️ 電腦視覺資料集健檢",
             "blank": "📄 空白報表",
         }
         chosen_template = st.selectbox(
@@ -107,6 +108,12 @@ def render_workspace_panel(
             if chosen_template == "retail_demo":
                 from ai4bi.report.retail_template import build_retail_demo_report
                 new_report = build_retail_demo_report()
+            elif chosen_template == "cv_demo":
+                # Round 186: CV dataset-health demo. Register its 3 blocks so the
+                # executor / NL engine can query them (mirrors the retail pre-reg).
+                from ai4bi.report.cv_dataset_template import build_cv_demo_report, cv_contracts
+                st.session_state.setdefault("user_blocks", {}).update(cv_contracts())
+                new_report = build_cv_demo_report()
             else:
                 from ai4bi.report.models import AuditMetadata, ReportPageSpec
                 import os, uuid

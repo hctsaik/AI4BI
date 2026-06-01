@@ -76,7 +76,7 @@ _EN_TO_ZH: dict[str, list[str]] = {
     "tested":     ["受測", "已測"],
     "density":    ["密度"],
     "unique":     ["不重複", "獨立", "相異"],
-    "area":       ["區域", "區", "廠區"],
+    "area":       ["區域", "區", "廠區", "面積", "大小", "尺寸"],
     "priority":   ["優先", "優先級", "優先序", "急件"],
     "route":      ["路線", "製程路線", "途程"],
     "shift":      ["班別", "班次", "輪班"],
@@ -93,6 +93,26 @@ _EN_TO_ZH: dict[str, list[str]] = {
     "time":       ["時間", "時長"],
     "age":        ["時間", "時長", "老化", "年齡"],
     "duration":   ["時間", "時長", "持續時間"],
+    # --- Round 186: computer-vision dataset-management vocabulary ----------
+    "class":      ["類別", "種類", "物件類別", "標籤類別"],
+    "annotator":  ["標註員", "標記員", "標註者", "標註人員"],
+    "confidence": ["信心", "信賴度", "置信度", "信心分數"],
+    "recall":     ["召回率", "查全率"],
+    "precision":  ["精確率", "精準率", "查準率"],
+    "accuracy":   ["正確率", "準確率", "準確度"],
+    "prediction": ["預測"],
+    "pred":       ["預測"],
+    "image":      ["影像", "圖片", "圖像"],
+    # NOTE: 'bbox' intentionally has NO synonym — "標註框" must resolve the
+    # bbox_COUNT metric (via its description), never the bbox_id row identifier.
+    "iou":        ["一致性", "重疊度", "交並比"],
+    "duplicate":  ["重複", "重覆", "副本"],
+    "split":      ["切分", "資料集切分", "資料切分"],
+    "version":    ["版本", "資料集版本"],
+    "annotation": ["標註", "標記"],
+    "correct":    ["正確", "答對"],
+    "error":      ["錯誤", "答錯", "誤判"],
+    "ap":         ["平均精度", "mAP", "ap"],
 }
 
 _ZH_TO_EN: dict[str, str] = {}  # built lazily below
@@ -122,6 +142,29 @@ def _col_tokens(col_name: str) -> list[str]:
     # split on _ and spaces first
     parts = re.split(r"[_\s]+", col_name.lower())
     return [p for p in parts if p]
+
+
+_DESC_SPLIT_RE = re.compile(r"[\s/÷×・,，、:：;；()（）「」【】\[\]+\-]+")
+
+
+def _desc_tokens(description: Optional[str]) -> list[str]:
+    """Round 186: derive keywords from a column/metric ``description``.
+
+    Many uploaded contracts name columns in English ("recall", "confidence") but
+    describe them in the analyst's language ("召回率", "平均信心"). The name-token
+    synonym table can't cover every domain, so we also index description words.
+    Descriptions are written as space/punctuation-separated synonym lists, so a
+    simple split yields each term. Tokens shorter than 2 chars are dropped (they
+    fuzzy-match unrelated words and produce confidently-wrong answers).
+    """
+    if not description:
+        return []
+    out: list[str] = []
+    for chunk in _DESC_SPLIT_RE.split(description):
+        c = chunk.strip().lower()
+        if len(c) >= 2:
+            out.append(c)
+    return out
 
 
 def _is_date_col(col_name: str, data_type: str) -> bool:
@@ -211,6 +254,8 @@ class SchemaIndex:
                     # EN token → ZH aliases
                     for zh in _EN_TO_ZH.get(tok, []):
                         keywords.append(zh)
+                # Round 186: description-derived keywords (e.g. 類別/召回率/標註員)
+                keywords.extend(_desc_tokens(col.description))
 
                 # For date cols, also register granularity keywords
                 if is_date:
@@ -237,6 +282,8 @@ class SchemaIndex:
                     m_keywords.append(tok)
                     for zh in _EN_TO_ZH.get(tok, []):
                         m_keywords.append(zh)
+                # Round 186: description-derived keywords (e.g. 召回率/平均信心/正確率)
+                m_keywords.extend(_desc_tokens(metric.description))
                 for kw in m_keywords:
                     idx._metrics.setdefault(kw, m_entry)
                 # Round 122: keep the FULL keyword set per metric (not collapsed by
