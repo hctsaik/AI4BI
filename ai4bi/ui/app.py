@@ -2564,10 +2564,14 @@ def main() -> None:
     store = DraftReportStore(_DRAFT_STORE)
     # Include all user-uploaded blocks (retail demo + any CSV uploads)
     _user_blocks_exec: dict = st.session_state.get(_USER_BLOCKS_KEY, {})
+    # Round 183: feed user-defined relationships (🔗 關聯 UI) into the CHART
+    # executor so joins on uploaded data actually resolve (was NL2-only before).
+    _user_rels = get_user_semantic_model().get("relationships") or None
     executor = Executor(
         registry_root=_BLOCKS_DIR,
         semantic_model_path=_SEMANTIC_MODEL,
         extra_contracts=_user_blocks_exec or None,
+        extra_relationships=_user_rels,
         parameters=get_parameters(),  # Round 060: what-if parameters
         identity=st.session_state.get("_identity") or None,  # Round 103: row-level security
     )

@@ -20,7 +20,8 @@ from typing import Optional
 
 import streamlit as st
 
-from ai4bi.blocks.contracts import BlockType, DataBlockContract
+from ai4bi.blocks.contracts import (
+    BlockType, DataBlockContract, FanoutRisk, JoinType, RelationshipHint)
 from ai4bi.ui.upload import _USER_BLOCKS_KEY, _USER_BLOCK_META_KEY
 
 _USER_SEMANTIC_MODEL_KEY = "user_semantic_model"
@@ -209,28 +210,80 @@ def get_user_semantic_model() -> dict:
     return sm
 
 
+def _wire_join_contracts(
+    fact_block: str, dim_block: str,
+    fact_keys: list[str], dim_keys: list[str],
+) -> None:
+    """Round 183: make a user-built relationship actually EXECUTABLE.
+
+    SafeJoinPlanner only resolves a join when the block CONTRACTS approve it
+    (the semantic-model relationship alone isn't enough). For uploaded blocks we
+    therefore: mark the TO block as a dimension + ensure its primary_keys cover
+    the join targets, and append a LOW-fanout RelationshipHint(allowed_join_keys)
+    to the FROM (fact) block. Built-in/demo blocks already ship these on disk and
+    aren't in _USER_BLOCKS_KEY, so they're left untouched.
+    """
+    blocks = st.session_state.get(_USER_BLOCKS_KEY)
+    if not isinstance(blocks, dict):
+        return
+    dim_c = blocks.get(dim_block)
+    if dim_c is not None:
+        pks = list(getattr(dim_c, "primary_keys", []) or [])
+        for k in dim_keys:
+            if k not in pks:
+                pks.append(k)
+        blocks[dim_block] = dim_c.model_copy(
+            update={"block_type": BlockType.dimension, "primary_keys": pks})
+    fact_c = blocks.get(fact_block)
+    if fact_c is not None:
+        hints = [h for h in (getattr(fact_c, "relationships", []) or [])
+                 if getattr(h, "target_block_id", None) != dim_block]
+        hints.append(RelationshipHint(
+            target_block_id=dim_block,
+            allowed_join_keys=list(fact_keys),
+            join_type=JoinType.left,
+            fanout_risk=FanoutRisk.LOW,
+            description="使用者於『資料關聯設定』建立（取樣判定為 N:1，安全不爆量）。",
+        ))
+        blocks[fact_block] = fact_c.model_copy(update={"relationships": hints})
+    st.session_state[_USER_BLOCKS_KEY] = blocks
+
+
 def _add_relationship(
     from_block: str,
-    from_col: str,
     to_block: str,
-    to_col: str,
+    key_pairs: list[tuple[str, str]],
+    *,
     rel_id: Optional[str] = None,
     cardinality: str = "many_to_one",
 ) -> None:
-    """Add a user-defined relationship to the session semantic model.
+    """Add a user-defined relationship to the session semantic model and wire up
+    the governance the executor needs so the join really runs (Round 183).
 
-    Round 176: ``cardinality`` (semantic string) is now passed in from the
-    detected join shape instead of always assuming many_to_one.
+    Round 176: ``cardinality`` comes from the detected join shape.
+    Round 182: ``key_pairs`` (list of (from_col, to_col)) supports COMPOSITE keys.
+    Round 183: normalize the direction to fact(many) → dimension(one) = N:1 (so a
+    1:N the user built backwards is auto-corrected), then wire the contracts.
     """
+    # Normalize to the only shape a governed BI join should take: fact→dim, N:1.
+    if cardinality == "one_to_many":  # user built it backwards → swap
+        from_block, to_block = to_block, from_block
+        key_pairs = [(t, f) for (f, t) in key_pairs]
+        cardinality = "many_to_one"
+    elif cardinality == "one_to_one":
+        cardinality = "many_to_one"  # 1:1 is safe; treat TO as the dimension side
+
+    from_cols = [f for f, _ in key_pairs]
+    to_cols = [t for _, t in key_pairs]
     sm = get_user_semantic_model()
-    rel_id = rel_id or f"user_{from_block}_to_{to_block}_{from_col}"
+    rel_id = rel_id or f"user_{from_block}_to_{to_block}_{'_'.join(from_cols)}"
     # Remove any existing relationship with same id
     sm["relationships"] = [r for r in sm["relationships"] if r.get("relationship_id") != rel_id]
     sm["relationships"].append({
         "relationship_id": rel_id,
         "from_block": from_block,
         "to_block": to_block,
-        "keys": [{"from": from_col, "to": to_col}],
+        "keys": [{"from": f, "to": t} for f, t in key_pairs],
         "cardinality": cardinality,
         "join_type": "left",
         "status": "certified",  # user-defined = trusted for their own data
@@ -239,6 +292,10 @@ def _add_relationship(
     for bid in (from_block, to_block):
         if bid not in sm["blocks"]:
             sm["blocks"].append(bid)
+    # Only a safe N:1 gets the contract wiring; N:N / 未知 stay un-executable on
+    # purpose (a fan-out join must not silently inflate the numbers).
+    if cardinality == "many_to_one":
+        _wire_join_contracts(from_block, to_block, from_cols, to_cols)
 
 
 def _remove_relationship(rel_id: str) -> None:
@@ -519,7 +576,7 @@ def render_join_builder(report_blocks: "dict | None" = None, expanded: bool = Fa
 
         if st.button("✅ 建立關聯", key="join_create_btn", type="primary",
                      disabled=not confirm_ok):
-            _add_relationship(from_bid, from_col, to_bid, to_col,
+            _add_relationship(from_bid, to_bid, [(from_col, to_col)],
                               cardinality=_CARD_TO_SEMANTIC.get(card_label, "many_to_one"))
             st.success(
                 f"已建立關聯（{card_label}）：`{from_bid}.{from_col}` → `{to_bid}.{to_col}`\n\n"

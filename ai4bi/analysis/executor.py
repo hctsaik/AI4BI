@@ -249,6 +249,7 @@ class Executor:
         extra_contracts: Optional[dict[str, "DataBlockContract"]] = None,
         parameters: Optional[dict[str, float]] = None,
         identity: Optional[dict[str, Any]] = None,
+        extra_relationships: Optional[list[dict[str, Any]]] = None,
     ) -> None:
         self._registry_root = Path(registry_root) if registry_root else _DEFAULT_REGISTRY
         self._loader = loader or BlockLoader()
@@ -266,6 +267,25 @@ class Executor:
             if configured_model.exists()
             else None
         )
+        # Round 183: merge user-defined relationships (built in the 🔗 關聯 UI) so
+        # the CHART path — not only NL2 — can resolve joins on uploaded data. Skip
+        # any (from,to) pair already certified in the file model: SafeJoinPlanner
+        # requires EXACTLY ONE match, so a duplicate would break the demo's own join.
+        if extra_relationships:
+            base = dict(self._semantic_model) if self._semantic_model else {
+                "relationships": [], "blocks": [], "metrics": [], "prohibited_paths": []}
+            base_rels = list(base.get("relationships", []))
+            certified_pairs = {
+                (r.get("from_block"), r.get("to_block"))
+                for r in base_rels if r.get("status") == "certified"}
+            seen_ids = {r.get("relationship_id") for r in base_rels}
+            for rel in extra_relationships:
+                pair = (rel.get("from_block"), rel.get("to_block"))
+                if pair in certified_pairs or rel.get("relationship_id") in seen_ids:
+                    continue
+                base_rels.append(rel)
+            base["relationships"] = base_rels
+            self._semantic_model = base
         self._planner = SafeJoinPlanner(self._semantic_model)
 
     def _resolve_block_path(self, ref: BlockRef) -> Path:
