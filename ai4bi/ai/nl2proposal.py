@@ -4235,6 +4235,14 @@ class NL2ProposalService:
 
         n = _extract_rank_n(prompt, normalized)
         ascending = _ranking_is_ascending(prompt, normalized)
+        # Round 184 (S19): for a "higher is WORSE" metric (defect/scrap rate), the
+        # worst is the HIGHEST — so "最差/最糟/最嚴重/比較差" must sort DESCENDING, not
+        # ascending (which是 correct only for higher-is-better metrics like yield).
+        _worse_is_high = any(t in metric_name.lower() for t in (
+            "defect", "scrap", "fail", "reject", "density", "不良"))
+        if _worse_is_high and any(t in hay_r for t in (
+                "最差", "最糟", "最嚴重", "最爛", "比較差", "較差", "最不好", "不理想")):
+            ascending = False
         unit = _metric_unit(contracts, block_id, metric_name)
 
         from ai4bi.query_spec import BlockRef, DimensionRef, SortDirection, SortSpec, VisualQuerySpec
@@ -6439,7 +6447,7 @@ def _extract_compare_operands(prompt: str, normalized: str) -> "tuple[str, str] 
 
 # --- Round 105: postprocess / forecast analytics charts ----------------------
 
-_PARETO_TRIGGERS = ("pareto", "柏拉圖", "柏拉图", "abc 分析", "abc分析", "80/20", "80-20",
+_PARETO_TRIGGERS = ("pareto", "柏拉圖", "柏拉图", "帕累托", "帕雷托", "abc 分析", "abc分析", "80/20", "80-20",
                     "關鍵少數", "关键少数", "重要少數", "80%的營收", "8 成", "八成",
                     # Round 178 (S4): textbook cumulative-share phrasings.
                     "累積80", "累積 80", "累計80", "累計 80", "累積佔", "累積占", "累計佔",
@@ -6982,6 +6990,7 @@ _DECLINE_TRIGGERS = ("連續下滑", "連續下跌", "一直下滑", "持續下�
                      "連續衰退", "一直在掉", "一直掉", "一直跌", "一直在跌", "持續探低",
                      "一直變差", "越來越差", "走弱", "連續成長", "持續成長",
                      "持續變差", "持續惡化", "持續退步", "一直惡化", "越來越糟",  # Round 184 (S11)
+                     "趨勢往下", "趨勢下降", "趨勢下滑", "一直退步", "往下的趨勢",  # Round 184 (S11)
                      "往下掉", "一直往下", "持續往下", "往下走", "越掉越", "一路下滑", "一路往下",
                      "逐週下滑", "逐周下滑", "逐月下滑", "逐週退化", "逐步下滑", "趨勢下滑", "退化",
                      "drift", "degrad", "走低",
@@ -7157,7 +7166,11 @@ def _looks_like_commonality(prompt: str, normalized: str) -> bool:
         # Round 182 (S3): "關鍵設備 / 問題設備 / 問題出在哪台 / 有問題" name the
         # culprit equipment on their own (bare phrasings should reach commonality).
         "關鍵設備", "關鍵機台", "問題設備", "問題機台", "關鍵的設備", "關鍵的機台",
-        "問題出在", "出問題", "有問題", "出在哪"))
+        "問題出在", "出問題", "有問題", "出在哪",
+        # Round 184 (S09): "低良率跟哪台最相關 / 有關" — attributing low yield to a
+        # shared tool is commonality, not a yield ranking (which returned the
+        # HIGHEST-yield tool — direction reversed).
+        "相關", "有關", "關聯", "有關係"))
     weak_culprit = any(w in hay for w in ("造成", "導致", "拉低"))
     change_ctx = any(t in hay for t in (
         "比上", "比前", "比這", "上週", "上周", "上月", "去年同期", "vs 上", "這週比", "本週比"))
@@ -8254,6 +8267,9 @@ def _extract_date_period(prompt: str, normalized: str) -> str | None:
 _PERIOD_COMPARISON_KEYWORDS = (
     "vs", "versus", "compare", "comparison", "compared",
     "比較", "對比", "比", "vs.", "相比",
+    # Round 184 (S17): "這週跟上週 / 本月和上月" — the most natural connectors. Safe
+    # because a period word is also required (won't fire on "記憶體跟邏輯").
+    "跟", "和", "與",
 )
 _PERIOD_COMPARISON_PERIOD_KEYWORDS = (
     "week", "weekly", "週", "這週", "本週", "上週",
