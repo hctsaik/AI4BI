@@ -1451,7 +1451,13 @@ class NL2ProposalService:
         mean otherwise. Returns None if there's no clean prefix grouping."""
         from ai4bi.blocks.contracts import BlockType
         from ai4bi.blocks.datastore import materialize_dataframe
-        al, bl = a.strip().lower(), b.strip().lower()
+        # Round 178 (S5): map Chinese / abbreviated product-family names to the
+        # value prefixes used in the data (記憶體→memory, 邏輯→logic, DRAM→memory…).
+        _ALIAS = {"記憶體": "memory", "記憶": "memory", "邏輯": "logic", "類比": "analog",
+                  "dram": "memory", "sram": "memory", "cpu": "logic", "mem": "memory",
+                  "記憶體類": "memory", "邏輯類": "logic"}
+        al = _ALIAS.get(a.strip().lower(), a.strip().lower())
+        bl = _ALIAS.get(b.strip().lower(), b.strip().lower())
         if len(al) < 2 or len(bl) < 2 or not contracts:
             return None
         hay = f"{prompt.lower()} {normalized}"
@@ -3719,9 +3725,10 @@ class NL2ProposalService:
         # Round 142: an explicit "哪一台機台 / which tool" must group by the tool
         # column even when another entity word (lot) also appears in the prompt.
         hay_r = f"{prompt.lower()} {normalized}"
-        if any(t in hay_r for t in ("哪一台", "哪台", "機台", "which tool", "哪個機台", "哪部機")):
+        if any(t in hay_r for t in ("哪一台", "哪台", "機台", "which tool", "哪個機台",
+                                    "哪部機", "chamber", "腔體", "哪個 chamber", "哪個chamber")):
             block_cols = [col.name for col in getattr(contracts.get(block_id), "columns", [])]
-            tool_c = _guess_col(block_cols, ("tool_id", "tool", "機台", "設備", "equipment"))
+            tool_c = _guess_col(block_cols, ("tool_id", "tool", "機台", "設備", "equipment", "chamber"))
             if tool_c and tool_c != dim_col:
                 dim_col = tool_c
 
@@ -5639,6 +5646,11 @@ _RANK_TRIGGERS: tuple[str, ...] = (
 _RANK_ASC_WORDS: tuple[str, ...] = (
     "最低", "最少", "最差", "最小", "最短", "最快", "最閒", "賣最差", "賣最少", "最不", "墊底",
     "bottom", "worst", "lowest", "least", "fewest", "shortest", "fastest",
+    # Round 178 (S2): non-superlative "worse/lower" comparatives must sort ASC
+    # ("哪台良率比較差" was wrongly returning the highest). Avoid bare 差/低 (clash
+    # with 差多少/差異) — use the explicit comparative forms.
+    "比較差", "較差", "比較爛", "較爛", "最爛", "比較低", "較低", "比較少", "較少",
+    "差的", "低的", "爛的", "表現差", "表現最差", "比較慢", "較慢", "比較短", "較短",
 )
 
 
@@ -5771,8 +5783,8 @@ _COMPARE_CONNECTORS = (" vs ", " versus ", " v.s ", "對上", "對比", "相比"
 # Guard: 比 must NOT be 比較 (=compare) nor a period comparison (比上週/比去年/…),
 # so this only matches a true "entity A 比 entity B {comparative}" (Round 178 S5).
 _BI_COMPARE_RE = re.compile(
-    r"([A-Za-z一-鿿][\w-]*)\s*比(?!較|\s*上|\s*去|\s*前|\s*本|\s*這|\s*今|\s*昨|\s*同期)\s*"
-    r"([A-Za-z一-鿿][\w-]*)(?:的\s*\S+?)?\s*(差|好|高|低|嚴重|長|短|快|慢|多|少)")
+    r"([A-Za-z一-鿿][\w-]*?)\s*比(?!較|\s*上|\s*去|\s*前|\s*本|\s*這|\s*今|\s*昨|\s*同期)\s*"
+    r"([A-Za-z一-鿿][\w-]*?)(?:的[^比]*?)?\s*(差|好|高|低|嚴重|長|短|快|慢|多|少)(?:嗎|呢|啊|\?|？|$|，|。| )")
 
 
 def _looks_like_entity_compare(prompt: str, normalized: str) -> bool:
@@ -5781,7 +5793,11 @@ def _looks_like_entity_compare(prompt: str, normalized: str) -> bool:
         return True
     # Round 178 (S5): "X 比 Y 差/好/高/低…" — guarded by a trailing comparative so
     # 比較 / 比率 / 百分比 don't false-trigger.
-    return bool(_BI_COMPARE_RE.search(prompt) or _BI_COMPARE_RE.search(normalized))
+    if _BI_COMPARE_RE.search(prompt) or _BI_COMPARE_RE.search(normalized):
+        return True
+    # "X 和/跟/與 Y 哪個/誰 … 高/低/好/差" two-entity pick-best.
+    return bool(re.search(
+        r"(和|跟|與|vs)\S{0,12}?(哪個|哪一個|誰|哪邊)\S{0,8}?(高|低|好|差|快|慢|多|少|長|短|爛|佳)", hay))
 
 
 # Chinese classifiers/units that trail an operand and should be dropped, so
@@ -6399,6 +6415,9 @@ _SPC_CUES: tuple[str, ...] = (
 _COMMONALITY_CUES: tuple[str, ...] = (
     "共同", "共通", "都走過", "共用", "共同經過", "commonality", "common tool",
     "同一台", "共同的機台", "有沒有共同",
+    # Round 178 (S3): colloquial commonality phrasings.
+    "共通點", "共同點", "共同路徑", "共同因素", "共同的問題", "元兇", "元凶", "禍首",
+    "都經過", "都用到", "common", "共通的", "共同走",
 )
 
 
@@ -6823,7 +6842,8 @@ def _resolve_decomp_dimension(idx, prompt: str, normalized: str, contracts, bloc
     # Round 178 (S1): a generic "機台/設備/機器/tool" with no specific dim keyword
     # should still resolve a tool axis (etch_tool_id / tool_id) on this block,
     # instead of giving up and letting the caller fall back to a wrong column.
-    if any(t in hay for t in ("機台", "機臺", "設備", "機器", "machine", "tool", "哪台", "哪臺")):
+    if any(t in hay for t in ("機台", "機臺", "設備", "機器", "machine", "tool",
+                              "chamber", "腔體", "哪台", "哪臺")):
         contract = contracts.get(block_id)
         names = {c.name for c in getattr(contract, "columns", None) or []}
         for cand in ("etch_tool_id", "tool_id", "tool_group"):
