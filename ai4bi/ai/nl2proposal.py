@@ -4037,6 +4037,17 @@ class NL2ProposalService:
             if tool_c and tool_c != dim_col:
                 dim_col = tool_c
 
+        # Round 182 (S4): "良率主要壞在哪種缺陷" picks the YIELD metric but a per-
+        # defect-type breakdown ("壞在哪種缺陷") wants the defect COUNT — ranking a
+        # ratio (yield) by defect_type would return the highest-yield bin (reversed).
+        # Switch to a defect count metric so it surfaces the dominant defect.
+        if (dim_col and dim_col.lower() in ("defect_type", "bin_code", "defect_code")
+                and _metric_is_ratio(contracts, block_id, metric_name)
+                and any(t in hay_r for t in ("缺陷", "defect", "不良", "瑕疵", "壞"))):
+            _dm = idx.best_metric_match("缺陷 defect 不良", "que xian defect")
+            if _dm is not None and _dm.block_id == block_id:
+                metric_name, alias = _dm.metric_name, _dm.alias
+
         n = _extract_rank_n(prompt, normalized)
         ascending = _ranking_is_ascending(prompt, normalized)
         unit = _metric_unit(contracts, block_id, metric_name)
@@ -4368,6 +4379,15 @@ class NL2ProposalService:
         block_id, metric_name, alias = metric.block_id, metric.metric_name, metric.alias
 
         dim_col = _resolve_decomp_dimension(idx, prompt, normalized, contracts, block_id)
+        if dim_col is None:
+            # Round 182 (S1): "為什麼良率變差" names no dimension — default to the most
+            # explanatory categorical (tool, else product) so we decompose into a
+            # culprit instead of falling back to an overall single number.
+            _names = {col.name for col in getattr(contracts.get(block_id), "columns", [])}
+            for _cand in ("etch_tool_id", "tool_id", "product_family", "tool_group"):
+                if _cand in _names and _is_categorical_col(contracts, block_id, _cand):
+                    dim_col = _cand
+                    break
         if dim_col is None:
             return None
         date_col = _find_date_column(contracts, block_id)
@@ -5977,6 +5997,7 @@ _RANK_ASC_WORDS: tuple[str, ...] = (
 _BREAKDOWN_MARKERS: tuple[str, ...] = (
     "各", "每個", "每一", "每種", "每類", "依", "按", "照", "分布", "分佈", "分組",
     " by ", " per ", "breakdown", "group by", "分別",
+    "產品別", "機台別", "班別", "區域別", "廠別", "站別",  # Round 182 (S5): "X別" = by X
     "占比", "佔比", "比重", "占總", "佔總",  # Round 127: share questions
     "佔全", "占全", "佔多少", "占多少", "佔了",  # Round 129: 佔全廠 share
 )
@@ -7285,6 +7306,15 @@ def _resolve_decomp_dimension(idx, prompt: str, normalized: str, contracts, bloc
         contract = contracts.get(block_id)
         names = {c.name for c in getattr(contract, "columns", None) or []}
         for cand in ("etch_tool_id", "tool_id", "tool_group"):
+            if cand in names and _is_categorical(cand):
+                return cand
+    # Round 182 (S5): a generic "產品/產品族/各族/product family" with no specific
+    # dim keyword resolves the product_family axis on this block.
+    if any(t in hay for t in ("產品族", "產品別", "各族", "品族", "product family",
+                              "product_family", "產品", "product")):
+        contract = contracts.get(block_id)
+        names = {c.name for c in getattr(contract, "columns", None) or []}
+        for cand in ("product_family", "product", "product_id", "sku"):
             if cand in names and _is_categorical(cand):
                 return cand
     return None

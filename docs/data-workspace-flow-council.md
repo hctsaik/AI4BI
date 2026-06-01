@@ -201,3 +201,18 @@
 
 ### 守衛驗證(未回歸)
 「誰是良率殺手」→ commonality(殺手 cue 優先);「哪台機台良率比較差」→ ranking;「哪台造成最多移動」→ move ranking;「缺陷最多的共通點」→ defect 端;「哪種缺陷最多」→ defect Pareto。fab+trend+subgroup 75 passed。
+
+---
+
+## Round 16 (R182 續) — S4 缺陷維度量值、S5 族/產品別維度、S1 為什麼拆解(逼近 95)
+
+### 重評觸發(第 14 輪複評,實跑)
+- S1 92・S2 **95**・S3 **95**・S4 94・S5 92 → S1–S5 平均 **93.6**;**總平均 ≈ 94.9(僅差 0.1)**。S2/S3 達高原。評審點名 3 條方向/維度常見硬傷。
+
+### 本輪實作(實跑驗證)
+- ✅ **S4 缺陷維度量值反向**:「良率主要壞在哪種缺陷」原把 yield 比率依 defect_type 排序 → 回最高良率 bin(Edge 88.6%,方向反)。`_answer_ranking` 偵測 dim=defect_type/bin_code + 缺陷/壞 cue + 比率指標 → **改用 defect_die 計數** → Pattern 2,546(正確)。
+- ✅ **S5 族/產品別維度**:`_resolve_decomp_dimension` 補 product_family fallback(產品/產品族/各族/品族);`_BREAKDOWN_MARKERS` 補「產品別/機台別/班別/區域別/廠別/站別」。「各族良率排名」→ product_family(Logic-A 90.3),不再翻到 defect_type;「產品別良率/機台別良率」→ breakdown。
+- ✅ **S1 為什麼拆解**:`_explain_change` 無維度時預設最具解釋力維度(etch_tool_id → product_family)。「為什麼良率變差/變低」→ 依 etch_tool_id 拆解(ETCH-01 ↓);「為什麼良率比上週下降」→ 拆解(ETCH-01 ↓1.32、ETCH-02 ↓0.82),不再退回 WoW 單值。
+
+### 守衛驗證(未回歸)
+「各產品族良率比較」→ breakdown 全族、「哪種缺陷最多」→ Pattern、「哪台機台良率最差」→ ETCH-02、「為什麼良率比上週下降」→ tool 拆解。fab+trend+subgroup 75 passed。
