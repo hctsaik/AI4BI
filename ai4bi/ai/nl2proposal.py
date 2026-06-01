@@ -1357,7 +1357,10 @@ class NL2ProposalService:
                     candidates.append((bid, col))
                     break
         if not candidates:
-            return None
+            # Round 178 (S5): operands may name value GROUPS by prefix
+            # (memory → Memory-X/Memory-Y, logic → Logic-A/Logic-B) — compare the
+            # two groups directly ("memory 比 logic 差嗎").
+            return self._answer_group_prefix_compare(prompt, normalized, a, b, contracts)
 
         # Round 178 (S2): the same entities can live in multiple facts (tool_id in
         # process-move AND etch_tool_id in wafer-yield). Prefer the block holding
@@ -1441,6 +1444,58 @@ class NL2ProposalService:
                           trust_notes=notes, risk_level="low")
         return NL2ProposalResult(intent=intent, message=sentence, result_table=df,
                                  trust_notes=notes, risk_level="low")
+
+    def _answer_group_prefix_compare(self, prompt, normalized, a, b, contracts):
+        """Round 178 (S5): compare two value-PREFIX groups, e.g. "memory 比 logic
+        差嗎" where memory→Memory-*, logic→Logic-*. Weighted for yield ratios,
+        mean otherwise. Returns None if there's no clean prefix grouping."""
+        from ai4bi.blocks.contracts import BlockType
+        from ai4bi.blocks.datastore import materialize_dataframe
+        al, bl = a.strip().lower(), b.strip().lower()
+        if len(al) < 2 or len(bl) < 2 or not contracts:
+            return None
+        hay = f"{prompt.lower()} {normalized}"
+        is_yield_q = ("良率" in hay or "yield" in hay)
+        for bid, c in contracts.items():
+            if getattr(c, "block_type", None) not in (
+                    BlockType.fact, BlockType.snapshot_fact, BlockType.target_fact):
+                continue
+            try:
+                df = materialize_dataframe(c)
+            except Exception:  # noqa: BLE001
+                continue
+            for col in [cc.name for cc in c.columns if cc.data_type in ("string", "str", "object")]:
+                if col not in df.columns:
+                    continue
+                low = df[col].astype(str).str.lower()
+                ga, gb = low.str.startswith(al), low.str.startswith(bl)
+                if not (ga.any() and gb.any()) or (ga & gb).any():
+                    continue  # need two disjoint, non-empty prefix groups
+                cols = set(df.columns)
+                mcol = _resolve_numeric_column(prompt, normalized, c)
+                # Default to weighted yield when no explicit measure is named — in a
+                # fab "A 比 B 差/好" about products almost always means yield.
+                if (is_yield_q or not mcol) and {"good_die", "tested_die"} <= cols:
+                    va = df.loc[ga, "good_die"].sum() / max(df.loc[ga, "tested_die"].sum(), 1) * 100.0
+                    vb = df.loc[gb, "good_die"].sum() / max(df.loc[gb, "tested_die"].sum(), 1) * 100.0
+                    alias, pp = "良率（加權）", True
+                elif mcol and mcol in df.columns:
+                    va, vb = float(df.loc[ga, mcol].mean()), float(df.loc[gb, mcol].mean())
+                    alias, pp = mcol, False
+                else:
+                    continue
+                hi, hv, lv = (a, va, vb) if va >= vb else (b, vb, va)
+                _u = "%" if pp else ""
+                gap = (f"{hi} 高 {abs(va - vb):.1f} 個百分點" if pp
+                       else f"{hi} 較高（{max(va, vb):.2f} vs {min(va, vb):.2f}）")
+                sentence = (f"比較「{a}」與「{b}」的{alias}：{a} {va:.2f}{_u}　vs　"
+                            f"{b} {vb:.2f}{_u}。{gap}。")
+                notes = [f"以「{col}」值前綴分組（{a}/{b}）比較{alias}，來源：{bid}。"]
+                intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                                  trust_notes=notes, risk_level="low")
+                return NL2ProposalResult(intent=intent, message=sentence,
+                                         trust_notes=notes, risk_level="low")
+        return None
 
     def _answer_analytics_chart(
         self,
@@ -2566,7 +2621,9 @@ class NL2ProposalService:
                      BlockType.fact, BlockType.snapshot_fact, BlockType.target_fact)}
         # the fact holding the qualifying measure (yield) and the detail fact (moves)
         measure_block = measure_col = group_key = None
-        _yield_q = any(t in hay for t in ("良率", "yield"))
+        # Round 178 (S3): "不良/壞/低良" wafers are a yield question too — bind the
+        # yield column so abbreviated commonality phrasings resolve.
+        _yield_q = any(t in hay for t in ("良率", "yield", "不良", "壞", "低良", "差的"))
         for bid, c in facts.items():
             # Round 178 (S3): a yield question must bind the YIELD column, not a
             # count like failed_wafer_count that the longest-token match grabs
@@ -3772,6 +3829,18 @@ class NL2ProposalService:
                 ent = _resolve_decomp_dimension(idx, prompt, normalized, contracts, bid)
                 val = _resolve_numeric_column(prompt, normalized, c)
                 date = _find_date_column(contracts, bid)
+                if val and date and not ent:
+                    # Round 178 (S1): a decline question with a measure+date but no
+                    # explicit entity ("良率最近怎麼一直掉?") → default to a sensible
+                    # entity axis (tool/product/step) so we name WHAT is declining
+                    # instead of collapsing to a single overall trend.
+                    _scols = [cc.name for cc in getattr(c, "columns", [])
+                              if getattr(cc, "data_type", "") in ("string", "str", "object")
+                              and not _is_pk_like(cc.name)]
+                    ent = (_guess_col(_scols, ("etch_tool", "tool_id", "tool"))
+                           or _guess_col(_scols, ("product", "family"))
+                           or _guess_col(_scols, ("step",))
+                           or (_scols[0] if _scols else None))
                 if ent and val and date:
                     block_id, contract, cols_map = bid, c, {
                         "entity": ent, "date": date, "value": val}
@@ -5655,6 +5724,17 @@ def _looks_like_ranking(prompt: str, normalized: str) -> bool:
         return False
     if any(t in hay for t in _RANK_TRIGGERS):
         return True
+    # Round 178 (S2): "哪台/哪個…好/高/差/低" is a rank-by-entity request even
+    # without an explicit superlative (最高/最低). Pair a "which-one" word with a
+    # comparative — but NOT in a change/period context ("比上週高…哪個 area 造成"
+    # is a decomposition, not a ranking), so guard against those cues.
+    which = any(w in hay for w in ("哪台", "哪臺", "哪個", "哪一", "哪部", "哪區", "哪站", "which"))
+    comp = any(c in hay for c in ("好", "佳", "高", "差", "低", "長", "短", "慢", "快", "多", "少", "嚴重"))
+    change_ctx = any(t in hay for t in (
+        "比上", "比前", "比這", "升高", "升至", "變化", "造成", "原因", "為什麼", "為何",
+        "拆解", "上週", "上周", "上月", "去年同期", "vs 上", "相比"))
+    if which and comp and not change_ctx:
+        return True
     # "前 5 名 / top 5" expressed with a number.
     return bool(re.search(r"(前\s*\d+|top\s*\d+|bottom\s*\d+)", hay))
 
@@ -5688,9 +5768,20 @@ _COMPARE_CONNECTORS = (" vs ", " versus ", " v.s ", "對上", "對比", "相比"
                        "跟", "和", "與", "還是", "、", "對")
 
 
+# Guard: 比 must NOT be 比較 (=compare) nor a period comparison (比上週/比去年/…),
+# so this only matches a true "entity A 比 entity B {comparative}" (Round 178 S5).
+_BI_COMPARE_RE = re.compile(
+    r"([A-Za-z一-鿿][\w-]*)\s*比(?!較|\s*上|\s*去|\s*前|\s*本|\s*這|\s*今|\s*昨|\s*同期)\s*"
+    r"([A-Za-z一-鿿][\w-]*)(?:的\s*\S+?)?\s*(差|好|高|低|嚴重|長|短|快|慢|多|少)")
+
+
 def _looks_like_entity_compare(prompt: str, normalized: str) -> bool:
     hay = f"{prompt.lower()} {normalized}"
-    return any(c in hay for c in _COMPARE_CUES)
+    if any(c in hay for c in _COMPARE_CUES):
+        return True
+    # Round 178 (S5): "X 比 Y 差/好/高/低…" — guarded by a trailing comparative so
+    # 比較 / 比率 / 百分比 don't false-trigger.
+    return bool(_BI_COMPARE_RE.search(prompt) or _BI_COMPARE_RE.search(normalized))
 
 
 # Chinese classifiers/units that trail an operand and should be dropped, so
@@ -5718,6 +5809,12 @@ def _clean_operand(s: str, side: str) -> str | None:
 
 def _extract_compare_operands(prompt: str, normalized: str) -> "tuple[str, str] | None":
     text = prompt.strip()
+    # Round 178 (S5): "X 比 Y 差/好/…" (guarded by a trailing comparative) before
+    # the generic connectors, so "memory 比 logic 差嗎" yields ("memory","logic").
+    for src in (text, normalized):
+        m = _BI_COMPARE_RE.search(src)
+        if m and m.group(1) != m.group(2):
+            return m.group(1), m.group(2)
     for conn in _COMPARE_CONNECTORS:
         i = text.find(conn)
         if i > 0:
@@ -5731,7 +5828,10 @@ def _extract_compare_operands(prompt: str, normalized: str) -> "tuple[str, str] 
 # --- Round 105: postprocess / forecast analytics charts ----------------------
 
 _PARETO_TRIGGERS = ("pareto", "柏拉圖", "柏拉图", "abc 分析", "abc分析", "80/20", "80-20",
-                    "關鍵少數", "关键少数", "重要少數", "80%的營收", "8 成", "八成")
+                    "關鍵少數", "关键少数", "重要少數", "80%的營收", "8 成", "八成",
+                    # Round 178 (S4): textbook cumulative-share phrasings.
+                    "累積80", "累積 80", "累計80", "累計 80", "累積佔", "累積占", "累計佔",
+                    "累積百分", "累積比例", "cumulative", "貢獻80", "佔80")
 _SHARE_TRIGGERS = ("佔總比", "占總比", "佔比", "占比", "百分比", "% of total", "share of total",
                    "占總", "佔總", "比重", "佔多少比例", "占多少比例")
 _MOVING_AVG_TRIGGERS = ("移動平均", "移动平均", "moving average", "moving avg", "平滑", "smooth",
@@ -6171,6 +6271,7 @@ _CHURN_TRIGGERS = ("流失", "churn", "rfm", "快走", "要走", "好久沒來",
 _DECLINE_TRIGGERS = ("連續下滑", "連續下跌", "一直下滑", "持續下滑", "持續下跌", "持續衰退",
                      "連續衰退", "一直在掉", "一直掉", "一直跌", "一直在跌", "持續探低",
                      "一直變差", "越來越差", "走弱", "連續成長", "持續成長",
+                     "往下掉", "一直往下", "持續往下", "往下走", "越掉越", "一路下滑", "一路往下",
                      "逐週下滑", "逐周下滑", "逐月下滑", "逐週退化", "逐步下滑", "趨勢下滑", "退化",
                      "drift", "degrad", "走低",
                      "keeps declining", "declining", "consecutive", "months in a row",
