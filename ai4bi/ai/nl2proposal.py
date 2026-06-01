@@ -740,10 +740,13 @@ class NL2ProposalService:
             "產能", "throughput", "move", "移動", "wip", "uptime", "瓶頸", "效率"))
         _whatif = any(w in _hay_fam for w in (
             "若", "假設", "如果", "提升到", "拉到", "故障", "what if", "whatif", "拉高到"))
-        # a commonality / threshold ask ("走過 ETCH-02 的批…有沒有共同點", "低於 80%")
-        # names a tool too, but must reach commonality — not a single-value lookup.
+        # a commonality / threshold / TREND ask names a tool too, but must reach its
+        # own engine — not a single-value lookup ("ETCH-01 良率逐週趨勢" is a trend,
+        # "走過 ETCH-02…有沒有共同點" is commonality, "低於 80%" is a threshold cut).
         _ok_ctx = (not _other_engine and not _whatif
                    and not _looks_like_commonality(prompt, normalized)
+                   and not _looks_like_trend_direction(prompt, normalized)
+                   and not _is_trend_direction_question(prompt, normalized)
                    and not any(t in _hay_fam for t in (
                        "低於", "高於", "超過", "小於", "大於", "below", "<", "共同", "共通")))
         if len(_fam_prefixes) == 1 and not _codes and _ok_ctx:
@@ -6476,7 +6479,29 @@ def _is_trend_direction_question(prompt: str, normalized: str) -> bool:
     smoothed chart — checked before the moving-average analytics chart so an
     explicit "良率趨勢如何 / 有在下降嗎" isn't answered with only a chart."""
     hay = f"{prompt.lower()} {normalized}"
-    return any(p in hay for p in _TREND_QUESTION_CUES)
+    # a forecast ("…並預測未來4週") is a forecast-chart request — let that engine
+    # build the proposal, don't pre-empt it with a backward-looking verdict.
+    if any(t in hay for t in ("預測", "forecast", "predict", "預估未來", "推估未來")):
+        return False
+    if any(p in hay for p in _TREND_QUESTION_CUES):
+        return True
+    # Round 182 (S4): a NAMED entity + any time-series wording ("ETCH-01 良率逐週
+    # 趨勢 / 走勢 / 週良率變化 / 這幾週怎麼走") wants that entity's trend verdict —
+    # route it to the trend engine (which filters to the named tool) instead of
+    # the unfiltered moving-average chart or a single-value lookup.
+    has_code = bool(re.search(r"[a-z]{2,}-?\d", hay))
+    trendish = any(t in hay for t in (
+        "趨勢", "走勢", "逐週", "逐周", "每週", "每周", "這幾週", "這幾周",
+        "週變化", "周變化", "隨時間", "怎麼走", "如何變", "怎麼變", "走向"))
+    if has_code and trendish:
+        return True
+    # period + change wording even without a named code ("週良率變化", "逐週怎麼變")
+    time_word = any(t in hay for t in (
+        "逐週", "逐周", "每週", "每周", "這幾週", "這幾周", "近幾週", "近幾周",
+        "逐月", "每月", "隨時間", "週", "周"))
+    change_word = any(t in hay for t in (
+        "趨勢", "走勢", "變化", "怎麼走", "如何變", "怎麼變", "變動", "走向"))
+    return time_word and change_word
 
 
 def _looks_like_trend_direction(prompt: str, normalized: str) -> bool:
@@ -6789,7 +6814,8 @@ def _looks_like_commonality(prompt: str, normalized: str) -> bool:
     # strong "harm/culprit" verbs imply a quality culprit on their own; weak ones
     # ("造成/導致") are too generic, so they additionally need a bad-yield word.
     strong_culprit = any(w in hay for w in (
-        "害", "拖累", "搞鬼", "搞的", "禍首", "元凶", "元兇", "罪魁", "毛病", "的問題"))
+        "害", "拖累", "搞鬼", "搞的", "禍首", "元凶", "元兇", "罪魁", "毛病", "的問題",
+        "殺手", "兇手", "凶手"))
     weak_culprit = any(w in hay for w in ("造成", "導致", "拉低"))
     change_ctx = any(t in hay for t in (
         "比上", "比前", "比這", "上週", "上周", "上月", "去年同期", "vs 上", "這週比", "本週比"))

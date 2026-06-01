@@ -172,3 +172,17 @@
 
 ### 守衛驗證(未回歸)
 「比較 ETCH-01 跟 ETCH-02 的良率」→ entity_compare 8.8pp;「哪台機台良率最差」→ ranking;「良率是多少」→ 全廠;「ETCH-02 的 OEE/稼動率 what-if」→ OEE/capacity;「各產品族良率比較」→ breakdown 全族。fab_capacity 46 passed。
+
+---
+
+## Round 14 (R182 續) — 修 R13 引入的「具名機台趨勢」回歸 + S3 殺手口語
+
+### 重評觸發(第 12 輪複評,實跑)
+- S1 93・S2 **97**・S3 88・S4 **72**・S5 96 → S1–S5 平均 **89.2**(↓,因 R13 回歸)。S2/S5 達高原。評審抓到 **R13 單機台值查詢回歸**:「ETCH-01 良率逐週趨勢/週良率變化/走勢」被攔成單值 92.61% 而非逐週趨勢。
+
+### 本輪實作(實跑驗證)
+- ✅ **S4 具名機台趨勢回歸(關鍵)**:單值路由 `_ok_ctx` 排除趨勢/時序問句(加 `not _looks_like_trend_direction` + `not _is_trend_direction_question`);並**大幅放寬** `_is_trend_direction_question` —— 具名 code + 時序字(趨勢/走勢/逐週/週變化/怎麼走…)或「期間字+變化字」→ 趨勢引擎(過濾到該機台)。「ETCH-01 良率逐週趨勢/這幾週怎麼走/週良率變化/走勢」全回 ETCH-01 95.1→87.17 下滑。守衛:加 forecast 排除(預測/forecast/未來)讓「每週良率趨勢並預測未來4週」仍走 forecast proposal。
+- ✅ **S3 殺手口語**:`strong_culprit` 補「殺手/兇手/凶手」→「良率殺手是哪一站/是什麼/良率兇手」→ commonality ETCH-02。
+
+### 守衛驗證(未回歸)
+單值「ETCH-01 的良率是多少」92.61%、「本週良率多少」WoW、「各機台每週產能」利用率、「哪台機台良率最差」ranking、「每週良率趨勢並預測未來4週」forecast proposal。fab+trend+subgroup 套件 75 passed。
