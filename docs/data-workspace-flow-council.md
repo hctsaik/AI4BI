@@ -186,3 +186,18 @@
 
 ### 守衛驗證(未回歸)
 單值「ETCH-01 的良率是多少」92.61%、「本週良率多少」WoW、「各機台每週產能」利用率、「哪台機台良率最差」ranking、「每週良率趨勢並預測未來4週」forecast proposal。fab+trend+subgroup 套件 75 passed。
+
+---
+
+## Round 15 (R182 續) — S3 commonality 方向回歸修正 + S5 子族比較 + S2 誰/需關注
+
+### 重評觸發(第 13 輪複評,實跑)
+- S1 **96**・S2 93・S3 89・S4 94・S5 91 → S1–S5 平均 **92.6**(歷程最高,回歸已修);總平均 ≈ 94.4。**S1 達高原(10/10)**。評審抓到 S3 方向回歸 + S5 子族比較 + S2 誰/關注。
+
+### 本輪實作(實跑驗證)
+- ✅ **S3 commonality 方向回歸(關鍵)**:`_answer_commonality` 的 worst 方向原被「最多/最高/最大/最嚴重/最差」修飾詞翻轉 → 「良率最大殺手」竟回「最高良率 defect_type Edge」(方向相反)。改為**依 measure 型別**定方向(defect=高端、yield=低端),修飾詞不再翻轉;`_yield_q` 納入殺手/兇手/元兇/拖累/害等 culprit 詞(無 defect 詞時)→ 綁 yield 欄。`_COMMONALITY_CUES` 補「殺手/兇手/凶手/罪魁」→「良率最大殺手/良率殺手/最大殺手是誰」全回 ETCH-02 worst-quartile。
+- ✅ **S5 子族比較**:`_answer_group_prefix_compare` 先比對欄位**精確 distinct 值**(連字號/空白不敏感)——「Memory-Y 跟 Logic-A 比」→ 比子族(Logic-A 90.31 vs Memory-Y 84.55,5.8pp),非父族;父族「比較 Logic 和 Memory」仍 3.2pp。
+- ✅ **S2 誰/需關注**:`_looks_like_ranking` which 補「誰」、comp 補「需要關注/要注意」;`_RANK_ASC_WORDS` + `_resolve_decomp_dimension` 工具 fallback + `_answer_ranking` yield-default 補「誰/關注/注意」→「誰的良率比較低/哪台機台需要關注/哪台要注意」全回 ETCH-02。
+
+### 守衛驗證(未回歸)
+「誰是良率殺手」→ commonality(殺手 cue 優先);「哪台機台良率比較差」→ ranking;「哪台造成最多移動」→ move ranking;「缺陷最多的共通點」→ defect 端;「哪種缺陷最多」→ defect Pareto。fab+trend+subgroup 75 passed。

@@ -1549,9 +1549,24 @@ class NL2ProposalService:
                 if col not in df.columns:
                     continue
                 low = df[col].astype(str).str.lower()
-                ga, gb = low.str.startswith(al), low.str.startswith(bl)
+                # Round 182 (S5): if the prompt names EXACT sub-family values
+                # ("Memory-Y 跟 Logic-A"), compare those values, not the parent
+                # prefixes (hyphen/space-insensitive). Else fall back to prefixes.
+                _hay_norm = hay.replace("-", "").replace(" ", "")
+                _exact: list[str] = []
+                for _v in df[col].dropna().astype(str).unique():
+                    _vn = _v.lower().replace("-", "").replace(" ", "")
+                    if len(_vn) >= 4 and _vn in _hay_norm and _v not in _exact:
+                        _exact.append(_v)
+                if len(_exact) >= 2:
+                    a_disp, b_disp = _exact[0], _exact[1]
+                    ga = df[col].astype(str) == a_disp
+                    gb = df[col].astype(str) == b_disp
+                else:
+                    a_disp, b_disp = a, b
+                    ga, gb = low.str.startswith(al), low.str.startswith(bl)
                 if not (ga.any() and gb.any()) or (ga & gb).any():
-                    continue  # need two disjoint, non-empty prefix groups
+                    continue  # need two disjoint, non-empty groups
                 cols = set(df.columns)
                 mcol = _resolve_numeric_column(prompt, normalized, c)
                 # Default to weighted yield when no explicit measure is named — in a
@@ -1565,13 +1580,13 @@ class NL2ProposalService:
                     alias, pp = mcol, False
                 else:
                     continue
-                hi, hv, lv = (a, va, vb) if va >= vb else (b, vb, va)
+                hi, hv, lv = (a_disp, va, vb) if va >= vb else (b_disp, vb, va)
                 _u = "%" if pp else ""
                 gap = (f"{hi} 高 {abs(va - vb):.1f} 個百分點" if pp
                        else f"{hi} 較高（{max(va, vb):.2f} vs {min(va, vb):.2f}）")
-                sentence = (f"比較「{a}」與「{b}」的{alias}：{a} {va:.2f}{_u}　vs　"
-                            f"{b} {vb:.2f}{_u}。{gap}。")
-                notes = [f"以「{col}」值前綴分組（{a}/{b}）比較{alias}，來源：{bid}。"]
+                sentence = (f"比較「{a_disp}」與「{b_disp}」的{alias}：{a_disp} {va:.2f}{_u}　vs　"
+                            f"{b_disp} {vb:.2f}{_u}。{gap}。")
+                notes = [f"以「{col}」比較（{a_disp}/{b_disp}）{alias}，來源：{bid}。"]
                 intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                                   trust_notes=notes, risk_level="low")
                 return NL2ProposalResult(intent=intent, message=sentence,
@@ -2793,7 +2808,14 @@ class NL2ProposalService:
         measure_block = measure_col = group_key = None
         # Round 178 (S3): "不良/壞/低良" wafers are a yield question too — bind the
         # yield column so abbreviated commonality phrasings resolve.
-        _yield_q = any(t in hay for t in ("良率", "yield", "不良", "壞", "低良", "差的"))
+        # a culprit question ("良率殺手 / 最大元兇 / 拖累良率") is a YIELD question even
+        # without the literal "良率" — bind the yield column so worst-quartile
+        # commonality finds ETCH-02. Unless the prompt explicitly says 缺陷/defect.
+        _defect_q = any(t in hay for t in ("缺陷", "defect", "瑕疵", "壞點", "破片", "不良類"))
+        _culprit_q = any(t in hay for t in (
+            "殺手", "兇手", "凶手", "元兇", "元凶", "禍首", "罪魁", "拖累", "害", "搞鬼"))
+        _yield_q = (any(t in hay for t in ("良率", "yield", "不良", "壞", "低良", "差的"))
+                    or _culprit_q) and not _defect_q
         for bid, c in facts.items():
             # Round 178 (S3): a yield question must bind the YIELD column, not a
             # count like failed_wafer_count that the longest-token match grabs
@@ -2829,8 +2851,18 @@ class NL2ProposalService:
         # all mean "the common tool among the bad ones" — always default to the
         # worst quartile rather than returning None (Round 140 + 178 S3).
         if threshold is None:
-            sup_high = any(t in hay for t in ("最多", "最高", "最大", "最嚴重", "最差"))
-            worst_high = sup_high or "defect" in measure_col.lower()
+            # Round 182 (S3): the WORST end depends on the MEASURE, not on a "最大/
+            # 最差" modifier — "良率最大殺手" still means LOWEST yield, not highest.
+            # Only flip to the high end for a defect count, or when the user
+            # explicitly asks for the BEST wafers' shared tool.
+            _wants_high = any(t in hay for t in (
+                "良率最高", "最高良率", "最高的良率", "良率最好", "最好", "表現最好", "良率最佳"))
+            if "defect" in measure_col.lower():
+                worst_high = True
+            elif any(t in measure_col.lower() for t in ("yield", "pct", "rate")):
+                worst_high = _wants_high
+            else:
+                worst_high = any(t in hay for t in ("最多", "最高", "最大", "最嚴重"))
             topn = self._answer_commonality_topn(
                 prompt, normalized, contracts, measure_block, measure_col,
                 worst_high=worst_high)
@@ -3978,7 +4010,7 @@ class NL2ProposalService:
             if metric is None and any(t in hay0 for t in (
                     "機台", "機臺", "設備", "機器", "chamber", "腔", "tool", "產品",
                     "品類", "product", "批", "lot", "站", "step", "區", "area",
-                    "哪台", "哪臺", "哪部", "哪一台", "哪一臺")):
+                    "哪台", "哪臺", "哪部", "哪一台", "哪一臺", "誰", "關注", "注意")):
                 metric = idx.best_metric_match("良率 yield", "liang lv yield")
         if metric is None:
             return None
@@ -5937,6 +5969,8 @@ _RANK_ASC_WORDS: tuple[str, ...] = (
     "不理想", "表現不好", "表現最不好", "不好", "最不好", "不佳", "較不理想", "比較不理想",
     # "拉低/拖累 良率" → the culprit group is the LOWEST one.
     "拉低", "拖累", "害良率",
+    # Round 182 (S2): "哪台需要關注/要注意" — the one needing attention is the worst.
+    "需要關注", "要注意", "該注意", "該關注", "需要注意", "要關注",
 )
 
 
@@ -6026,9 +6060,11 @@ def _looks_like_ranking(prompt: str, normalized: str) -> bool:
     # without an explicit superlative (最高/最低). Pair a "which-one" word with a
     # comparative — but NOT in a change/period context ("比上週高…哪個 area 造成"
     # is a decomposition, not a ranking), so guard against those cues.
-    which = any(w in hay for w in ("哪台", "哪臺", "哪個", "哪一", "哪部", "哪區", "哪站", "which"))
+    which = any(w in hay for w in ("哪台", "哪臺", "哪個", "哪一", "哪部", "哪區",
+                                   "哪站", "which", "誰"))
     comp = any(c in hay for c in ("好", "佳", "高", "差", "低", "長", "短", "慢", "快",
-                                  "多", "少", "嚴重", "不理想", "不佳", "理想"))
+                                  "多", "少", "嚴重", "不理想", "不佳", "理想",
+                                  "需要關注", "要注意", "該注意", "該關注", "需要注意"))
     change_ctx = any(t in hay for t in (
         "比上", "比前", "比這", "升高", "升至", "變化", "造成", "原因", "為什麼", "為何",
         "拆解", "上週", "上周", "上月", "去年同期", "vs 上", "相比"))
@@ -6788,6 +6824,8 @@ _COMMONALITY_CUES: tuple[str, ...] = (
     # Round 178 (S3): colloquial commonality phrasings.
     "共通點", "共同點", "共同路徑", "共同因素", "共同的問題", "元兇", "元凶", "禍首",
     "都經過", "都用到", "common", "共通的", "共同走",
+    # Round 182 (S3): "良率殺手 / 兇手 / 罪魁" = the common tool among the bad wafers.
+    "殺手", "兇手", "凶手", "罪魁",
 )
 
 
@@ -7243,7 +7281,7 @@ def _resolve_decomp_dimension(idx, prompt: str, normalized: str, contracts, bloc
     # should still resolve a tool axis (etch_tool_id / tool_id) on this block,
     # instead of giving up and letting the caller fall back to a wrong column.
     if any(t in hay for t in ("機台", "機臺", "設備", "機器", "machine", "tool",
-                              "chamber", "腔體", "哪台", "哪臺")):
+                              "chamber", "腔體", "哪台", "哪臺", "誰", "哪部")):
         contract = contracts.get(block_id)
         names = {c.name for c in getattr(contract, "columns", None) or []}
         for cand in ("etch_tool_id", "tool_id", "tool_group"):
