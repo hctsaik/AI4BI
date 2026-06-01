@@ -742,7 +742,8 @@ class NL2ProposalService:
             "oee", "可用率", "稼動", "利用率", "queue", "等待", "cycle", "週期",
             "產能", "throughput", "move", "移動", "wip", "uptime", "瓶頸", "效率"))
         _whatif = any(w in _hay_fam for w in (
-            "若", "假設", "如果", "提升到", "拉到", "故障", "what if", "whatif", "拉高到"))
+            "若", "假設", "如果", "提升到", "拉到", "故障", "what if", "whatif", "拉高到",
+            "提升", "提高", "拉高", "個百分點"))  # Round 184 (S18): yield what-if
         # a commonality / threshold / TREND ask names a tool too, but must reach its
         # own engine — not a single-value lookup ("ETCH-01 良率逐週趨勢" is a trend,
         # "走過 ETCH-02…有沒有共同點" is commonality, "低於 80%" is a threshold cut).
@@ -785,6 +786,17 @@ class NL2ProposalService:
             td = self._answer_trend_direction(prompt, normalized, report, contracts)
             if td is not None:
                 return td
+
+        # Round 184 (S18): yield what-if ("若 ETCH-02 良率提升到 90% 全廠會怎樣") —
+        # before forecast/metric so "良率…提升到…%" isn't read as a plain metric.
+        _hay_yw = f"{prompt.lower()} {normalized}"
+        if (("良率" in _hay_yw or "yield" in _hay_yw)
+                and any(t in _hay_yw for t in ("若", "如果", "假設", "提升", "提高", "拉到", "拉高", "改善到"))
+                and any(t in _hay_yw for t in ("提升到", "提高到", "拉到", "拉高到", "升到", "改善到",
+                                               "增加到", "個百分點", "個%", "pp", "%"))):
+            yw = self._answer_yield_whatif(prompt, normalized, report, contracts)
+            if yw is not None:
+                return yw
 
         # Round 105: Pareto/ABC, %-of-total, moving-average, forecast charts.
         if _detect_analytics_chart(f"{prompt.lower()} {normalized}") is not None:
@@ -2411,6 +2423,74 @@ class NL2ProposalService:
             msg = f"{label}（依 {gk}）：最高 {w.iloc[0]}（{w['利用率%']}%），最該關注的瓶頸/滿載點。"
         return self._capacity_result(msg, tbl, "產能利用率（實際÷產能）")
 
+    def _answer_yield_whatif(self, prompt, normalized, report, contracts) -> "NL2ProposalResult | None":
+        """Round 184 (S18): yield what-if — "若 ETCH-02 良率提升到 90% / 良率提升 5
+        個百分點，全廠會怎樣". Computes the extra good die and the new fab-wide
+        die-weighted yield, holding tested wafers constant. None if no pattern."""
+        if not contracts:
+            return None
+        import re as _re
+        from ai4bi.blocks.contracts import BlockType
+        from ai4bi.blocks.datastore import materialize_dataframe
+        hay = f"{prompt.lower()} {normalized}"
+        if "良率" not in hay and "yield" not in hay:
+            return None
+        m_to = _re.search(r"(?:提升到|提高到|拉到|拉高到|升到|改善到|增加到|到)\s*(\d{1,3}(?:\.\d+)?)\s*%", hay)
+        m_d = _re.search(r"(?:提升|提高|增加|多|拉高)\s*(\d{1,2}(?:\.\d+)?)\s*(?:個百分點|個%|pp|%)", hay)
+        if not m_to and not m_d:
+            return None
+        # find the yield fact (good_die + tested_die)
+        for bid, c in contracts.items():
+            if getattr(c, "block_type", None) not in (
+                    BlockType.fact, BlockType.snapshot_fact, BlockType.target_fact):
+                continue
+            cols = {col.name for col in getattr(c, "columns", [])}
+            if not ({"good_die", "tested_die"} <= cols):
+                continue
+            try:
+                df = materialize_dataframe(c)
+            except Exception:  # noqa: BLE001
+                continue
+            fab_good = float(df["good_die"].sum())
+            fab_tested = float(df["tested_die"].sum())
+            if fab_tested <= 0:
+                return None
+            fab_yield = fab_good / fab_tested * 100.0
+            # optional scope: a named tool/family value present in the prompt
+            scope, sub = "全廠", df
+            hay_norm = hay.replace("-", "").replace(" ", "")
+            for col in [x.name for x in c.columns if x.data_type in ("string", "str", "object")]:
+                if col not in df.columns or _is_pk_like(col):
+                    continue
+                for v in df[col].dropna().astype(str).unique():
+                    vn = str(v).lower().replace("-", "").replace(" ", "")
+                    if len(vn) >= 4 and vn in hay_norm:
+                        sub = df[df[col].astype(str) == v]
+                        scope = str(v)
+                        break
+                if scope != "全廠":
+                    break
+            s_good = float(sub["good_die"].sum())
+            s_tested = float(sub["tested_die"].sum())
+            if s_tested <= 0:
+                return None
+            cur = s_good / s_tested * 100.0
+            new = float(m_to.group(1)) if m_to else cur + float(m_d.group(1))
+            extra = s_tested * (new - cur) / 100.0
+            new_fab_yield = (fab_good + extra) / fab_tested * 100.0
+            verb = "提升" if new >= cur else "下降"
+            msg = (f"假設「{scope}」良率由 {cur:.1f}% {verb}到 {new:.1f}%（受測片數不變）："
+                   f"該範圍約{'多' if extra >= 0 else '少'} {abs(extra):,.0f} 個良品晶粒；"
+                   f"全廠加權良率由 {fab_yield:.1f}% → {new_fab_yield:.1f}%"
+                   f"（{'+' if new_fab_yield >= fab_yield else ''}{new_fab_yield - fab_yield:.2f} 個百分點）。")
+            notes = [f"以 good_die/tested_die die-count 加權重算；假設受測晶粒數不變，"
+                     f"僅良率改變。來源：{bid}。"]
+            intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                              trust_notes=notes, risk_level="low")
+            return NL2ProposalResult(intent=intent, message=msg, trust_notes=notes,
+                                     risk_level="low")
+        return None
+
     def _answer_capacity_whatif(self, prompt, normalized, hay, contracts) -> "NL2ProposalResult | None":
         """Round 130: light capacity what-if — uptime uplift (X%→Y%) or tool failure.
 
@@ -2753,7 +2833,12 @@ class NL2ProposalService:
         hay = f"{prompt.lower()} {normalized}"
         km = re.search(r"(\d+(?:\.\d+)?)\s*(?:個|倍)?\s*(?:標準差|σ|sigma)", hay)
         k = float(km.group(1)) if km else 3.0
-        _yld_q = any(t in hay for t in ("良率", "yield", "不良", "壞", "低良"))
+        # Round 184 (S10): a bare SPC ask ("幫我看管制圖") with no named measure
+        # defaults to YIELD — the natural quality metric — rather than failing.
+        _other_measure = any(t in hay for t in (
+            "等待", "queue", "cycle", "週期", "oee", "可用率", "稼動", "利用率",
+            "move", "移動", "產能", "throughput", "稼動率", "uptime", "缺陷", "defect"))
+        _yld_q = any(t in hay for t in ("良率", "yield", "不良", "壞", "低良")) or not _other_measure
         for bid, c in contracts.items():
             if getattr(c, "block_type", None) not in (
                     BlockType.fact, BlockType.snapshot_fact, BlockType.target_fact):
@@ -2768,6 +2853,11 @@ class NL2ProposalService:
                 continue
             ent = _resolve_decomp_dimension(idx, prompt, normalized, contracts, bid)
             val = yld_col if (_yld_q and yld_col) else _resolve_numeric_column(prompt, normalized, c)
+            # bare yield SPC with no dimension → default to the tool axis (the
+            # few-tools honest path then names ETCH-02 + drills to wafer/lot).
+            if _yld_q and yld_col and not ent:
+                ent = next((x for x in ("etch_tool_id", "tool_id", "wafer_id", "lot_id")
+                            if x in cols), None)
             if not ent or not val:
                 continue
             try:
