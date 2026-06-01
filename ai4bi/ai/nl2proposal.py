@@ -5103,17 +5103,24 @@ class NL2ProposalService:
 
         before = report.global_filters.get(_DATE_FILTER_GLOBAL_KEY)
 
+        # Round 184 (S17): plain-Chinese labels — never leak English to the user.
+        _PERIOD_ZH = {
+            "week": "最近 7 天", "month": "最近 30 天", "quarter": "最近一季",
+            "year": "最近一年", "last_month": "上個月", "last_quarter": "上一季",
+            "last_3m": "最近 3 個月", "last_6m": "最近 6 個月", "ytd": "今年迄今",
+            "this_month": "本月", "this_week": "本週", "clear": "清除篩選"}
+        _zh = _PERIOD_ZH.get(period, period)
         if period == "clear":
             after = None
-            description = "Clear date range filter"
-            label = "Date range filter"
+            description = "清除日期範圍篩選"
+            label = "日期範圍篩選"
         else:
             after = {"anchor": "relative", "period": period}
-            description = f"Set date range to {period}"
-            label = f"Date range → {period}"
+            description = f"日期範圍設為「{_zh}」"
+            label = f"日期範圍 → {_zh}"
 
         if before == after:
-            notes = [f"Date filter is already set to {period}."]
+            notes = [f"日期篩選已是「{_zh}」。"]
             intent = AIIntent(
                 intent_kind="analysis_request",
                 target_scope="report",
@@ -5122,15 +5129,15 @@ class NL2ProposalService:
             )
             return NL2ProposalResult(
                 intent=intent,
-                message=f"Date filter is already set to {period}.",
+                message=f"日期篩選已經是「{_zh}」了。",
                 trust_notes=notes,
                 risk_level="low",
             )
 
         notes = [
-            f"Setting report-level date_range global filter to {period!r}.",
-            "This affects all visuals that inherit global filters.",
-            "No SQL is generated — the execution layer resolves the relative period at query time.",
+            f"將報表層級的日期範圍篩選設為「{_zh}」。",
+            "會套用到所有繼承全域篩選的圖表。",
+            "不產生 SQL —— 執行層在查詢時才解析相對期間。",
         ]
         proposal = ReportProposal(
             description=description,
@@ -5152,7 +5159,7 @@ class NL2ProposalService:
         )
         return NL2ProposalResult(
             intent=intent,
-            message=f"Date filter proposal created: {description}.",
+            message=f"已建立日期篩選：{description}。",
             proposal=proposal,
             trust_notes=notes,
             risk_level="low",
@@ -6397,6 +6404,12 @@ _ANOMALY_TRIGGERS: tuple[str, ...] = (
 
 def _looks_like_insights(prompt: str, normalized: str) -> str | None:
     hay = f"{prompt.lower()} {normalized}"
+    # Round 184 (S10): a specific yield-EXCURSION ask ("良率異常下掉的批次") belongs
+    # to the excursion handler (which names the actual lots + timing), not the
+    # generic anomaly digest — defer so excursion can claim it.
+    if _looks_like_excursion(prompt, normalized) and any(
+            t in hay for t in ("良率", "yield", "批", "wafer", "晶圓", "lot")):
+        return None
     if any(t in hay for t in _ANOMALY_TRIGGERS):
         return "anomaly"
     if any(t in hay for t in _DIGEST_TRIGGERS):
@@ -6631,7 +6644,10 @@ _TREND_TIME_CUES = ("這幾週", "這幾周", "近幾週", "近幾周", "逐週"
                     "每周", "最近", "這陣子", "這幾個月", "逐月", "近期")
 # Round 138: excursion — "良率突然掉下來 / 暴跌 / 異常下降".
 _EXCURSION_CUES = ("突然掉", "掉下來", "掉到", "暴跌", "驟降", "異常下降", "突然變差",
-                   "突然變低", "掉了", "excursion", "突然下滑", "急遽下降", "崩")
+                   "突然變低", "掉了", "excursion", "突然下滑", "急遽下降", "崩",
+                   # Round 184 (S10): "良率異常下掉 / 異常的批次" → yield excursion,
+                   # not the generic anomaly digest (which leaked capacity_moves).
+                   "下掉", "異常下掉", "異常的批", "良率異常", "異常偏低的批", "突然降")
 
 
 _TREND_QUESTION_CUES = (
@@ -6959,6 +6975,7 @@ def _looks_like_wip_ct(prompt: str, normalized: str) -> bool:
 _SPC_CUES: tuple[str, ...] = (
     "標準差", "σ", "sigma", "管制界限", "管制上限", "管制下限", "control limit",
     "超出平均", "異常偏高", "異常偏低", "spc", "幾個標準差", "離群",
+    "管制圖", "控制圖", "control chart", "管制",  # Round 184 (S10)
 )
 _COMMONALITY_CUES: tuple[str, ...] = (
     "共同", "共通", "都走過", "共用", "共同經過", "commonality", "common tool",
@@ -7429,8 +7446,12 @@ def _resolve_decomp_dimension(idx, prompt: str, normalized: str, contracts, bloc
                 any_col, any_len = entry.column_name, len(kw)
             if _is_entity_col(entry.column_name) and len(kw) > ent_len:
                 ent_col, ent_len = entry.column_name, len(kw)
-    if ent_col or any_col:
-        return ent_col or any_col
+    # An entity dim (tool/product/step…) always wins. But a non-entity ATTRIBUTE
+    # match (e.g. defect_type via "不良" inside "不良率") must NOT beat an explicitly
+    # named axis below — so only return any_col AFTER the explicit-axis fallbacks
+    # (Round 184 S19: "依機台看不良率" was grouping by defect_type, not the tool).
+    if ent_col:
+        return ent_col
     # Round 184 (S14): a colloquial SHIFT value ("Day班/Night班/白天班/夜班") names
     # the shift dimension — resolve it FIRST, before the tool fallback below (whose
     # "誰" would otherwise hijack "Day班…誰高" to a tool axis).
@@ -7460,7 +7481,8 @@ def _resolve_decomp_dimension(idx, prompt: str, normalized: str, contracts, bloc
         for cand in ("product_family", "product", "product_id", "sku"):
             if cand in names and _is_categorical(cand):
                 return cand
-    return None
+    # last resort: a non-entity attribute that matched (e.g. defect_type, status).
+    return any_col
 
 
 def _trend_tool_column(contracts, block_id: str) -> str | None:

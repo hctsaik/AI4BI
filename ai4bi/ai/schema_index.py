@@ -279,10 +279,18 @@ class SchemaIndex:
         """
         hay = f"{prompt.lower()} {normalized}"
         wants_rate = any(s in hay for s in ("率", "rate", "%", "比率", "比例", "percent", "佔比", "占比"))
+        # Round 184 (S19): "不良率" CONTAINS the substring "良率", so a yield metric
+        # falsely ties a defect metric. When the prompt signals a DEFECT, break the
+        # tie toward a defect-named metric (不良率 → defect_density_pct, not yield).
+        wants_defect = any(s in hay for s in ("不良", "缺陷", "瑕疵", "defect", "壞點", "缺點"))
 
         def _is_rate(e: "MetricEntry") -> bool:
             return any(t in e.metric_name.lower()
                        for t in ("rate", "pct", "ratio", "percent", "density"))
+
+        def _is_defect(e: "MetricEntry") -> bool:
+            return any(t in e.metric_name.lower()
+                       for t in ("defect", "scrap", "fail", "reject", "ng"))
 
         # Round 122: score EVERY metric by its full keyword set — number of
         # distinct keywords matched (so avg_hold_age_hr matching '保留'+'時間' beats
@@ -298,7 +306,8 @@ class SchemaIndex:
                     continue
                 longest = max(len(k) for k in matched)
                 rate_bonus = 1.0 if (wants_rate and _is_rate(entry)) else 0.0
-                key = (len(matched), longest, rate_bonus)
+                defect_bonus = 1.0 if (wants_defect and _is_defect(entry)) else 0.0
+                key = (len(matched), longest, rate_bonus + defect_bonus)
                 if key > best_key:
                     best_key, best = key, entry
             return best

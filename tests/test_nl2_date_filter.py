@@ -80,7 +80,7 @@ class TestDateFilterDetection:
         result = service.propose("清除日期", report, None)
         # Fresh report has no date filter → clear is no-op
         assert result.proposal is None
-        assert "already" in result.message.lower()
+        assert "已經是" in result.message  # Round 184: message is now 繁中
 
     def test_clear_date_filter_english(self, service, report):
         """clear date filter on a fresh report → no-op."""
@@ -137,7 +137,7 @@ class TestDateFilterProposal:
         r2 = service.propose("ytd", updated, None)
         # Already ytd → no proposal, just a message
         assert r2.proposal is None
-        assert "already" in r2.message.lower()
+        assert "已經是" in r2.message  # Round 184: message is now 繁中
 
     def test_intent_kind_analysis_request(self, service, report):
         result = service.propose("最近3個月", report, None)

@@ -292,3 +292,19 @@ A 載入整備預覽 S01-03;B 關聯/複合鍵 S04-06;C 核心分析 S07-14(良�
 
 ### 後續方向
 依影響度修:S10、S15、S17、S14、S13 為大宗(可拉 +~9 平均),S08/S11/S19 小修。修完重評 20 情境;未達 95 續修或重生 20。
+
+## Round 2 (R184) — R1 修正後重評 + 第二批修正
+
+### 重評(實跑)
+- R1 修正後:S01-S10 **94.3**(↑91.6)、S11-S20 **87.9**(↑82.4)→ **20 情境總平均 91.1**(↑87.0)。重點題大幅提升:S10 55→84、S13 72→95、S14 70→90、S15 52→90。
+- 剩餘崩點:S17 英文洩漏仍在(date-filter **成功**訊息 5112/5155,非我上輪修的 disambiguation)、S19 不良率跨表(62)、S10「下掉/管制圖」措辭、S14「哪個久」、S11/S12 小瑕。
+
+### Round 2 共識 + 實作
+- ✅ **S17 英文洩漏(rubric 明令禁)**:`_date_filter_change` 的成功/已設訊息全翻繁中 + `_PERIOD_ZH` 對照(last_month→上個月…),不再吐 "Date filter proposal created: Set date range to last_month"。
+- ✅ **S19 不良率(62→核心已修)**:`defect_density_pct`(formula SUM(defect_die)/SUM(tested_die)*100,描述「不良率」)本就存在,但「不良率」**含子字串「良率」**→誤配 weighted_yield_pct。`best_metric_match` 加 **defect 意圖加分**(wants_defect + _is_defect)→「不良率/各機台不良率/哪台不良率最高」正確配 defect_density_pct(ETCH-02 16.2% die 加權);「良率」仍配 yield(守衛)。
+- ✅ **`_resolve_decomp_dimension` 重排(連帶修 S19 維度)**:yield 區塊上「機台」非 etch_tool_id 的關鍵字,故「依機台看不良率」原被弱配的 defect_type(經「不良」)搶走 → 改為「entity 命中即回;否則先跑顯式 tool/shift/product fallback;最後才回非實體 any_col」。「各機台不良率→etch_tool_id」「各缺陷類型→defect_type」「各產品族→product_family」皆正確。
+- ✅ **S10 措辭**:`_EXCURSION_CUES` 補「下掉/異常下掉/異常的批/良率異常」+ `_looks_like_insights` 讓 yield-excursion 措辭讓位給 excursion handler(點名 LOT-1014/1005+時間);`_SPC_CUES` 補「管制圖/控制圖/control chart」。
+- ✅ **S14**:`久` 補進 which+comp comparator。
+
+### 後續
+重評 20 情境量化新平均(預期 S10→~93、S17→~88、S19→~90,總平均往 95)。未達 95 續修;殘留如 S14「哪個久」無指標、S11「一週比一週差」方向、S12「整廠瓶頸」總計 屬罕見小瑕。
