@@ -1456,8 +1456,19 @@ class NL2ProposalService:
         _ALIAS = {"記憶體": "memory", "記憶": "memory", "邏輯": "logic", "類比": "analog",
                   "dram": "memory", "sram": "memory", "cpu": "logic", "mem": "memory",
                   "記憶體類": "memory", "邏輯類": "logic"}
-        al = _ALIAS.get(a.strip().lower(), a.strip().lower())
-        bl = _ALIAS.get(b.strip().lower(), b.strip().lower())
+
+        def _alias(x: str) -> str:
+            xl = x.strip().lower()
+            if xl in _ALIAS:
+                return _ALIAS[xl]
+            # tolerate the regex over-capturing a measure ("邏輯良率" → logic):
+            # if a known group token is a substring, use it.
+            for k, v in _ALIAS.items():
+                if k in xl:
+                    return v
+            return xl
+
+        al, bl = _alias(a), _alias(b)
         if len(al) < 2 or len(bl) < 2 or not contracts:
             return None
         hay = f"{prompt.lower()} {normalized}"
@@ -2647,24 +2658,31 @@ class NL2ProposalService:
                 measure_block, measure_col = bid, col
                 break
         if measure_block is None:
+            # Round 178 (S3): a commonality cue fired but no measure was named
+            # ("是不是都經過同一台機台") — default to a yield column (low yield = the
+            # "bad" wafers) so we don't abort and fall through to a wrong handler.
+            for bid, c in facts.items():
+                yc = next((cc.name for cc in getattr(c, "columns", [])
+                           if "yield" in cc.name.lower()
+                           and getattr(cc, "data_type", "") in ("integer", "float")), None)
+                if yc:
+                    measure_block, measure_col = bid, yc
+                    break
+        if measure_block is None:
             return None
-        # Round 140: no explicit threshold but a superlative ("defect 最多的那幾批，
-        # 共同走過哪台 etch 機台") → qualify the top/bottom quantile of lots BY the
-        # measure, then run a TRUE commonality (lift + Fisher) on the tool column.
-        # Fixes the silent method-mismatch where this fell through to a ranking.
+        # No explicit threshold: qualify the WORST quantile of the measure (low
+        # yield / high defect) and run a TRUE commonality (lift + Fisher). We only
+        # reach here because a commonality cue fired, so "共通點 / 元兇 / 都經過同一台"
+        # all mean "the common tool among the bad ones" — always default to the
+        # worst quartile rather than returning None (Round 140 + 178 S3).
         if threshold is None:
             sup_high = any(t in hay for t in ("最多", "最高", "最大", "最嚴重", "最差"))
-            sup_low = any(t in hay for t in ("最低", "最少", "最小"))
-            # Round 178 (S3): qualitative "低良率 / 不良 / 差 / poor" with no number →
-            # qualify the worst quartile of the measure (low yield, or high defect)
-            # instead of returning None (which silently fell to a wrong KPI answer).
-            qual_low = any(t in hay for t in ("低良率", "不良", "差", "偏低", "壞", "poor", "low yield"))
-            if sup_high or sup_low or qual_low:
-                topn = self._answer_commonality_topn(
-                    prompt, normalized, contracts, measure_block, measure_col,
-                    worst_high=sup_high or "defect" in measure_col.lower())
-                if topn is not None:
-                    return topn
+            worst_high = sup_high or "defect" in measure_col.lower()
+            topn = self._answer_commonality_topn(
+                prompt, normalized, contracts, measure_block, measure_col,
+                worst_high=worst_high)
+            if topn is not None:
+                return topn
             return None
         # shared group key (lot) and the detail fact + entity (tool)
         detail_block = next((b for b in facts if b != measure_block), None)
@@ -5409,8 +5427,10 @@ _UNSUPPORTED_CAPABILITIES: tuple[tuple[tuple[str, ...], str], ...] = (
      "目前引擎是單一 fact 查詢，無法做 wafer 逐站 genealogy 的 fact-to-fact 明細串接"
      "（治理上禁止會扇出的明細 join）。但我可以用 commonality 分析：給定不良批，"
      "找出它們最常共同經過、且統計顯著（Fisher 檢定）的機台。"),
+    # Round 178: bare "元" removed — it false-matched 元兇/元件/還原 and hijacked
+    # commonality ("低良率的元兇") into a money refusal.
     (("成本", "金額", "費用", "損失多少錢", "cost", "scrap cost", "報廢成本", "$",
-      "美元", "台幣", "元"),
+      "美元", "台幣", "多少錢", "塊錢"),
      "目前資料集沒有成本/金額欄位（只有良率、缺陷數、queue/cycle time 等製造指標），"
      "無法換算金錢損失。我可以給：報廢/不良晶圓『數量』、良率損失、缺陷數，"
      "若你提供單片成本，我再幫你乘上數量估算。"),
@@ -5642,6 +5662,9 @@ _RANK_TRIGGERS: tuple[str, ...] = (
     "賣最", "排名", "排行", "前幾", "前十", "前五", "前三",
     "top ", "bottom ", "best ", "worst ", "highest", "lowest", "ranking", "rank ",
     "longest", "shortest", "slowest", "fastest", "most ", "least ",
+    # Round 178 (S2/S4): colloquial superlatives that were missing from the gate.
+    # (NOT "主要是哪/主要有哪" — those clash with decomposition "主要是哪個…造成".)
+    "最爛", "最佳", "最主要", "佔大宗", "占大宗",
 )
 _RANK_ASC_WORDS: tuple[str, ...] = (
     "最低", "最少", "最差", "最小", "最短", "最快", "最閒", "賣最差", "賣最少", "最不", "墊底",
@@ -6160,6 +6183,11 @@ _EXCURSION_CUES = ("突然掉", "掉下來", "掉到", "暴跌", "驟降", "異�
 
 def _looks_like_trend_direction(prompt: str, normalized: str) -> bool:
     hay = f"{prompt.lower()} {normalized}"
+    # Round 178 (S1): an explicit "趨勢如何 / 走勢如何 / 的趨勢" is itself a time-series
+    # ask — don't also require a separate time cue (it was falling to an overall KPI).
+    if any(p in hay for p in ("趨勢如何", "走勢如何", "趨勢怎樣", "趨勢怎麼", "的趨勢",
+                              "看趨勢", "趨勢呢", "走勢呢", "趨勢圖", "走勢圖")):
+        return True
     return any(d in hay for d in _TREND_DIR_CUES) and any(t in hay for t in _TREND_TIME_CUES)
 
 
