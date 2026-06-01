@@ -6891,6 +6891,10 @@ _COMMONALITY_CUES: tuple[str, ...] = (
     "殺手", "兇手", "凶手", "罪魁",
     # Round 182 (S3): RCA wording — "root cause / 根本原因 / 根因" of low yield.
     "root cause", "rootcause", "根本原因", "根因", "根本問題",
+    # Round 182 (S3): "低良率批次最常經過哪台" — the shared/most-traversed tool of
+    # the bad wafers is a commonality ask, not a yield Top-N ("最常經過" mis-read as
+    # ranking returned the HIGHEST-yield tool — direction reversed).
+    "最常經過", "最常走過", "最常走", "常經過", "經過哪台", "經過哪一台", "最常用到",
 )
 
 
