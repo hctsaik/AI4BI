@@ -734,7 +734,10 @@ class NL2ProposalService:
         # engines that must answer (they also name a tool but aren't yield lookups).
         _codes = set(re.findall(r"[A-Za-z]{2,}-?\d{1,3}", prompt))
         _yield_measure = any(w in _hay_fam for w in (
-            "良率", "yield", "缺陷", "defect", "不良", "良品", "die"))
+            "良率", "yield", "缺陷", "defect", "不良", "良品", "die",
+            # Round 182 (S2): "ETCH-02 跟全廠比差多少" implies a yield comparison even
+            # without the literal 良率 — bind yield so it isn't dropped to fallback.
+            "跟全廠", "比全廠", "全廠平均", "整廠", "跟整廠", "vs 全廠", "對全廠"))
         _other_engine = any(w in _hay_fam for w in (
             "oee", "可用率", "稼動", "利用率", "queue", "等待", "cycle", "週期",
             "產能", "throughput", "move", "移動", "wip", "uptime", "瓶頸", "效率"))
