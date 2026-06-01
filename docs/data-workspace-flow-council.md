@@ -124,3 +124,21 @@
 ### 結果
 - 全部目標常見問法實跑通過,守衛(為什麼/比上週造成→decomposition、哪台造成最多移動→move ranking、哪台機台良率比較差→ranking 非 commonality)未被破壞。1232 測試全綠。
 - 待重評量化 S1–S5 新平均(預期 S1/S2/S3/S5 各推進到 ~92–97)。
+
+---
+
+## Round 11 (R182 續) — 補最後三條常見口語線 + 修 commonality/OEE 路由衝突
+
+### 重評觸發(第 9 輪複評,實跑)
+- S1 88・S2 94・S3 82・S4 84・S5 97 → S1–S5 平均 **89.0**(+4.2);總平均 ≈ 92.6。評審判定「尚未進入只剩罕見長尾的高原」,點名 3 條**常見口語線**仍缺。
+
+### 本輪實作(實跑驗證)
+- ✅ **S3「拖累」走錯分支(常見,最優先)**:`_looks_like_commonality` 命中時提前到 **OEE/capacity 之前**(原本「拖累良率」被 OEE「良率(Q)」分支劫持)。同時加 `other_metric` 守衛 —— 問句若含可用率/OEE/queue/cycle/產能等**其他指標**則不視為良率 commonality(修掉新回歸:F8「哪台可用率拖累最嚴重」應走 OEE)。「哪個製程站點拖累良率/拖累良率的是哪一站」現走 commonality → ETCH-02。
+- ✅ **S1「惡化/變差」(常見)**:`_TREND_QUESTION_CUES` 補「在惡化/惡化嗎/有沒有惡化/變差了嗎/是不是變差/變糟了嗎」;`_looks_like_trend_direction` 方向動詞補「惡化/變糟」(仍受 change_ctx 守衛)。「良率在惡化嗎/變差了嗎」皆走趨勢並點名 ETCH-01。
+- ✅ **S4 缺陷口語(常見)**:`_RANK_TRIGGERS` 補「缺陷主要/不良主要/壞在哪/主要壞/哪種缺陷/哪種不良…」;`_answer_ranking` 未具名指標時若含缺陷/不良/瑕疵/壞 → **預設 defect_die**,且無維度時預設 **defect_type**。「主要壞在哪/缺陷主要是哪些/哪種缺陷最多」全回 defect Pareto(Pattern 2,546)。
+
+### 守衛驗證(未回歸)
+「哪台機台良率比較差」→ ranking(非 commonality);「ETCH-02 的 OEE 多少」「哪台可用率拖累最嚴重」→ OEE(commonality 未搶);「哪台造成最多移動」→ move ranking;「哪個 area 造成…比上週下降」→ 仍走比較(area 在 yield fact 無欄,屬資料限制)。fab 套件 65 passed。
+
+### 已知殘留(非常見/資料限制)
+- 「是什麼拖累了良率」(「是什麼」非 which-station)→ 仍走 OEE(仍答 ETCH-02);英文 Memory/Logic label 顯小寫;「哪個 area 造成下降」yield fact 無 area 欄(跨 fact,屬限制)。皆罕見或資料結構限制,非常見問法。

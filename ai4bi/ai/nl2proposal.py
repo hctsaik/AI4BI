@@ -776,6 +776,15 @@ class NL2ProposalService:
             if wc is not None:
                 return wc
 
+        # Round 117 / 182 (S3): commonality ("哪一站害的 / 拖累良率的元兇") is a
+        # high-confidence culprit ask — checked BEFORE OEE so a "拖累良率" question
+        # routes to the worst-quartile common-path analysis instead of OEE's
+        # "良率(Q)" component view. Specific cues, falls through if not handled.
+        if _looks_like_commonality(prompt, normalized):
+            cm = self._answer_commonality(prompt, normalized, report, contracts)
+            if cm is not None:
+                return cm
+
         # Round 128: capacity / OEE analytics (move fact × capacity reference).
         if _looks_like_oee(prompt, normalized):
             oee = self._answer_oee(prompt, normalized, report, contracts)
@@ -786,12 +795,7 @@ class NL2ProposalService:
             if cap is not None:
                 return cap
 
-        # Round 117: SPC control-limit outliers + commonality. Specific cues,
-        # checked early.
-        if _looks_like_commonality(prompt, normalized):
-            cm = self._answer_commonality(prompt, normalized, report, contracts)
-            if cm is not None:
-                return cm
+        # Round 117: SPC control-limit outliers. Specific cues, checked early.
         if _looks_like_spc(prompt, normalized):
             sp = self._answer_spc(prompt, normalized, report, contracts)
             if sp is not None:
@@ -3907,11 +3911,15 @@ class NL2ProposalService:
         idx = SchemaIndex.build(contracts)
         metric = idx.best_metric_match(prompt, normalized)
         if metric is None:
+            hay0 = f"{prompt.lower()} {normalized}"
+            # Round 182 (S4): a "壞/缺陷/不良/瑕疵 主要在哪" with no explicit measure
+            # means the defect COUNT — retry with an implicit defect measure.
+            if any(t in hay0 for t in ("缺陷", "不良", "瑕疵", "壞", "defect", "bad ")):
+                metric = idx.best_metric_match("缺陷 defect 不良", "que xian defect")
             # Round 182 (S2): "最差的機台是哪台" names no measure, but in a yield-
             # centric fab report the worst tool/product most naturally means worst
             # YIELD — retry with an implicit yield measure instead of refusing.
-            hay0 = f"{prompt.lower()} {normalized}"
-            if any(t in hay0 for t in (
+            if metric is None and any(t in hay0 for t in (
                     "機台", "機臺", "設備", "機器", "chamber", "腔", "tool", "產品",
                     "品類", "product", "批", "lot", "站", "step", "區", "area",
                     "哪台", "哪臺", "哪部", "哪一台", "哪一臺")):
@@ -3921,6 +3929,14 @@ class NL2ProposalService:
         block_id, metric_name, alias = metric.block_id, metric.metric_name, metric.alias
 
         dim_col = _resolve_decomp_dimension(idx, prompt, normalized, contracts, block_id)
+        if dim_col is None:
+            # Round 182 (S4): a defect-count ranking with no named dimension → group
+            # by defect_type (the natural "which defects" axis) if present.
+            _names = {col.name for col in getattr(contracts.get(block_id), "columns", [])}
+            for _cand in ("defect_type", "bin_code", "defect_code"):
+                if _cand in _names and _is_categorical_col(contracts, block_id, _cand):
+                    dim_col = _cand
+                    break
         if dim_col is None:
             return None
         # Round 142: an explicit "哪一台機台 / which tool" must group by the tool
@@ -5848,8 +5864,10 @@ _RANK_TRIGGERS: tuple[str, ...] = (
     # Round 178 (S2/S4): colloquial superlatives that were missing from the gate.
     # (NOT "主要是哪/主要有哪" — those clash with decomposition "主要是哪個…造成".)
     "最爛", "最佳", "最主要", "佔大宗", "占大宗",
-    # Round 182 (S4): "主要不良項目有哪些 / 主要缺陷" → ranked defect list.
+    # Round 182 (S4): "主要不良項目有哪些 / 主要缺陷 / 主要壞在哪" → ranked defect list.
     "主要不良", "主要缺陷", "不良項目", "缺陷項目", "不良類型", "缺陷種類", "主要的不良",
+    "缺陷主要", "不良主要", "瑕疵主要", "壞在哪", "主要壞", "壞最多", "哪種缺陷",
+    "哪些缺陷", "哪種不良", "哪種瑕疵", "哪些不良",
 )
 _RANK_ASC_WORDS: tuple[str, ...] = (
     "最低", "最少", "最差", "最小", "最短", "最快", "最閒", "賣最差", "賣最少", "最不", "墊底",
@@ -6389,7 +6407,9 @@ _TREND_QUESTION_CUES = (
     "有在變差", "有變差嗎", "越來越差嗎", "越來越好嗎", "是不是越來越",
     "變好還是變差", "變差還是變好", "是變好還是", "在往下嗎", "在下滑嗎",
     "有在掉", "還在掉", "在掉嗎", "有在跌", "還在跌", "在跌嗎", "有在惡化",
-    "持續下滑嗎", "持續惡化嗎", "在變差嗎", "有改善嗎", "有沒有改善")
+    "持續下滑嗎", "持續惡化嗎", "在變差嗎", "有改善嗎", "有沒有改善",
+    "在惡化", "惡化嗎", "有沒有惡化", "有惡化", "變差了嗎", "變差了沒",
+    "是不是變差", "是否變差", "是不是惡化", "在變糟", "變糟了嗎")
 
 
 def _is_trend_direction_question(prompt: str, normalized: str) -> bool:
@@ -6420,7 +6440,7 @@ def _looks_like_trend_direction(prompt: str, normalized: str) -> bool:
         "上週", "上周", "上月", "去年同期", "vs 上", "相比", "哪個", "哪一個", "哪些"))
     if not change_ctx:
         if any(v in hay for v in ("上升", "下降", "下滑", "走高", "走低", "越來越",
-                                  "往上走", "往下走")):
+                                  "往上走", "往下走", "惡化", "變糟")):
             return True
         if any(t in hay for t in _TREND_TIME_CUES) and any(
                 v in hay for v in ("變化", "變動", "變好", "變差", "改善", "惡化")):
@@ -6712,7 +6732,13 @@ def _looks_like_commonality(prompt: str, normalized: str) -> bool:
     weak_culprit = any(w in hay for w in ("造成", "導致", "拉低"))
     change_ctx = any(t in hay for t in (
         "比上", "比前", "比這", "上週", "上周", "上月", "去年同期", "vs 上", "這週比", "本週比"))
-    if which_station and not change_ctx and (
+    # commonality is about low-YIELD wafers sharing a tool — if the prompt names a
+    # different metric (可用率/OEE/queue/cycle/產能…), it's that engine's question,
+    # not commonality (e.g. "哪台機台的可用率拖累最嚴重" → OEE, not commonality).
+    other_metric = any(w in hay for w in (
+        "可用率", "availability", "oee", "稼動", "利用率", "queue", "等待", "cycle",
+        "週期", "move", "移動", "產能", "throughput", "wip", "稼動率", "uptime"))
+    if which_station and not change_ctx and not other_metric and (
             strong_culprit or (weak_culprit and bad_yield)):
         return True
     return False
