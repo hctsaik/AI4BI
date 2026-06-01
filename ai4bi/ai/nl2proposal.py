@@ -5978,6 +5978,7 @@ _RANK_TRIGGERS: tuple[str, ...] = (
     "哪些缺陷", "哪種不良", "哪種瑕疵", "哪些不良",
     # Round 182 (S2): "tool matching / 機台比對" → find the yield-mismatched tool.
     "tool matching", "toolmatching", "tool-matching", "機台比對", "機台對比", "機台匹配",
+    "機台之間", "機台間", "機台良率差異", "各機台良率差異", "機台的良率差異",
 )
 _RANK_ASC_WORDS: tuple[str, ...] = (
     "最低", "最少", "最差", "最小", "最短", "最快", "最閒", "賣最差", "賣最少", "最不", "墊底",
@@ -6532,7 +6533,12 @@ _TREND_QUESTION_CUES = (
     "有在掉", "還在掉", "在掉嗎", "有在跌", "還在跌", "在跌嗎", "有在惡化",
     "持續下滑嗎", "持續惡化嗎", "在變差嗎", "有改善嗎", "有沒有改善",
     "在惡化", "惡化嗎", "有沒有惡化", "有惡化", "變差了嗎", "變差了沒",
-    "是不是變差", "是否變差", "是不是惡化", "在變糟", "變糟了嗎")
+    "是不是變差", "是否變差", "是不是惡化", "在變糟", "變糟了嗎",
+    # Round 182 (S1): positive-direction & "降很多/退步" colloquials (both directions
+    # of a trend question — the verdict covers improving or worsening).
+    "變好嗎", "有沒有變好", "有變好", "變好了嗎", "變好了沒", "是不是變好", "好轉",
+    "降很多嗎", "掉很多嗎", "降很多", "掉很多", "降了嗎", "是不是降了", "是不是掉了",
+    "退步", "退步了嗎", "進步了嗎", "有進步", "有起色")
 
 
 def _is_trend_direction_question(prompt: str, normalized: str) -> bool:
@@ -6882,7 +6888,10 @@ def _looks_like_commonality(prompt: str, normalized: str) -> bool:
     # ("造成/導致") are too generic, so they additionally need a bad-yield word.
     strong_culprit = any(w in hay for w in (
         "害", "拖累", "搞鬼", "搞的", "禍首", "元凶", "元兇", "罪魁", "毛病", "的問題",
-        "殺手", "兇手", "凶手"))
+        "殺手", "兇手", "凶手",
+        # Round 182 (S3): "關鍵設備 / 問題設備" name the culprit equipment on their
+        # own (bare "關鍵設備是哪個" should reach commonality, not just full句).
+        "關鍵設備", "關鍵機台", "問題設備", "問題機台", "關鍵的設備", "關鍵的機台"))
     weak_culprit = any(w in hay for w in ("造成", "導致", "拉低"))
     change_ctx = any(t in hay for t in (
         "比上", "比前", "比這", "上週", "上周", "上月", "去年同期", "vs 上", "這週比", "本週比"))
