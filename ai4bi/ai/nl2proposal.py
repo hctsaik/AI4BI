@@ -1424,10 +1424,16 @@ class NL2ProposalService:
         if va is not None and vb is not None:
             hi, lo = (a, b) if va >= vb else (b, a)
             hv, lv = (va, vb) if va >= vb else (vb, va)
-            diff_pct = ((hv - lv) / abs(lv) * 100) if lv else None
+            # Round 178 (S2): for a ratio metric (yield %) the gap is percentage
+            # POINTS — report "高 8.8 個百分點", not the misleading relative "多 10.5%".
+            _is_ratio_metric = _metric_is_ratio(contracts, block_id, metric_name)
+            if _is_ratio_metric:
+                gap = f"，{hi} 高 {abs(hv - lv):.1f} 個百分點。"
+            else:
+                diff_pct = ((hv - lv) / abs(lv) * 100) if lv else None
+                gap = (f"，{hi} 較高，多 {diff_pct:.1f}%。" if diff_pct is not None else f"，{hi} 較高。")
             sentence = (f"{a} {alias} {_format_metric_value(va, unit)}　vs　"
-                        f"{b} {_format_metric_value(vb, unit)}。{hi} 較高"
-                        + (f"，多 {diff_pct:.1f}%。" if diff_pct is not None else "。"))
+                        f"{b} {_format_metric_value(vb, unit)}。{gap.lstrip('，')}")
         else:
             sentence = f"比較 {a} 與 {b} 的 {alias}。"
         notes = [f"比較「{col}」中 {a} 與 {b} 的「{alias}」（治理查詢路徑），來源：{block_id}。"]
@@ -2560,8 +2566,20 @@ class NL2ProposalService:
                      BlockType.fact, BlockType.snapshot_fact, BlockType.target_fact)}
         # the fact holding the qualifying measure (yield) and the detail fact (moves)
         measure_block = measure_col = group_key = None
+        _yield_q = any(t in hay for t in ("良率", "yield"))
         for bid, c in facts.items():
-            col = _resolve_numeric_column(prompt, normalized, c)
+            # Round 178 (S3): a yield question must bind the YIELD column, not a
+            # count like failed_wafer_count that the longest-token match grabs
+            # (which then fails the yield filter and silently aborts commonality).
+            col = None
+            if _yield_q:
+                _numcols = [cc.name for cc in getattr(c, "columns", [])
+                            if getattr(cc, "data_type", "") in ("integer", "float", "int",
+                                                                "number", "numeric", "double", "bigint")]
+                col = next((n for n in _numcols
+                            if "yield" in n.lower() or n.lower().endswith("_pct")), None)
+            if col is None:
+                col = _resolve_numeric_column(prompt, normalized, c)
             if col and any(t in col.lower() for t in ("yield", "pct", "rate", "defect")):
                 measure_block, measure_col = bid, col
                 break
@@ -2574,7 +2592,11 @@ class NL2ProposalService:
         if threshold is None:
             sup_high = any(t in hay for t in ("最多", "最高", "最大", "最嚴重", "最差"))
             sup_low = any(t in hay for t in ("最低", "最少", "最小"))
-            if sup_high or sup_low:
+            # Round 178 (S3): qualitative "低良率 / 不良 / 差 / poor" with no number →
+            # qualify the worst quartile of the measure (low yield, or high defect)
+            # instead of returning None (which silently fell to a wrong KPI answer).
+            qual_low = any(t in hay for t in ("低良率", "不良", "差", "偏低", "壞", "poor", "low yield"))
+            if sup_high or sup_low or qual_low:
                 topn = self._answer_commonality_topn(
                     prompt, normalized, contracts, measure_block, measure_col,
                     worst_high=sup_high or "defect" in measure_col.lower())
@@ -6695,7 +6717,18 @@ def _resolve_decomp_dimension(idx, prompt: str, normalized: str, contracts, bloc
                 any_col, any_len = entry.column_name, len(kw)
             if _is_entity_col(entry.column_name) and len(kw) > ent_len:
                 ent_col, ent_len = entry.column_name, len(kw)
-    return ent_col or any_col
+    if ent_col or any_col:
+        return ent_col or any_col
+    # Round 178 (S1): a generic "機台/設備/機器/tool" with no specific dim keyword
+    # should still resolve a tool axis (etch_tool_id / tool_id) on this block,
+    # instead of giving up and letting the caller fall back to a wrong column.
+    if any(t in hay for t in ("機台", "機臺", "設備", "機器", "machine", "tool", "哪台", "哪臺")):
+        contract = contracts.get(block_id)
+        names = {c.name for c in getattr(contract, "columns", None) or []}
+        for cand in ("etch_tool_id", "tool_id", "tool_group"):
+            if cand in names and _is_categorical(cand):
+                return cand
+    return None
 
 
 def _metric_is_ratio(contracts, block_id: str, metric_name: str) -> bool:
@@ -6719,7 +6752,14 @@ def _compose_decomposition_sentence(alias, dim_col, df, total, unit, scope,
     """Build the ranked-contributor answer sentence for a change decomposition."""
     arrow = "成長" if total >= 0 else "下降"
     _recompute = "（加權重算）" if is_ratio else ""
-    head = (f"{scope}「{alias}」整體{arrow} {_format_metric_value(abs(total), unit)}{_recompute}，"
+    # Round 178: a CHANGE in a ratio metric (yield %) is in percentage POINTS, not
+    # "%" — say 個百分點 so a -8.8pp drop isn't misread as a -8.8% relative change.
+    _pp = is_ratio and (unit or "").strip() in ("%", "％")
+
+    def _fmt(v: float) -> str:
+        return f"{abs(v):,.2f} 個百分點" if _pp else _format_metric_value(abs(v), unit)
+
+    head = (f"{scope}「{alias}」整體{arrow} {_fmt(total)}{_recompute}，"
             f"依「{dim_col}」拆解：")
     dim_name = df.columns[0]
 
@@ -6733,9 +6773,9 @@ def _compose_decomposition_sentence(alias, dim_col, df, total, unit, scope,
     risers = df[df["delta"] > 0].sort_values("delta", ascending=False).head(2)
     parts: list[str] = []
     for _, row in decliners.iterrows():
-        parts.append(f"{row[dim_name]} ↓{_format_metric_value(abs(row['delta']), unit)}{_suffix(row)}")
+        parts.append(f"{row[dim_name]} ↓{_fmt(row['delta'])}{_suffix(row)}")
     for _, row in risers.iterrows():
-        parts.append(f"{row[dim_name]} ↑{_format_metric_value(abs(row['delta']), unit)}{_suffix(row)}")
+        parts.append(f"{row[dim_name]} ↑{_fmt(row['delta'])}{_suffix(row)}")
     if not parts:
         return head + "各維度變化不顯著。"
     return head + "；".join(parts) + "。"
