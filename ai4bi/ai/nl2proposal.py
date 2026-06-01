@@ -1461,6 +1461,21 @@ class NL2ProposalService:
             return None
         block_id, metric_name, alias = match.block_id, match.metric_name, match.alias
 
+        # Round 178 (S4): a Pareto is the cumulative share of a COUNT/quantity, so
+        # lock onto an additive metric — a "%" or "累積" in the prompt must not make
+        # us build the Pareto on a ratio column (e.g. defect_density_pct).
+        if kind == "pareto" and _metric_is_ratio(contracts, block_id, metric_name):
+            _c = (contracts or {}).get(block_id)
+            # leading token, e.g. defect_density_pct → "defect", to find the
+            # matching count metric (defect_die) rather than just any sum metric.
+            _stem = metric_name.lower().split("_")[0]
+            _sum_metrics = [m for m in getattr(_c, "metrics", [])
+                            if getattr(getattr(m, "disaggregation_method", None), "value", None) == "sum"]
+            _alt = next((m for m in _sum_metrics if _stem and m.name.lower().startswith(_stem)), None)
+            _alt = _alt or (_sum_metrics[0] if _sum_metrics else None)
+            if _alt is not None:
+                metric_name, alias = _alt.name, _alt.name
+
         from ai4bi.report.builder import build_add_visual_proposal
         from ai4bi.query_spec import (
             BlockRef, DimensionRef, SortDirection, SortSpec, VisualizationSpec, VisualQuerySpec,
@@ -2480,6 +2495,22 @@ class NL2ProposalService:
             if table.empty:
                 msg = (f"沒有「{ent}」的「{val}」超出 μ±{k:g}σ"
                        f"（μ={limits['mean']}, σ={limits['sigma']}）。")
+                # Round 178 (S9): no outlier at k σ — still surface the entity
+                # CLOSEST to the limit so the engineer isn't left with a bare
+                # "nothing" and knows where the next risk sits.
+                try:
+                    sig = float(limits.get("sigma") or 0)
+                    mu = float(limits.get("mean") or 0)
+                    if sig > 0 and ent in df.columns and val in df.columns:
+                        per = df.groupby(ent)[val].mean()
+                        z = ((per - mu) / sig).abs()
+                        top = z.idxmax()
+                        zt = round(float(z.max()), 2)
+                        arrow = "偏高↑" if per[top] > mu else "偏低↓"
+                        msg += (f" 最接近界限的是「{top}」（{round(float(per[top]), 2)}，"
+                                f"約 {zt:g}σ {arrow}）；放寬到 {zt:g}σ 就會超出。")
+                except Exception:  # noqa: BLE001
+                    pass
             else:
                 names = "、".join(str(x) for x in table[ent].head(3).tolist())
                 msg = (f"{len(table)} 個「{ent}」超出管制界限 μ±{k:g}σ：{names}"
@@ -3353,9 +3384,15 @@ class NL2ProposalService:
             return None
         is_binary = flag_col in ("rework_flag", "hold_flag")
         higher_better = "yield" in meas_col.lower()
+        # Round 178 (S5): a yield ratio must be aggregated WEIGHTED (SUM good /
+        # SUM tested), not mean(yield_pct) — correct when die counts differ per
+        # wafer. Only the same-fact case (e.g. product_family in the yield fact);
+        # cross-fact alignment keeps the mean fallback.
+        is_wy = (higher_better and flag_block == meas_block
+                 and {"good_die", "tested_die"} <= set(getattr(fdf, "columns", [])))
 
         if flag_block == meas_block:
-            work = fdf[[flag_col, meas_col]].copy()
+            work = fdf[[flag_col] + (["good_die", "tested_die"] if is_wy else [meas_col])].copy()
         else:
             if "lot_id" not in fdf.columns or "lot_id" not in mdf.columns:
                 return None
@@ -3363,12 +3400,18 @@ class NL2ProposalService:
                 else fdf.groupby("lot_id")[flag_col].agg(lambda s: s.mode().iloc[0] if len(s.mode()) else s.iloc[0])
             agg_meas = mdf.groupby("lot_id")[meas_col].mean()
             work = _pd.concat([agg_flag, agg_meas], axis=1, join="inner").reset_index()
-        work = work.dropna(subset=[flag_col, meas_col])
+        work = work.dropna(subset=[flag_col] + (["good_die", "tested_die"] if is_wy else [meas_col]))
         if work.empty:
             return None
         if is_binary:
             work[flag_col] = work[flag_col].map(lambda v: "有" if float(v) > 0 else "無")
-        grp = work.groupby(flag_col)[meas_col].agg(["mean", "count"]).reset_index()
+        if is_wy:
+            grp = work.groupby(flag_col).agg(
+                _g=("good_die", "sum"), _t=("tested_die", "sum"), count=(flag_col, "size")).reset_index()
+            grp["mean"] = (grp["_g"] / grp["_t"].where(grp["_t"] != 0) * 100.0)
+            grp = grp[[flag_col, "mean", "count"]]
+        else:
+            grp = work.groupby(flag_col)[meas_col].agg(["mean", "count"]).reset_index()
         if len(grp) < 2:
             # Round 142: cross-fact attribution washout — e.g. a wafer's yield can't
             # be pinned to one vendor because it passes through many vendors' tools,
@@ -6164,9 +6207,22 @@ _CAPACITY_VETO = ("等待", "queue", "佇列", "wait time", "等候")
 _SHARE_WORDS = ("佔總", "占總", "佔全", "占全", "比重", "佔多少", "占多少", "佔了", "share of")
 
 
+_UTIL_CUES: tuple[str, ...] = (
+    "利用率", "稼動", "使用率", "utiliz", "util", "負載", "loading", "滿載", "餘裕",
+    "headroom", "閒置", "產能", "capacity", "可用率", "availab", "停機", "擴產",
+    "加機台", "增購", "加產能", "缺口", "throughput", "產出率", "達成率", "達標",
+)
+
+
 def _looks_like_capacity(prompt: str, normalized: str) -> bool:
     hay = f"{prompt.lower()} {normalized}"
     if any(v in hay for v in _CAPACITY_VETO) and any(s in hay for s in _SHARE_WORDS):
+        return False
+    # Round 178 (S8): a queue/wait question ("哪一站等待最長？瓶頸在哪？") is about
+    # queue time per step, NOT machine utilization — don't let the word 瓶頸 hijack
+    # it to a capacity/utilization answer unless an actual utilization cue is there.
+    queue_q = any(t in hay for t in ("等待", "等候", "queue", "wait"))
+    if queue_q and not any(c in hay for c in _UTIL_CUES):
         return False
     return any(c in hay for c in _CAPACITY_CUES)
 
