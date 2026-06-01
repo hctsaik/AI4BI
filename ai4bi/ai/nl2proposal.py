@@ -1998,6 +1998,16 @@ class NL2ProposalService:
         except Exception:  # noqa: BLE001
             return None
         rows = [{"類別": sec.heading, "重點": line} for sec in rep.sections for line in sec.lines]
+        # Round 184 (S15): lead the weekly summary with the top anomaly (e.g. the
+        # yield excursion) so it surfaces what to ACT on, not just volume counts.
+        try:
+            from ai4bi.ai.suggestions import detect_anomalies
+            _an = detect_anomalies(contracts, max_observations=2)
+        except Exception:  # noqa: BLE001
+            _an = []
+        anom_rows = [{"類別": "⚠️ 異常", "重點": f"{o.icon} {o.headline}（{o.detail}）"}
+                     for o in _an if o.severity == "high"]
+        rows = anom_rows + rows
         if not rows:
             return None
         df = pd.DataFrame(rows)
@@ -2311,8 +2321,25 @@ class NL2ProposalService:
                 msg = (f"距 {int(target*100)}% 滿載的可接單空間（依 {gk}）：最多 {w[gkcol]}"
                        f"（還可接 {w[f'距{int(target*100)}%缺口']} moves，目前利用率 {w['利用率%']}%）。")
                 return self._capacity_result(msg, tbl, f"距 {int(target*100)}% 滿載缺口")
-        # Round 130: capacity shortfall / expansion ("產能缺口最大的區 / 擴產先加哪區").
-        if any(t in hay for t in ("缺口", "擴產", "加機台", "增購", "加產能", "該加", "投資哪", "瓶頸區")):
+        # Round 130/184 (S13): expansion / "該加哪區產能 / 要擴哪站". Constraint theory
+        # — you expand the BOTTLENECK (highest utilization), NOT wherever the plan
+        # gap is biggest. An under-utilized station with a large plan miss (e.g.
+        # THINFILM at 40% util) is a demand/scheduling issue, not a capacity one;
+        # adding machines there does nothing for line output. Rank by utilization.
+        if any(t in hay for t in ("擴產", "加機台", "增購", "加產能", "該加", "投資哪",
+                                  "瓶頸區", "要擴", "擴充", "加哪", "擴哪", "該擴")):
+            ut = _cap.utilization(contracts, gk)
+            if ut is not None and not ut.empty and "利用率%" in ut.columns:
+                ut = ut.sort_values("利用率%", ascending=False).reset_index(drop=True)
+                gcol = ut.columns[0]
+                w = ut.iloc[0]
+                msg = (f"擴產應優先「瓶頸」——利用率最高處（依 {gcol}）：{w[gcol]}"
+                       f"（利用率 {w['利用率%']}%）。擴沒滿載的站對整線產出無益（瓶頸理論：先解約束）。")
+                return self._capacity_result(msg, ut, "擴產優先序（依利用率／瓶頸）")
+        # Round 130: pure plan-gap question ("產能缺口最大的區 / 計畫差距") — where
+        # you're MISSING plan most (a demand/scheduling view), distinct from where
+        # to ADD capacity (the bottleneck, handled above).
+        if any(t in hay for t in ("缺口", "計畫差距", "達成缺口", "未達計畫", "差計畫")):
             tbl = _cap.plan_attainment(contracts, gk if gk != "tool_id" else "area")
             if tbl is not None and not tbl.empty:
                 tbl = tbl.copy()
@@ -2321,7 +2348,7 @@ class NL2ProposalService:
                 gcol = tbl.columns[0]
                 w = tbl.iloc[0]
                 msg = (f"產能缺口（計畫−實際，依 {gcol}）最大：{w[gcol]}（缺口 {w['缺口']} moves，"
-                       f"達成率 {w['達成率%']}%）→ 擴產應優先此處。")
+                       f"達成率 {w['達成率%']}%）。")
                 return self._capacity_result(msg, tbl, "產能缺口（計畫−實際）")
         # availability (run ÷ available hours) lives on the capacity reference
         if any(t in hay for t in ("可用率", "availability", "停機", "稼動率")) and \
@@ -2726,20 +2753,56 @@ class NL2ProposalService:
         hay = f"{prompt.lower()} {normalized}"
         km = re.search(r"(\d+(?:\.\d+)?)\s*(?:個|倍)?\s*(?:標準差|σ|sigma)", hay)
         k = float(km.group(1)) if km else 3.0
+        _yld_q = any(t in hay for t in ("良率", "yield", "不良", "壞", "低良"))
         for bid, c in contracts.items():
             if getattr(c, "block_type", None) not in (
                     BlockType.fact, BlockType.snapshot_fact, BlockType.target_fact):
                 continue
+            cols = {col.name for col in getattr(c, "columns", [])}
+            # Round 184 (S10): a YIELD SPC question must run on the yield block with
+            # the yield column — never fall through to a move/capacity block (which
+            # would scan an unrelated measure like capacity_moves → wrong answer).
+            yld_col = next((x for x in ("yield_pct", "weighted_yield_pct", "yield")
+                            if x in cols), None)
+            if _yld_q and not yld_col:
+                continue
             ent = _resolve_decomp_dimension(idx, prompt, normalized, contracts, bid)
-            val = _resolve_numeric_column(prompt, normalized, c)
+            val = yld_col if (_yld_q and yld_col) else _resolve_numeric_column(prompt, normalized, c)
             if not ent or not val:
                 continue
             try:
                 df = materialize_dataframe(c)
             except Exception:  # noqa: BLE001
                 continue
+            extra_note = ""
             table, limits = control_limit_outliers(df, ent, val, k=k)
+            if not limits and ent in df.columns and val in df.columns:
+                # Round 184 (S10): σ-based outlier detection needs ≥3 groups; a
+                # tool axis with only 2 machines (ETCH-01/02) can't be judged that
+                # way. Be honest + name the extreme tool, then drop to a finer grain
+                # (wafer/lot) that DOES have enough groups so real excursions show.
+                _per = df.groupby(ent)[val].mean()
+                if 0 < len(_per) < 3:
+                    _lo = _per.idxmin()
+                    extra_note = (
+                        f"「{ent}」只有 {len(_per)} 個，樣本太少無法做嚴格的機台間 SPC 離群判定；"
+                        f"但以平均「{val}」看，最低是「{_lo}」（{round(float(_per.min()), 2)}）、"
+                        f"最高「{_per.idxmax()}」（{round(float(_per.max()), 2)}），差距明顯，建議優先檢視「{_lo}」。")
+                    for finer in ("wafer_id", "lot_id"):
+                        if finer in cols and finer != ent:
+                            t2, l2 = control_limit_outliers(df, finer, val, k=k)
+                            if l2:
+                                table, limits, ent = t2, l2, finer
+                                extra_note += f" 另以「{finer}」層級掃描如下。"
+                                break
             if not limits:
+                if extra_note:  # too few groups AND no finer grain — answer honestly
+                    notes = [f"SPC：依 {ent} 的 μ±{k:g}σ 離群掃描。來源：{bid}。"]
+                    intent = AIIntent(intent_kind="analysis_request",
+                                      target_scope="semantic_model",
+                                      trust_notes=notes, risk_level="low")
+                    return NL2ProposalResult(intent=intent, message=extra_note,
+                                             trust_notes=notes, risk_level="low")
                 continue
             if table.empty:
                 msg = (f"沒有「{ent}」的「{val}」超出 μ±{k:g}σ"
@@ -2764,6 +2827,8 @@ class NL2ProposalService:
                 names = "、".join(str(x) for x in table[ent].head(3).tolist())
                 msg = (f"{len(table)} 個「{ent}」超出管制界限 μ±{k:g}σ：{names}"
                        f"（μ={limits['mean']}, UCL={limits['ucl']}, LCL={limits['lcl']}）。")
+            if extra_note:  # Round 184 (S10): prepend the too-few-tools honesty
+                msg = f"{extra_note}\n\n{msg}"
             notes = [f"SPC：依 {ent} 取平均後，以全體 μ±{k:g}σ 為管制界限。來源：{bid}。"]
             # Round 137: SPC honesty — answer "這算管制圖嗎 / Cpk" honestly. This is a
             # cross-entity μ±kσ outlier scan, NOT a time-ordered control chart.
@@ -5032,8 +5097,7 @@ class NL2ProposalService:
         period = _extract_date_period(prompt, normalized)
         if period is None:
             return self._unsupported(
-                "Specify a date period: last 3 months (最近3個月), last quarter (上季), "
-                "this year (今年), or clear date filter (清除日期).",
+                "請指定時間範圍：最近 3 個月、上一季、今年，或「清除日期篩選」。",
                 target_scope="report",
             )
 
@@ -5930,6 +5994,11 @@ def _looks_like_metric_question(prompt: str, normalized: str) -> bool:
 def _extract_answer_period(normalized: str, prompt: str) -> str:
     """Map a time phrase to a trailing-window period, else 'all' (whole period)."""
     hay = f"{prompt.lower()} {normalized}"
+    # Round 184 (S17): vague "最近一段 vs 前一段 / 近期 vs 前期 / 最近這幾週跟之前"
+    # → compare the recent trailing window against the one before it (week grain).
+    if any(t in hay for t in ("最近一段", "前一段", "上一段", "近期", "前期",
+                              "最近這幾週", "最近幾週", "跟之前", "和之前", "比之前", "與之前")):
+        return "week"
     if any(t in hay for t in ("本週", "這週", "上週", "這周", "上周", "this week", "last week", "wow", "最近 7", "最近7", "近 7", "近7", "7 天", "7天")):
         return "week"
     if any(t in hay for t in ("本月", "這個月", "上個月", "當月", "this month", "last month", "mom", "最近 30", "最近30", "近 30", "近30", "30 天", "30天")):
@@ -6014,6 +6083,9 @@ _RANK_TRIGGERS: tuple[str, ...] = (
     "tool matching", "toolmatching", "tool-matching", "機台比對", "機台對比", "機台匹配",
     "機台之間", "機台間", "機台良率差異", "各機台良率差異", "機台的良率差異",
     "機台良率比較", "機台比較", "兩台機台", "兩台etch", "兩台 etch", "各機台比較",
+    # Round 184 (S08): explicit sort wording ("由多到少/由大到小/降序排列").
+    "由多到少", "由大到小", "由高到低", "從多到少", "從大到小", "從高到低",
+    "降序", "遞減排序", "排序",
 )
 _RANK_ASC_WORDS: tuple[str, ...] = (
     "最低", "最少", "最差", "最小", "最短", "最快", "最閒", "賣最差", "賣最少", "最不", "墊底",
@@ -6124,7 +6196,7 @@ def _looks_like_ranking(prompt: str, normalized: str) -> bool:
     which = any(w in hay for w in ("哪台", "哪臺", "哪個", "哪一", "哪部", "哪區",
                                    "哪站", "which", "誰"))
     comp = any(c in hay for c in ("好", "佳", "高", "差", "低", "長", "短", "慢", "快",
-                                  "多", "少", "嚴重", "不理想", "不佳", "理想",
+                                  "多", "少", "嚴重", "不理想", "不佳", "理想", "久",
                                   "需要關注", "要注意", "該注意", "該關注", "需要注意"))
     change_ctx = any(t in hay for t in (
         "比上", "比前", "比這", "升高", "升至", "變化", "造成", "原因", "為什麼", "為何",
@@ -6318,6 +6390,8 @@ _DIGEST_TRIGGERS: tuple[str, ...] = (
 _ANOMALY_TRIGGERS: tuple[str, ...] = (
     "異常", "不對勁", "怪怪", "有什麼問題", "哪裡有問題", "可疑", "outlier",
     "anomaly", "anomalies", "anything wrong", "what's off", "unusual",
+    # Round 184 (S15): colloquial "anything to watch / worth noting" entries.
+    "要注意", "該注意", "值得注意", "注意的問題", "需要注意", "要留意", "要關心",
 )
 
 
@@ -6758,6 +6832,7 @@ _CHURN_TRIGGERS = ("流失", "churn", "rfm", "快走", "要走", "好久沒來",
 _DECLINE_TRIGGERS = ("連續下滑", "連續下跌", "一直下滑", "持續下滑", "持續下跌", "持續衰退",
                      "連續衰退", "一直在掉", "一直掉", "一直跌", "一直在跌", "持續探低",
                      "一直變差", "越來越差", "走弱", "連續成長", "持續成長",
+                     "持續變差", "持續惡化", "持續退步", "一直惡化", "越來越糟",  # Round 184 (S11)
                      "往下掉", "一直往下", "持續往下", "往下走", "越掉越", "一路下滑", "一路往下",
                      "逐週下滑", "逐周下滑", "逐月下滑", "逐週退化", "逐步下滑", "趨勢下滑", "退化",
                      "drift", "degrad", "走低",
@@ -6807,6 +6882,7 @@ _CAPACITY_CUES: tuple[str, ...] = (
     "moves per", "產出率", "瓶頸機台", "瓶頸是哪", "瓶頸",
     "可用率", "availability", "停機", "line balance", "線平衡", "產線平衡",
     "擴產", "加機台", "增購", "加產能", "缺口", "投資哪", "瓶頸區", "拖累",  # Round 130
+    "要擴", "擴哪", "該擴", "加哪", "該加", "擴充",  # Round 184 (S13)
 )
 _OEE_CUES: tuple[str, ...] = ("oee", "設備總合效率", "設備綜合效率", "綜合效率",
                               "總合效率", "設備效率", "設備總效率", "設備稼動效率")
@@ -7355,6 +7431,16 @@ def _resolve_decomp_dimension(idx, prompt: str, normalized: str, contracts, bloc
                 ent_col, ent_len = entry.column_name, len(kw)
     if ent_col or any_col:
         return ent_col or any_col
+    # Round 184 (S14): a colloquial SHIFT value ("Day班/Night班/白天班/夜班") names
+    # the shift dimension — resolve it FIRST, before the tool fallback below (whose
+    # "誰" would otherwise hijack "Day班…誰高" to a tool axis).
+    if any(t in hay for t in ("day班", "night班", "白天班", "夜班", "日班", "早班",
+                              "晚班", "大夜", "班別", "輪班", "shift", "白班")):
+        contract = contracts.get(block_id)
+        names = {c.name for c in getattr(contract, "columns", None) or []}
+        for cand in ("shift", "shift_name", "班別"):
+            if cand in names and _is_categorical(cand):
+                return cand
     # Round 178 (S1): a generic "機台/設備/機器/tool" with no specific dim keyword
     # should still resolve a tool axis (etch_tool_id / tool_id) on this block,
     # instead of giving up and letting the caller fall back to a wrong column.

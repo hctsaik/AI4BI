@@ -224,6 +224,50 @@ def detect_anomalies(
             and df[c.name].nunique() <= 20
         ]
 
+        # ── Check 0 (Round 184): a ratio/quality COLUMN (yield, rate) that is
+        # notably LOW is the anomaly an engineer actually cares about — surface it
+        # ABOVE volume spread (e.g. capacity_moves). Scans columns by name (yield is
+        # often disaggregation='none', so it isn't in ratio_metrics). Two views:
+        # row-level excursion (values far below mean) and the lowest category group.
+        import pandas as _pd
+        quality_cols = [
+            c.name for c in contract.columns
+            if c.name in df.columns and not _is_id_col(c.name)
+            and _pd.api.types.is_numeric_dtype(df[c.name])
+            and any(t in c.name.lower() for t in ("yield", "良率", "_pct", "rate", "_ratio"))
+            and "uptime" not in c.name.lower()  # uptime/availability isn't "bad when low" here
+        ]
+        for metric in quality_cols:
+            try:
+                s = df[metric].dropna().astype(float)
+                if len(s) < 5:
+                    continue
+                mu, sd = float(s.mean()), float(s.std())
+                if sd > 0:
+                    low = s[s < mu - 2 * sd]
+                    if len(low) > 0:
+                        observations.append(AnomalyObservation(
+                            icon="🔴",
+                            headline=f"{len(low)} 筆「{metric}」異常偏低",
+                            detail=f"最低 {low.min():.1f}（平均 {mu:.1f}，低於平均 2σ，疑似 excursion）",
+                            metric=metric, severity="high",
+                        ))
+                if cat_cols:
+                    g = df.groupby(cat_cols[0])[metric].mean()
+                    if len(g) >= 3 and g.std() > 0:
+                        worst = g.idxmin()
+                        zz = (g[worst] - g.mean()) / g.std()
+                        if zz < -1.0:
+                            observations.append(AnomalyObservation(
+                                icon="📉",
+                                headline=f"「{worst}」的 {metric} 偏低",
+                                detail=f"{g[worst]:.1f}，低於平均 {g.mean():.1f}",
+                                metric=metric,
+                                severity="high" if zz < -1.5 else "medium",
+                            ))
+            except Exception:  # noqa: BLE001
+                pass
+
         # ── Check 1: Category outlier (sum metric grouped by first cat dim) ──
         if sum_metrics and cat_cols:
             metric = sum_metrics[0]
@@ -275,6 +319,11 @@ def detect_anomalies(
         # ── Check 3: Ratio metric sanity (avg > 0.5 might be a data error) ──
         if ratio_metrics and len(observations) < max_observations:
             for metric in ratio_metrics:
+                # Round 184: a *_pct / percent column is legitimately 0–100, so a
+                # high average is NOT a unit error — skip (else "yield_pct 平均值
+                # 偏高" falsely tops the anomaly list).
+                if any(t in metric.lower() for t in ("_pct", "percent", "百分")):
+                    continue
                 try:
                     avg = df[metric].dropna().mean()
                     if avg > 0.5:
@@ -292,7 +341,13 @@ def detect_anomalies(
                 except Exception:  # noqa: BLE001
                     pass
 
-        if len(observations) >= max_observations:
-            break
-
+    # Round 184: rank QUALITY anomalies (yield/rate/defect — what a fab engineer
+    # acts on) above mere volume spread (capacity_moves), high severity first, so
+    # "有什麼異常嗎？" leads with the yield excursion, not capacity variation.
+    def _qual(o: AnomalyObservation) -> int:
+        m = (o.metric or "").lower()
+        return 0 if any(t in m for t in (
+            "yield", "良率", "rate", "pct", "percent", "ratio", "defect", "不良")) else 1
+    _sev = {"high": 0, "medium": 1, "info": 2}
+    observations.sort(key=lambda o: (_sev.get(o.severity, 3), _qual(o)))
     return observations[:max_observations]

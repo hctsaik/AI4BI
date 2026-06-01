@@ -227,8 +227,12 @@ def test_E1_capacity_shortfall(env):
 
 
 def test_E2_expansion_routes(env):
+    # Round 184 (S13): expansion follows constraint theory — add capacity at the
+    # BOTTLENECK (highest utilization = ETCH), not wherever the plan gap is biggest
+    # (an under-utilised station isn't a capacity problem).
     r = _ask(env, "如果要擴產，最該先加哪一區的機台？")
-    assert r.result_table is not None and "缺口" in r.result_table.columns
+    assert r.result_table is not None and "利用率%" in r.result_table.columns
+    assert r.result_table.iloc[0]["area"] == "ETCH"
 
 
 def test_E3_whatif_uptime_uplift(env):
