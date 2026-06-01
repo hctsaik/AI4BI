@@ -717,21 +717,37 @@ class NL2ProposalService:
             if ins is not None:
                 return ins
 
+        # Round 182 (S5): product-family questions, checked BEFORE the generic
+        # two-entity comparison (whose regex over-captures "記憶體良率" / "邏輯差多"
+        # as the entity tokens). ONE family ("邏輯良率是多少") → filter to that
+        # family (before the plain-metric engine answers with the whole-fab number);
+        # TWO families ("Memory 良率比 Logic 差多少") → group-prefix comparison.
+        _fams = {"記憶體": "memory", "記憶": "memory", "邏輯": "logic", "類比": "analog",
+                 "logic": "logic", "memory": "memory", "analog": "analog",
+                 "dram": "memory", "sram": "memory"}
+        _hay_fam = f"{prompt.lower()} {normalized}"
+        _fam_hits = [(k, v) for k, v in _fams.items() if k in _hay_fam]
+        _fam_prefixes = {v for _, v in _fam_hits}
+        if len(_fam_prefixes) == 1:
+            sg1 = self._answer_single_group_metric(prompt, normalized, report, contracts)
+            if sg1 is not None:
+                return sg1
+        elif len(_fam_prefixes) >= 2:
+            _reps: dict[str, str] = {}
+            for _k, _v in _fam_hits:
+                if _v not in _reps or len(_k) > len(_reps[_v]):
+                    _reps[_v] = _k
+            _two = list(_reps.values())[:2]
+            gp = self._answer_group_prefix_compare(
+                prompt, normalized, _two[0], _two[1], contracts)
+            if gp is not None:
+                return gp
+
         # Round 108: "比較台北和台中" → two-entity side-by-side comparison.
         if _looks_like_entity_compare(prompt, normalized):
             cmp = self._answer_entity_compare(prompt, normalized, report, contracts)
             if cmp is not None:
                 return cmp
-
-        # Round 182 (S5): a metric for ONE product-family group ("邏輯良率是多少 /
-        # memory 的良率") must be filtered to that family — before the plain-metric
-        # engine answers it with the whole-fab number (silent-wrong).
-        if any(t in f"{prompt.lower()} {normalized}" for t in (
-                "記憶體", "記憶", "邏輯", "類比", "logic", "memory", "analog",
-                "dram", "sram")):
-            sg1 = self._answer_single_group_metric(prompt, normalized, report, contracts)
-            if sg1 is not None:
-                return sg1
 
         # Round 182 (S1): an explicit direction QUESTION ("良率趨勢如何 / 有在下降
         # 嗎 / 越來越差嗎") wants a verdict (better/worse + slope + which tool is
@@ -3680,6 +3696,11 @@ class NL2ProposalService:
         idx = SchemaIndex.build(contracts)
         match = idx.best_metric_match(prompt, normalized)
         if match is None:
+            # Round 182 (S1): a bare "有在下降嗎 / 還在掉嗎" names no measure — in a
+            # yield-centric fab report it means yield. Retry with an implicit yield
+            # measure instead of refusing.
+            match = idx.best_metric_match("良率 yield", "liang lv yield")
+        if match is None:
             return None
         block_id, metric_name, alias = match.block_id, match.metric_name, match.alias
         date_col = _find_date_column(contracts, block_id)
@@ -3892,7 +3913,8 @@ class NL2ProposalService:
             hay0 = f"{prompt.lower()} {normalized}"
             if any(t in hay0 for t in (
                     "機台", "機臺", "設備", "機器", "chamber", "腔", "tool", "產品",
-                    "品類", "product", "批", "lot", "站", "step", "區", "area")):
+                    "品類", "product", "批", "lot", "站", "step", "區", "area",
+                    "哪台", "哪臺", "哪部", "哪一台", "哪一臺")):
                 metric = idx.best_metric_match("良率 yield", "liang lv yield")
         if metric is None:
             return None
@@ -5839,6 +5861,8 @@ _RANK_ASC_WORDS: tuple[str, ...] = (
     "差的", "低的", "爛的", "表現差", "表現最差", "比較慢", "較慢", "比較短", "較短",
     # Round 182 (S2): more "underperforming" synonyms map to worst-first sort.
     "不理想", "表現不好", "表現最不好", "不好", "最不好", "不佳", "較不理想", "比較不理想",
+    # "拉低/拖累 良率" → the culprit group is the LOWEST one.
+    "拉低", "拖累", "害良率",
 )
 
 
@@ -5929,7 +5953,8 @@ def _looks_like_ranking(prompt: str, normalized: str) -> bool:
     # comparative — but NOT in a change/period context ("比上週高…哪個 area 造成"
     # is a decomposition, not a ranking), so guard against those cues.
     which = any(w in hay for w in ("哪台", "哪臺", "哪個", "哪一", "哪部", "哪區", "哪站", "which"))
-    comp = any(c in hay for c in ("好", "佳", "高", "差", "低", "長", "短", "慢", "快", "多", "少", "嚴重"))
+    comp = any(c in hay for c in ("好", "佳", "高", "差", "低", "長", "短", "慢", "快",
+                                  "多", "少", "嚴重", "不理想", "不佳", "理想"))
     change_ctx = any(t in hay for t in (
         "比上", "比前", "比這", "升高", "升至", "變化", "造成", "原因", "為什麼", "為何",
         "拆解", "上週", "上周", "上月", "去年同期", "vs 上", "相比"))
@@ -6362,7 +6387,9 @@ _TREND_QUESTION_CUES = (
     "趨勢如何", "走勢如何", "趨勢怎樣", "趨勢怎麼", "的趨勢", "看趨勢", "趨勢呢",
     "走勢呢", "有在下降", "有在下滑", "有沒有下降", "有沒有下滑", "有沒有變差",
     "有在變差", "有變差嗎", "越來越差嗎", "越來越好嗎", "是不是越來越",
-    "變好還是變差", "變差還是變好", "是變好還是", "在往下嗎", "在下滑嗎")
+    "變好還是變差", "變差還是變好", "是變好還是", "在往下嗎", "在下滑嗎",
+    "有在掉", "還在掉", "在掉嗎", "有在跌", "還在跌", "在跌嗎", "有在惡化",
+    "持續下滑嗎", "持續惡化嗎", "在變差嗎", "有改善嗎", "有沒有改善")
 
 
 def _is_trend_direction_question(prompt: str, normalized: str) -> bool:
@@ -6668,14 +6695,25 @@ def _looks_like_commonality(prompt: str, normalized: str) -> bool:
     hay = f"{prompt.lower()} {normalized}"
     if any(c in hay for c in _COMMONALITY_CUES):
         return True
-    # Round 182 (S3): "哪一站/哪台 造成 良率掉/不良" attributes low yield to a shared
-    # station/tool → commonality (worst-quartile common path), not a decomposition.
+    # Round 182 (S3): "哪一站/哪台 造成/害/問題 良率掉/不良" attributes low yield to a
+    # shared station/tool → commonality (worst-quartile common path), NOT a temporal
+    # decomposition. Requires a culprit verb/phrase so it doesn't steal a plain
+    # ranking ("哪台良率差"), and is skipped in a vs-period context (那走 explain_change).
     which_station = any(w in hay for w in (
-        "哪一站", "哪站", "哪一台", "哪台", "哪個機台", "哪個站", "哪個設備", "哪部機"))
+        "哪一站", "哪站", "哪一台", "哪台", "哪臺", "哪個機台", "哪個站", "哪個站點",
+        "哪個製程", "哪一個站", "哪個設備", "哪部機", "站點", "製程站", "誰"))
     bad_yield = any(w in hay for w in (
-        "良率掉", "良率低", "良率差", "不良", "低良", "良率下降", "良率不好", "拉低良率"))
-    if which_station and bad_yield and ("造成" in hay or "害" in hay or "拖累" in hay
-                                        or "導致" in hay):
+        "良率掉", "良率低", "良率差", "不良", "低良", "良率下降", "良率不好",
+        "拉低良率", "良率出問題", "良率有問題", "良率"))
+    # strong "harm/culprit" verbs imply a quality culprit on their own; weak ones
+    # ("造成/導致") are too generic, so they additionally need a bad-yield word.
+    strong_culprit = any(w in hay for w in (
+        "害", "拖累", "搞鬼", "搞的", "禍首", "元凶", "元兇", "罪魁", "毛病", "的問題"))
+    weak_culprit = any(w in hay for w in ("造成", "導致", "拉低"))
+    change_ctx = any(t in hay for t in (
+        "比上", "比前", "比這", "上週", "上周", "上月", "去年同期", "vs 上", "這週比", "本週比"))
+    if which_station and not change_ctx and (
+            strong_culprit or (weak_culprit and bad_yield)):
         return True
     return False
 
