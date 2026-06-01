@@ -4222,6 +4222,18 @@ class NL2ProposalService:
             if tool_c and tool_c != dim_col:
                 dim_col = tool_c
 
+        # Round 184 (S19): "不良率最高的是哪個 / 缺陷率最差的是哪一個" asks which TOOL
+        # (an entity), not which defect TYPE — so a rate ranking that resolved
+        # defect_type via "不良" must flip to the tool axis when an entity-asking
+        # word is present and NO defect-type word ("哪種/類型/種類") is.
+        if (dim_col and dim_col.lower() in ("defect_type", "bin_code", "defect_code")
+                and any(t in hay_r for t in ("哪個", "哪一", "誰", "哪台", "哪部"))
+                and not any(t in hay_r for t in ("哪種", "哪類", "類型", "種類", "哪一種"))):
+            block_cols = [col.name for col in getattr(contracts.get(block_id), "columns", [])]
+            tool_c = _guess_col(block_cols, ("etch_tool_id", "tool_id", "tool", "機台"))
+            if tool_c and tool_c != dim_col:
+                dim_col = tool_c
+
         # Round 182 (S4): "良率主要壞在哪種缺陷" picks the YIELD metric but a per-
         # defect-type breakdown ("壞在哪種缺陷") wants the defect COUNT — ranking a
         # ratio (yield) by defect_type would return the highest-yield bin (reversed).
