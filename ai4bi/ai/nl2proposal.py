@@ -4076,6 +4076,19 @@ class NL2ProposalService:
             if alias in df.columns else ""
         sentence = (f"{alias}{superlative}的前 {len(df)} 個「{dim_col}」。"
                     f"第一名：{top[dim_col]}（{top_val}）。")
+        # Round 182 (S2): for a "比較/差多少/差異" question over exactly two groups,
+        # spell out BOTH sides and the gap (個百分點 for a ratio) — the headline
+        # "第一名 X" alone doesn't answer "差多少".
+        if (len(df) == 2 and alias in df.columns
+                and any(t in f"{prompt.lower()} {normalized}" for t in (
+                    "比較", "差多少", "差異", "相差", "差距", "比一比", "對比", "之間", "兩台"))):
+            a_row, b_row = df.iloc[0], df.iloc[1]
+            av, bv = float(a_row[alias]), float(b_row[alias])
+            _is_ratio2 = _metric_is_ratio(contracts, block_id, metric_name)
+            gap_txt = (f"相差 {abs(av - bv):.1f} 個百分點" if _is_ratio2
+                       else f"相差 {_format_metric_value(abs(av - bv), unit)}")
+            sentence = (f"{a_row[dim_col]} {_format_metric_value(av, unit)}　vs　"
+                        f"{b_row[dim_col]} {_format_metric_value(bv, unit)}，{gap_txt}。")
         notes = [
             f"依「{alias}」對「{dim_col}」排序取前 {n}（治理查詢 sort+limit，認證語意層）。",
             f"來源：{block_id}。",
@@ -4148,9 +4161,27 @@ class NL2ProposalService:
         # from column order (which picked lot_id / queue_time for '機台良率').
         if kind in ("decline", "dormant", "newproduct"):
             idx = SchemaIndex.build(contracts)
-            for bid, c in facts.items():
+            # Round 182 (S1): when NO measure is named ("哪台機台連續下滑"), prefer the
+            # YIELD fact/column — otherwise the first fact (queue_time) is picked and
+            # the answer contradicts "良率一直在跌→ETCH-01". Order yield blocks first.
+            _hay_pa = f"{prompt.lower()} {normalized}"
+            _named_measure = any(w in _hay_pa for w in (
+                "良率", "yield", "等待", "queue", "cycle", "週期", "缺陷", "defect",
+                "move", "移動", "產能", "可用率", "oee", "稼動", "利用率"))
+            _blocks = sorted(
+                facts.items(),
+                key=lambda kv: 0 if (not _named_measure and any(
+                    "yield" in cc.name.lower() for cc in getattr(kv[1], "columns", [])))
+                else 1)
+            for bid, c in _blocks:
                 ent = _resolve_decomp_dimension(idx, prompt, normalized, contracts, bid)
                 val = _resolve_numeric_column(prompt, normalized, c)
+                if not _named_measure:
+                    _yc = next((cc.name for cc in getattr(c, "columns", [])
+                                if "yield" in cc.name.lower() and getattr(cc, "data_type", "")
+                                in ("integer", "float", "int", "double", "number")), None)
+                    if _yc:
+                        val = _yc
                 date = _find_date_column(contracts, bid)
                 if val and date and not ent:
                     # Round 178 (S1): a decline question with a measure+date but no
@@ -5976,9 +6007,10 @@ _RANK_TRIGGERS: tuple[str, ...] = (
     "主要不良", "主要缺陷", "不良項目", "缺陷項目", "不良類型", "缺陷種類", "主要的不良",
     "缺陷主要", "不良主要", "瑕疵主要", "壞在哪", "主要壞", "壞最多", "哪種缺陷",
     "哪些缺陷", "哪種不良", "哪種瑕疵", "哪些不良",
-    # Round 182 (S2): "tool matching / 機台比對" → find the yield-mismatched tool.
+    # Round 182 (S2): "tool matching / 機台比對 / 機台良率比較" → compare/rank tools.
     "tool matching", "toolmatching", "tool-matching", "機台比對", "機台對比", "機台匹配",
     "機台之間", "機台間", "機台良率差異", "各機台良率差異", "機台的良率差異",
+    "機台良率比較", "機台比較", "兩台機台", "兩台etch", "兩台 etch", "各機台比較",
 )
 _RANK_ASC_WORDS: tuple[str, ...] = (
     "最低", "最少", "最差", "最小", "最短", "最快", "最閒", "賣最差", "賣最少", "最不", "墊底",
@@ -6889,9 +6921,10 @@ def _looks_like_commonality(prompt: str, normalized: str) -> bool:
     strong_culprit = any(w in hay for w in (
         "害", "拖累", "搞鬼", "搞的", "禍首", "元凶", "元兇", "罪魁", "毛病", "的問題",
         "殺手", "兇手", "凶手",
-        # Round 182 (S3): "關鍵設備 / 問題設備" name the culprit equipment on their
-        # own (bare "關鍵設備是哪個" should reach commonality, not just full句).
-        "關鍵設備", "關鍵機台", "問題設備", "問題機台", "關鍵的設備", "關鍵的機台"))
+        # Round 182 (S3): "關鍵設備 / 問題設備 / 問題出在哪台 / 有問題" name the
+        # culprit equipment on their own (bare phrasings should reach commonality).
+        "關鍵設備", "關鍵機台", "問題設備", "問題機台", "關鍵的設備", "關鍵的機台",
+        "問題出在", "出問題", "有問題", "出在哪"))
     weak_culprit = any(w in hay for w in ("造成", "導致", "拉低"))
     change_ctx = any(t in hay for t in (
         "比上", "比前", "比這", "上週", "上周", "上月", "去年同期", "vs 上", "這週比", "本週比"))
