@@ -321,3 +321,19 @@ A 載入整備預覽 S01-03;B 關聯/複合鍵 S04-06;C 核心分析 S07-14(良�
 
 ### 後續
 重評 20 情境;殘留小瑕(S19 加圖意圖被分析路由先搶、S14 缺指標詞簡略問法)視 re-score 結果再決定是否續修。
+
+## Round 4 (R184) — R3 後重評(揪出 2 個真 bug)+ 第四批修正
+
+### 重評(實跑,fresh 評審取樣更刁鑽口語)
+- R3 後:S01-S10 **95.4**、S11-S20 **90.6** → 總平均 **93.0**(較 93.75 微降,因 fresh 評審揪出 2 個真 bug + 更深口語覆蓋)。
+- **2 個真 bug(優先修)**:① S18 capacity what-if「ETCH-02 稼動提升到85%」→「85%→85% +0」(根因:`hay=prompt+" "+normalized` 雙份相連,雙值 regex 跨份誤命中 85/85);② S14「Day vs Night 等待」差距標成「個百分點」(根因:`_metric_is_ratio` 對 avg_queue_time_hr 含 "avg" 誤判,但它是小時非百分比)。
+- 覆蓋缺口:S10「機台良率有沒有異常」洩漏 capacity_moves(rubric 禁);S17「本期/環比」裸口語、S19 裸「不良率」、S14「哪個班久/依班別cycle」缺指標詞 fallback。
+
+### Round 4 共識 + 實作
+- ✅ **S18 capacity what-if bug**:regex 改在 `prompt.lower()` 單份比對;「從X到Y」僅當 X≠Y 才視為雙值,否則單值「提升到Y%」以**實際稼動率**為基準。「稼動提升到85%」→「70%→85% +12 moves」。
+- ✅ **S14 單位 bug**:`個百分點` 僅在 `unit=="%"` 時用(yield);時間平均(hr/min)改顯示絕對差「相差 0.37」+單位。entity_compare、ranking 2-group gap 都修。
+- ✅ **S10 yield-scoped 異常**:`_answer_insights` anomaly 分支偵測良率/不良/缺陷字眼時,過濾掉 capacity/uptime,只留品質異常(「機台良率有沒有異常」→ 只 yield_pct excursion + Memory-Y);「有什麼異常嗎」(泛問)仍含 capacity(正確)。
+- ✅ **S17 本期/環比**:`_extract_answer_period` + `_QUESTION_MARKERS` 補「本期/這期/上期/環比/比上期/跟上期/和之前比」→ WoW 比較(最近7天 vs 前7天)。
+
+### 後續
+重評 20 情境。殘留小瑕:S19 裸「不良率」、S14「依班別cycle time」缺指標詞、S19 加圖意圖。視 re-score 決定續修或宣告達標(目標常見問法全綠+平均≥95)。

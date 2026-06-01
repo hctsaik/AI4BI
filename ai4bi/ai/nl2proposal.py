@@ -1506,11 +1506,15 @@ class NL2ProposalService:
         if va is not None and vb is not None:
             hi, lo = (a, b) if va >= vb else (b, a)
             hv, lv = (va, vb) if va >= vb else (vb, va)
-            # Round 178 (S2): for a ratio metric (yield %) the gap is percentage
+            # Round 178 (S2): for a PERCENTAGE metric (yield %) the gap is percentage
             # POINTS — report "高 8.8 個百分點", not the misleading relative "多 10.5%".
+            # Round 184 (S14): only when the unit is "%" — a time average (hr/min) is
+            # a ratio (don't-sum) but NOT a percentage, so show the absolute diff.
             _is_ratio_metric = _metric_is_ratio(contracts, block_id, metric_name)
-            if _is_ratio_metric:
+            if _is_ratio_metric and unit == "%":
                 gap = f"，{hi} 高 {abs(hv - lv):.1f} 個百分點。"
+            elif _is_ratio_metric:
+                gap = f"，{hi} 高 {abs(hv - lv):.2f}{unit}。"
             else:
                 diff_pct = ((hv - lv) / abs(lv) * 100) if lv else None
                 gap = (f"，{hi} 較高，多 {diff_pct:.1f}%。" if diff_pct is not None else f"，{hi} 較高。")
@@ -1983,6 +1987,14 @@ class NL2ProposalService:
                 obs = detect_anomalies(contracts, max_observations=5)
             except Exception:  # noqa: BLE001
                 return None
+            # Round 184 (S10): a YIELD-scoped anomaly ask ("機台良率有沒有異常") must
+            # not surface capacity_moves/uptime volume spread — keep only quality
+            # (yield/defect) findings when the prompt is explicitly about yield.
+            if any(t in f"{prompt.lower()} {normalized}" for t in ("良率", "yield", "不良", "缺陷")):
+                _q = [o for o in obs if any(t in (o.metric or "").lower()
+                      for t in ("yield", "良率", "defect", "不良", "pct", "rate"))]
+                if _q:
+                    obs = _q
             if not obs:
                 notes = ["已掃描各資料集的離群與波動，未發現明顯異常。"]
                 intent = AIIntent(intent_kind="analysis_request", target_scope="report",
@@ -2510,8 +2522,13 @@ class NL2ProposalService:
         is_fail = any(t in hay for t in ("故障", "當機", "壞掉", "失效", "掉機", "停機一",
                                          "停擺", "下線")) and \
             any(t in hay for t in ("產能", "產出", "掉多少", "少多少", "影響", "會掉", "損失"))
-        m_up = _re.search(r"(\d{1,3})\s*%.{0,12}?(?:提升到|提高到|拉到|升到|到|→|->|改善到)\s*(\d{1,3})\s*%", hay)
-        m_up1 = _re.search(r"(?:提升到|提高到|拉到|升到|改善到)\s*(\d{1,3})\s*%", hay)
+        # Round 184 (S18 bug): match on a SINGLE copy — hay is prompt+" "+normalized
+        # (the same sentence twice), which made "提升到 85%" match the same 85 twice
+        # → "85%→85% +0". Use prompt.lower() so the two-value regex only fires on a
+        # genuine "從 X% 到 Y%".
+        _one = prompt.lower()
+        m_up = _re.search(r"(\d{1,3})\s*%.{0,12}?(?:提升到|提高到|拉到|升到|到|→|->|改善到)\s*(\d{1,3})\s*%", _one)
+        m_up1 = _re.search(r"(?:提升到|提高到|拉到|升到|改善到)\s*(\d{1,3})\s*%", _one)
 
         if is_fail and tool is not None:
             lost = float(actual.get(tool, 0))
@@ -2526,11 +2543,14 @@ class NL2ProposalService:
         if (m_up or m_up1) and tool is not None:
             row = cp[cp["tool_id"].astype(str) == tool].iloc[0]
             u0 = float(row["uptime_pct"]) / 100
-            if m_up:
-                u0_in, u1 = float(m_up.group(1)) / 100, float(m_up.group(2)) / 100
-                u0 = u0_in or u0
-            else:
+            # only treat as "from X% to Y%" when X≠Y; otherwise it's a single-target
+            # ("提升到 85%") whose baseline is the tool's ACTUAL current uptime.
+            if m_up and m_up.group(1) != m_up.group(2):
+                u0, u1 = float(m_up.group(1)) / 100, float(m_up.group(2)) / 100
+            elif m_up1:
                 u1 = float(m_up1.group(1)) / 100
+            else:
+                u1 = float(m_up.group(2)) / 100
             if u0 <= 0:
                 return None
             act = float(actual.get(tool, 0))
@@ -4243,7 +4263,7 @@ class NL2ProposalService:
             a_row, b_row = df.iloc[0], df.iloc[1]
             av, bv = float(a_row[alias]), float(b_row[alias])
             _is_ratio2 = _metric_is_ratio(contracts, block_id, metric_name)
-            gap_txt = (f"相差 {abs(av - bv):.1f} 個百分點" if _is_ratio2
+            gap_txt = (f"相差 {abs(av - bv):.1f} 個百分點" if (_is_ratio2 and unit == "%")
                        else f"相差 {_format_metric_value(abs(av - bv), unit)}")
             sentence = (f"{a_row[dim_col]} {_format_metric_value(av, unit)}　vs　"
                         f"{b_row[dim_col]} {_format_metric_value(bv, unit)}，{gap_txt}。")
@@ -6075,6 +6095,9 @@ _QUESTION_MARKERS: tuple[str, ...] = (
     "為何", "為什麼", "?", "？",
     "how much", "how many", "what is", "what's", "what was", "what are",
     "tell me", "show me the", "total of", "average of", "sum of",
+    # Round 184 (S17): period-comparison phrasings ("本期 vs 上期 / 環比") that
+    # carry no "多少/?" but still ask for the current-vs-prior number.
+    "環比", "比上期", "跟上期", "和上期", "與上期", "本期比", "這期比", "跟之前比", "和之前比",
 )
 
 _PERIOD_TITLE: dict[str, str] = {
@@ -6091,10 +6114,11 @@ def _looks_like_metric_question(prompt: str, normalized: str) -> bool:
 def _extract_answer_period(normalized: str, prompt: str) -> str:
     """Map a time phrase to a trailing-window period, else 'all' (whole period)."""
     hay = f"{prompt.lower()} {normalized}"
-    # Round 184 (S17): vague "最近一段 vs 前一段 / 近期 vs 前期 / 最近這幾週跟之前"
-    # → compare the recent trailing window against the one before it (week grain).
+    # Round 184 (S17): vague "最近一段 vs 前一段 / 近期 vs 前期 / 本期 vs 上期 / 環比 /
+    # 最近這幾週跟之前" → compare the recent trailing window against the prior one.
     if any(t in hay for t in ("最近一段", "前一段", "上一段", "近期", "前期",
-                              "最近這幾週", "最近幾週", "跟之前", "和之前", "比之前", "與之前")):
+                              "最近這幾週", "最近幾週", "跟之前", "和之前", "比之前", "與之前",
+                              "本期", "這期", "上期", "環比", "這期比", "本期比")):
         return "week"
     if any(t in hay for t in ("本週", "這週", "上週", "這周", "上周", "this week", "last week", "wow", "最近 7", "最近7", "近 7", "近7", "7 天", "7天")):
         return "week"
