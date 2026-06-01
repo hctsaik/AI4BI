@@ -158,3 +158,17 @@
 
 ### 守衛驗證(未回歸)
 記憶體 vs 邏輯雙族比較(3.2pp)、Memory 比 Logic、哪台可用率拖累→OEE、有重工的批良率比較差→subgroup-compare(無「各」)、良率趨勢→ETCH-01 點名。fab+compare 套件 70 passed。
+
+---
+
+## Round 13 (R182 續) — 單機台良率值查詢 + 設備效率(OEE)同義詞
+
+### 重評觸發(第 11 輪複評,實跑)
+- S1 90・S2 **78**・S3 96・S4 96・S5 96 → S1–S5 平均 **91.2**。評審如實判定 **S3/S4/S5 已達高原**(常見問法 100% 通過、僅罕見長尾),但抓到 2 條常見硬傷:S2 單機台良率值查詢、S1 設備效率同義詞。
+
+### 本輪實作(實跑驗證)
+- ✅ **S2 單機台良率值(常見,最高優先)**:`_answer_single_group_metric` 泛化 —— 除產品族別名外,也比對**任一欄位的精確 distinct 值**(連字號/空白不敏感),「ETCH-02 的良率是多少 / ETCH02 良率多少 / ETCH-01 的良率」→ 過濾該 etch_tool_id 回 die-weighted 良率(ETCH-02 83.84%、ETCH-01 92.61%,附全廠對比),不再回全廠 87.8%。路由:單一 code(regex `[A-Za-z]{2,}-?\d`)+ **yield 量值**(良率/缺陷/不良)且**非** OEE/可用率/queue/cycle/產能/瓶頸/what-if(若/故障/提升到/拉到)才觸發 —— 確保 OEE/產能/what-if 問句(同樣含機台名)仍走各自引擎(C2/E3/E7/F9 測試全綠)。
+- ✅ **S1 設備效率同義詞(常見)**:`_OEE_CUES` 補「設備效率/設備總效率/設備稼動效率」;`_answer_trend_direction` other-metric 守衛補「設備效率/綜合效率/總合效率」→「設備效率趨勢如何 / 整體設備效率是不是在下滑」走 OEE(ETCH-02),不再誤回良率趨勢。
+
+### 守衛驗證(未回歸)
+「比較 ETCH-01 跟 ETCH-02 的良率」→ entity_compare 8.8pp;「哪台機台良率最差」→ ranking;「良率是多少」→ 全廠;「ETCH-02 的 OEE/稼動率 what-if」→ OEE/capacity;「各產品族良率比較」→ breakdown 全族。fab_capacity 46 passed。

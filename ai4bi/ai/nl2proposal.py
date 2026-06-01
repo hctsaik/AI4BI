@@ -728,7 +728,29 @@ class NL2ProposalService:
         _hay_fam = f"{prompt.lower()} {normalized}"
         _fam_hits = [(k, v) for k, v in _fams.items() if k in _hay_fam]
         _fam_prefixes = {v for _, v in _fam_hits}
-        if len(_fam_prefixes) == 1:
+        # Round 182 (S2): an exact entity-code value ("ETCH-02 的良率") with a single
+        # code + a YIELD measure → filter to it (same engine, exact-value branch).
+        # Exclude OEE/capacity/queue/what-if questions — those have dedicated
+        # engines that must answer (they also name a tool but aren't yield lookups).
+        _codes = set(re.findall(r"[A-Za-z]{2,}-?\d{1,3}", prompt))
+        _yield_measure = any(w in _hay_fam for w in (
+            "良率", "yield", "缺陷", "defect", "不良", "良品", "die"))
+        _other_engine = any(w in _hay_fam for w in (
+            "oee", "可用率", "稼動", "利用率", "queue", "等待", "cycle", "週期",
+            "產能", "throughput", "move", "移動", "wip", "uptime", "瓶頸", "效率"))
+        _whatif = any(w in _hay_fam for w in (
+            "若", "假設", "如果", "提升到", "拉到", "故障", "what if", "whatif", "拉高到"))
+        # a commonality / threshold ask ("走過 ETCH-02 的批…有沒有共同點", "低於 80%")
+        # names a tool too, but must reach commonality — not a single-value lookup.
+        _ok_ctx = (not _other_engine and not _whatif
+                   and not _looks_like_commonality(prompt, normalized)
+                   and not any(t in _hay_fam for t in (
+                       "低於", "高於", "超過", "小於", "大於", "below", "<", "共同", "共通")))
+        if len(_fam_prefixes) == 1 and not _codes and _ok_ctx:
+            sg1 = self._answer_single_group_metric(prompt, normalized, report, contracts)
+            if sg1 is not None:
+                return sg1
+        elif len(_codes) == 1 and len(_fam_prefixes) == 0 and _yield_measure and _ok_ctx:
             sg1 = self._answer_single_group_metric(prompt, normalized, report, contracts)
             if sg1 is not None:
                 return sg1
@@ -1569,9 +1591,12 @@ class NL2ProposalService:
                   "memory": "memory", "analog": "analog"}
         hay = f"{prompt.lower()} {normalized}"
         prefixes = {v for k, v in _ALIAS.items() if k in hay}
-        if len(prefixes) != 1:
-            return None  # 0 → not a family question; 2+ → a comparison
-        pref = next(iter(prefixes))
+        if len(prefixes) >= 2:
+            return None  # 2+ families → a comparison (handled elsewhere)
+        pref = next(iter(prefixes)) if prefixes else None
+        # Round 182 (S2): also support an EXACT named value with no family alias
+        # ("ETCH-02 的良率" → filter etch_tool_id=ETCH-02). Detected per-column below;
+        # if neither a prefix nor an exact value resolves, bail.
         # need a measure context — a yield/metric word, else this isn't a "how much" ask
         is_yield_q = ("良率" in hay or "yield" in hay)
         for bid, c in contracts.items():
@@ -1587,20 +1612,25 @@ class NL2ProposalService:
                 if col not in df.columns:
                     continue
                 low = df[col].astype(str).str.lower()
-                # Round 182 (S5): if the prompt names an EXACT sub-family value
-                # ("Memory-Y 的良率"), filter to that value rather than the broad
-                # prefix group (which would report the whole Memory family).
+                # Round 182 (S5/S2): if the prompt names an EXACT value ("Memory-Y
+                # 的良率", "ETCH-02 的良率"), filter to it rather than the broad prefix
+                # group. Match hyphen/space-insensitively so "ETCH02" finds "ETCH-02".
+                _hay_norm = hay.replace("-", "").replace(" ", "")
                 exact = None
                 for _v in df[col].dropna().astype(str).unique():
                     _vl = _v.lower()
-                    if len(_vl) >= 3 and _vl in hay and (exact is None or len(_vl) > len(exact[1])):
-                        exact = (_v, _vl)
+                    _vn = _vl.replace("-", "").replace(" ", "")
+                    if len(_vn) >= 3 and _vn in _hay_norm and (
+                            exact is None or len(_vn) > len(exact[1])):
+                        exact = (_v, _vn)
                 if exact is not None:
                     grp = df[col].astype(str) == exact[0]
                     disp_exact = exact[0]
-                else:
+                elif pref is not None:
                     grp = low.str.startswith(pref)
                     disp_exact = None
+                else:
+                    continue  # no prefix and no exact value on this column
                 if not grp.any() or grp.all():
                     continue  # need a proper non-trivial subset
                 if (is_yield_q or True) and {"good_die", "tested_die"} <= cols:
@@ -3723,7 +3753,8 @@ class NL2ProposalService:
             _hay_t = f"{prompt.lower()} {normalized}"
             _other_metric = any(w in _hay_t for w in (
                 "oee", "可用率", "稼動", "利用率", "queue", "等待", "cycle", "週期",
-                "產能", "throughput", "move", "移動", "wip", "uptime", "稼動率"))
+                "產能", "throughput", "move", "移動", "wip", "uptime", "稼動率",
+                "設備效率", "綜合效率", "總合效率"))
             if not _other_metric:
                 match = idx.best_metric_match("良率 yield", "liang lv yield")
         if match is None:
@@ -6650,7 +6681,8 @@ _CAPACITY_CUES: tuple[str, ...] = (
     "可用率", "availability", "停機", "line balance", "線平衡", "產線平衡",
     "擴產", "加機台", "增購", "加產能", "缺口", "投資哪", "瓶頸區", "拖累",  # Round 130
 )
-_OEE_CUES: tuple[str, ...] = ("oee", "設備總合效率", "設備綜合效率", "綜合效率", "總合效率")
+_OEE_CUES: tuple[str, ...] = ("oee", "設備總合效率", "設備綜合效率", "綜合效率",
+                              "總合效率", "設備效率", "設備總效率", "設備稼動效率")
 
 
 # a wait/queue share-of-total question ("ETCH 等待佔全廠多少%") is about queue time,
