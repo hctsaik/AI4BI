@@ -723,6 +723,25 @@ class NL2ProposalService:
             if cmp is not None:
                 return cmp
 
+        # Round 182 (S5): a metric for ONE product-family group ("邏輯良率是多少 /
+        # memory 的良率") must be filtered to that family — before the plain-metric
+        # engine answers it with the whole-fab number (silent-wrong).
+        if any(t in f"{prompt.lower()} {normalized}" for t in (
+                "記憶體", "記憶", "邏輯", "類比", "logic", "memory", "analog",
+                "dram", "sram")):
+            sg1 = self._answer_single_group_metric(prompt, normalized, report, contracts)
+            if sg1 is not None:
+                return sg1
+
+        # Round 182 (S1): an explicit direction QUESTION ("良率趨勢如何 / 有在下降
+        # 嗎 / 越來越差嗎") wants a verdict (better/worse + slope + which tool is
+        # declining), not just a smoothed chart — answer it BEFORE the moving-
+        # average analytics chart grabs "趨勢/走勢". Falls through if no metric.
+        if _is_trend_direction_question(prompt, normalized):
+            td = self._answer_trend_direction(prompt, normalized, report, contracts)
+            if td is not None:
+                return td
+
         # Round 105: Pareto/ABC, %-of-total, moving-average, forecast charts.
         if _detect_analytics_chart(f"{prompt.lower()} {normalized}") is not None:
             ac = self._answer_analytics_chart(prompt, normalized, report, contracts)
@@ -1508,6 +1527,71 @@ class NL2ProposalService:
                 sentence = (f"比較「{a}」與「{b}」的{alias}：{a} {va:.2f}{_u}　vs　"
                             f"{b} {vb:.2f}{_u}。{gap}。")
                 notes = [f"以「{col}」值前綴分組（{a}/{b}）比較{alias}，來源：{bid}。"]
+                intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
+                                  trust_notes=notes, risk_level="low")
+                return NL2ProposalResult(intent=intent, message=sentence,
+                                         trust_notes=notes, risk_level="low")
+        return None
+
+    def _answer_single_group_metric(self, prompt, normalized, report, contracts):
+        """Round 182 (S5): a metric for ONE value-prefix group — "邏輯良率是多少 /
+        memory 的良率 / logic 良率". Filters the fact to that product family and
+        reports its value with the overall for context (instead of answering with
+        the whole-fab number, which was silently wrong). None if no single group /
+        measure resolves, or if TWO groups are named (that's a comparison)."""
+        if not contracts:
+            return None
+        from ai4bi.blocks.contracts import BlockType
+        from ai4bi.blocks.datastore import materialize_dataframe
+        _ALIAS = {"記憶體": "memory", "記憶": "memory", "邏輯": "logic", "類比": "analog",
+                  "dram": "memory", "sram": "memory", "cpu": "logic", "mem": "memory",
+                  "記憶體類": "memory", "邏輯類": "logic", "logic": "logic",
+                  "memory": "memory", "analog": "analog"}
+        hay = f"{prompt.lower()} {normalized}"
+        prefixes = {v for k, v in _ALIAS.items() if k in hay}
+        if len(prefixes) != 1:
+            return None  # 0 → not a family question; 2+ → a comparison
+        pref = next(iter(prefixes))
+        # need a measure context — a yield/metric word, else this isn't a "how much" ask
+        is_yield_q = ("良率" in hay or "yield" in hay)
+        for bid, c in contracts.items():
+            if getattr(c, "block_type", None) not in (
+                    BlockType.fact, BlockType.snapshot_fact, BlockType.target_fact):
+                continue
+            try:
+                df = materialize_dataframe(c)
+            except Exception:  # noqa: BLE001
+                continue
+            cols = set(df.columns)
+            for col in [cc.name for cc in c.columns if cc.data_type in ("string", "str", "object")]:
+                if col not in df.columns:
+                    continue
+                low = df[col].astype(str).str.lower()
+                grp = low.str.startswith(pref)
+                if not grp.any() or grp.all():
+                    continue  # need a proper non-trivial subset
+                if (is_yield_q or True) and {"good_die", "tested_die"} <= cols:
+                    gv = df.loc[grp, "good_die"].sum() / max(df.loc[grp, "tested_die"].sum(), 1) * 100.0
+                    ov = df["good_die"].sum() / max(df["tested_die"].sum(), 1) * 100.0
+                    label, pp = "良率（加權）", True
+                else:
+                    mcol = _resolve_numeric_column(prompt, normalized, c)
+                    if not mcol or mcol not in df.columns:
+                        continue
+                    gv, ov = float(df.loc[grp, mcol].mean()), float(df[mcol].mean())
+                    label, pp = mcol, False
+                u = "%" if pp else ""
+                delta = gv - ov
+                cmp_word = "高" if delta >= 0 else "低"
+                tail = (f"（全廠 {ov:.2f}{u}，{cmp_word} {abs(delta):.1f} "
+                        f"{'個百分點' if pp else ''}）") if pp else \
+                       f"（全廠 {ov:.2f}{u}）"
+                # show the matched family label in the user's own wording (prefer
+                # the longest matching token so "memory" wins over "mem").
+                disp = max((k for k in _ALIAS if k in hay and _ALIAS[k] == pref),
+                           key=len, default=pref)
+                sentence = f"「{disp}」的{label}為 {gv:.2f}{u}{tail}。"
+                notes = [f"以「{col}」前綴 = {pref} 過濾後計算{label}，來源：{bid}。"]
                 intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                                   trust_notes=notes, risk_level="low")
                 return NL2ProposalResult(intent=intent, message=sentence,
@@ -3602,11 +3686,23 @@ class NL2ProposalService:
         if date_col is None:
             return None
         from ai4bi.query_spec import (
-            BlockRef, DimensionRef, SortDirection, SortSpec, VisualQuerySpec)
+            BlockRef, DimensionRef, FilterOperator, FilterSpec, SortDirection,
+            SortSpec, VisualQuerySpec)
+        # Round 182 (S1): if the prompt names a specific tool ("ETCH-01 的良率趨勢"),
+        # filter the trend to it — an unfiltered overall can read "flat" even when
+        # that one tool is clearly declining.
+        entity_col = _trend_tool_column(contracts, block_id)
+        named_value = (
+            _trend_named_value(prompt, normalized, (contracts or {}).get(block_id), entity_col)
+            if entity_col else None)
+        filters = (
+            [FilterSpec(block_id, entity_col, FilterOperator.eq, named_value)]
+            if named_value else [])
         spec = VisualQuerySpec(
             spec_id=f"trend_{metric_name}", block_refs=[BlockRef(block_id)],
             metrics=[MetricRef(block_id, metric_name, alias)],
             dimensions=[DimensionRef(block_id, date_col, date_col, truncate_date_to="week")],
+            filters=filters,
             sort=[SortSpec(date_col, SortDirection.asc)], inherit_global_filter=False)
         try:
             df = executor.run(spec)
@@ -3630,15 +3726,71 @@ class NL2ProposalService:
             direction = "變好（往好的方向）"
         else:
             direction = "變差（往不好的方向）"
-        msg = (f"「{alias}」近 {len(df)} 週趨勢：{direction}。期初 {round(first,2)} → 期末 "
-               f"{round(last,2)}，整體每週斜率 {round(slope,3)}。")
+        scope_label = f"「{named_value}」的" if named_value else ""
+        msg = (f"{scope_label}「{alias}」近 {len(df)} 週趨勢：{direction}。期初 {round(first,2)}"
+               f" → 期末 {round(last,2)}，整體每週斜率 {round(slope,3)}。")
+        # Round 182 (S1): when the overall reads flat but ONE tool is clearly
+        # sliding, name it — that's the helpful answer for "良率趨勢如何". Skip if
+        # the user already scoped to a single tool.
+        if named_value is None and entity_col is not None:
+            worst = self._worst_declining_entity(
+                executor, block_id, metric_name, alias, date_col, entity_col,
+                higher_better, scale)
+            if worst is not None:
+                ent, e_first, e_last = worst
+                verb = "下滑" if higher_better else "上升"
+                msg += (f" 其中「{ent}」最明顯{verb}（{round(e_first,2)} → {round(e_last,2)}）。")
         notes = [f"以 {date_col} 週彙總 {alias} 後取線性斜率與期初/期末對比，來源：{block_id}。"]
+        if named_value:
+            notes.append(f"已過濾到 {entity_col} = {named_value}。")
         self._remember(block_id=block_id, metric_name=metric_name, alias=alias,
                        dim_col=None, kind="trend")
         intent = AIIntent(intent_kind="analysis_request", target_scope="semantic_model",
                           trust_notes=notes, risk_level="low")
         return NL2ProposalResult(intent=intent, message=msg, result_table=df,
                                  trust_notes=notes, risk_level="low")
+
+    def _worst_declining_entity(
+        self, executor, block_id: str, metric_name: str, alias: str,
+        date_col: str, entity_col: str, higher_better: bool, scale: float,
+    ) -> "tuple[str, float, float] | None":
+        """Round 182 (S1): run a per-entity weekly trend and return the entity
+        whose slope is most adverse (declining for higher-is-better metrics),
+        as (entity, first_week_value, last_week_value). None if none qualify."""
+        try:
+            from ai4bi.query_spec import (
+                BlockRef, DimensionRef, SortDirection, SortSpec, VisualQuerySpec)
+            gspec = VisualQuerySpec(
+                spec_id=f"trend_grp_{metric_name}", block_refs=[BlockRef(block_id)],
+                metrics=[MetricRef(block_id, metric_name, alias)],
+                dimensions=[
+                    DimensionRef(block_id, date_col, date_col, truncate_date_to="week"),
+                    DimensionRef(block_id, entity_col, entity_col)],
+                sort=[SortSpec(date_col, SortDirection.asc)], inherit_global_filter=False)
+            gdf = executor.run(gspec)
+        except Exception:  # noqa: BLE001
+            return None
+        if gdf is None or entity_col not in gdf.columns or alias not in gdf.columns:
+            return None
+        import numpy as _np
+        worst: tuple[str, float, float] | None = None
+        worst_move = 0.0
+        for ent, sub in gdf.groupby(entity_col):
+            yv = sub[alias].astype(float).to_numpy()
+            if len(yv) < 3:
+                continue
+            sl = float(_np.polyfit(_np.arange(len(yv)), yv, 1)[0])
+            adverse = sl < 0 if higher_better else sl > 0
+            # rank by the total adverse endpoint move (period start → end), which
+            # surfaces a sustained slide even when the per-week slope is modest.
+            move = float(yv[0]) - float(yv[-1]) if higher_better else float(yv[-1]) - float(yv[0])
+            if adverse and move > worst_move:
+                worst_move = move
+                worst = (str(ent), float(yv[0]), float(yv[-1]))
+        # only surface a meaningful slide (≥2.5% of the metric level, end-to-end)
+        if worst is not None and worst_move >= 0.025 * scale:
+            return worst
+        return None
 
     def _answer_excursion(
         self,
@@ -3733,6 +3885,15 @@ class NL2ProposalService:
 
         idx = SchemaIndex.build(contracts)
         metric = idx.best_metric_match(prompt, normalized)
+        if metric is None:
+            # Round 182 (S2): "最差的機台是哪台" names no measure, but in a yield-
+            # centric fab report the worst tool/product most naturally means worst
+            # YIELD — retry with an implicit yield measure instead of refusing.
+            hay0 = f"{prompt.lower()} {normalized}"
+            if any(t in hay0 for t in (
+                    "機台", "機臺", "設備", "機器", "chamber", "腔", "tool", "產品",
+                    "品類", "product", "批", "lot", "站", "step", "區", "area")):
+                metric = idx.best_metric_match("良率 yield", "liang lv yield")
         if metric is None:
             return None
         block_id, metric_name, alias = metric.block_id, metric.metric_name, metric.alias
@@ -5665,6 +5826,8 @@ _RANK_TRIGGERS: tuple[str, ...] = (
     # Round 178 (S2/S4): colloquial superlatives that were missing from the gate.
     # (NOT "主要是哪/主要有哪" — those clash with decomposition "主要是哪個…造成".)
     "最爛", "最佳", "最主要", "佔大宗", "占大宗",
+    # Round 182 (S4): "主要不良項目有哪些 / 主要缺陷" → ranked defect list.
+    "主要不良", "主要缺陷", "不良項目", "缺陷項目", "不良類型", "缺陷種類", "主要的不良",
 )
 _RANK_ASC_WORDS: tuple[str, ...] = (
     "最低", "最少", "最差", "最小", "最短", "最快", "最閒", "賣最差", "賣最少", "最不", "墊底",
@@ -5674,6 +5837,8 @@ _RANK_ASC_WORDS: tuple[str, ...] = (
     # with 差多少/差異) — use the explicit comparative forms.
     "比較差", "較差", "比較爛", "較爛", "最爛", "比較低", "較低", "比較少", "較少",
     "差的", "低的", "爛的", "表現差", "表現最差", "比較慢", "較慢", "比較短", "較短",
+    # Round 182 (S2): more "underperforming" synonyms map to worst-first sort.
+    "不理想", "表現不好", "表現最不好", "不好", "最不好", "不佳", "較不理想", "比較不理想",
 )
 
 
@@ -5769,6 +5934,18 @@ def _looks_like_ranking(prompt: str, normalized: str) -> bool:
         "比上", "比前", "比這", "升高", "升至", "變化", "造成", "原因", "為什麼", "為何",
         "拆解", "上週", "上周", "上月", "去年同期", "vs 上", "相比"))
     if which and comp and not change_ctx:
+        return True
+    # Round 182 (S2): an entity + a worst/best word with no explicit "哪" is still
+    # a ranking ("良率比較差的機台", "表現不好的機台", "不理想的 chamber"). Same
+    # change-context guard so a period/why question isn't grabbed.
+    entity = any(e in hay for e in (
+        "機台", "機臺", "設備", "機器", "chamber", "腔", "tool", "產品", "品類",
+        "product", "站", "step", "區", "area", "批", "lot", "vendor", "供應商"))
+    rankword = any(w in hay for w in (
+        "最差", "最爛", "最低", "最高", "最好", "最佳", "最不", "比較差", "較差",
+        "比較好", "較好", "比較高", "較高", "比較低", "較低", "差的", "低的", "高的",
+        "好的", "不理想", "表現差", "表現好", "表現不好", "表現最不好", "排名", "排序"))
+    if entity and rankword and not change_ctx:
         return True
     # "前 5 名 / top 5" expressed with a number.
     return bool(re.search(r"(前\s*\d+|top\s*\d+|bottom\s*\d+)", hay))
@@ -6181,6 +6358,21 @@ _EXCURSION_CUES = ("突然掉", "掉下來", "掉到", "暴跌", "驟降", "異�
                    "突然變低", "掉了", "excursion", "突然下滑", "急遽下降", "崩")
 
 
+_TREND_QUESTION_CUES = (
+    "趨勢如何", "走勢如何", "趨勢怎樣", "趨勢怎麼", "的趨勢", "看趨勢", "趨勢呢",
+    "走勢呢", "有在下降", "有在下滑", "有沒有下降", "有沒有下滑", "有沒有變差",
+    "有在變差", "有變差嗎", "越來越差嗎", "越來越好嗎", "是不是越來越",
+    "變好還是變差", "變差還是變好", "是變好還是", "在往下嗎", "在下滑嗎")
+
+
+def _is_trend_direction_question(prompt: str, normalized: str) -> bool:
+    """A direction *question* that wants a verdict (better/worse + slope), not a
+    smoothed chart — checked before the moving-average analytics chart so an
+    explicit "良率趨勢如何 / 有在下降嗎" isn't answered with only a chart."""
+    hay = f"{prompt.lower()} {normalized}"
+    return any(p in hay for p in _TREND_QUESTION_CUES)
+
+
 def _looks_like_trend_direction(prompt: str, normalized: str) -> bool:
     hay = f"{prompt.lower()} {normalized}"
     # Round 178 (S1): an explicit "趨勢如何 / 走勢如何 / 的趨勢" is itself a time-series
@@ -6188,6 +6380,24 @@ def _looks_like_trend_direction(prompt: str, normalized: str) -> bool:
     if any(p in hay for p in ("趨勢如何", "走勢如何", "趨勢怎樣", "趨勢怎麼", "的趨勢",
                               "看趨勢", "趨勢呢", "走勢呢", "趨勢圖", "走勢圖")):
         return True
+    # Round 182 (S1): a bare "趨勢/走勢" noun is a time-series ask on its own —
+    # "良率趨勢", "ETCH-01 趨勢" were falling through to "unsupported". (This sits
+    # AFTER decline/analytics-chart routing, so it only catches leftovers.)
+    if "趨勢" in hay or "走勢" in hay:
+        return True
+    # A directional change verb is a trend ask — UNLESS it's a "why/vs-period"
+    # decomposition ("為什麼…下降", "哪個 area 造成…比上週下降"), which must reach
+    # explain_change instead of being answered with an overall trend line.
+    change_ctx = any(t in hay for t in (
+        "比上", "比前", "比這", "為什麼", "為何", "造成", "原因", "拆解", "歸因",
+        "上週", "上周", "上月", "去年同期", "vs 上", "相比", "哪個", "哪一個", "哪些"))
+    if not change_ctx:
+        if any(v in hay for v in ("上升", "下降", "下滑", "走高", "走低", "越來越",
+                                  "往上走", "往下走")):
+            return True
+        if any(t in hay for t in _TREND_TIME_CUES) and any(
+                v in hay for v in ("變化", "變動", "變好", "變差", "改善", "惡化")):
+            return True
     return any(d in hay for d in _TREND_DIR_CUES) and any(t in hay for t in _TREND_TIME_CUES)
 
 
@@ -6456,7 +6666,18 @@ def _looks_like_spc(prompt: str, normalized: str) -> bool:
 
 def _looks_like_commonality(prompt: str, normalized: str) -> bool:
     hay = f"{prompt.lower()} {normalized}"
-    return any(c in hay for c in _COMMONALITY_CUES)
+    if any(c in hay for c in _COMMONALITY_CUES):
+        return True
+    # Round 182 (S3): "哪一站/哪台 造成 良率掉/不良" attributes low yield to a shared
+    # station/tool → commonality (worst-quartile common path), not a decomposition.
+    which_station = any(w in hay for w in (
+        "哪一站", "哪站", "哪一台", "哪台", "哪個機台", "哪個站", "哪個設備", "哪部機"))
+    bad_yield = any(w in hay for w in (
+        "良率掉", "良率低", "良率差", "不良", "低良", "良率下降", "良率不好", "拉低良率"))
+    if which_station and bad_yield and ("造成" in hay or "害" in hay or "拖累" in hay
+                                        or "導致" in hay):
+        return True
+    return False
 
 
 _CROSSFACT_CUES: tuple[str, ...] = (
@@ -6878,6 +7099,59 @@ def _resolve_decomp_dimension(idx, prompt: str, normalized: str, contracts, bloc
             if cand in names and _is_categorical(cand):
                 return cand
     return None
+
+
+def _trend_tool_column(contracts, block_id: str) -> str | None:
+    """Round 182 (S1): the categorical TOOL/entity column on a yield block, used
+    to (a) filter a trend to a named tool and (b) name the worst-declining tool.
+    Prefers an explicit tool id; never returns a row-PK."""
+    c = (contracts or {}).get(block_id)
+    names = [col.name for col in getattr(c, "columns", None) or []]
+
+    def _is_cat(name: str) -> bool:
+        for col in getattr(c, "columns", None) or []:
+            if col.name == name:
+                return getattr(col, "data_type", "") in (
+                    "string", "str", "object", "text", "varchar")
+        return False
+
+    for pref in ("etch_tool_id", "tool_id", "tool_group", "machine_id"):
+        if pref in names and _is_cat(pref):
+            return pref
+    for col in names:
+        low = col.lower()
+        if _is_pk_like(col):
+            continue
+        if any(t in low for t in ("tool", "machine", "chamber", "腔")) and _is_cat(col):
+            return col
+    return None
+
+
+def _trend_named_value(prompt: str, normalized: str, contract, col: str) -> str | None:
+    """Round 182 (S1): if the prompt names a specific value of ``col`` (e.g.
+    "ETCH-01 的良率趨勢"), return that value so the trend can be filtered to it.
+    Matches case-/space-insensitively against the column's distinct values."""
+    if contract is None or not col:
+        return None
+    try:
+        from ai4bi.blocks.datastore import materialize_dataframe
+        df = materialize_dataframe(contract)
+    except Exception:  # noqa: BLE001
+        return None
+    if df is None or col not in getattr(df, "columns", []):
+        return None
+    hay = f"{prompt} {normalized}".upper().replace(" ", "")
+    best: str | None = None
+    best_len = 0
+    try:
+        values = df[col].dropna().astype(str).unique()
+    except Exception:  # noqa: BLE001
+        return None
+    for v in values:
+        token = str(v).upper().replace(" ", "")
+        if len(token) >= 3 and token in hay and len(token) > best_len:
+            best, best_len = str(v), len(token)
+    return best
 
 
 def _metric_is_ratio(contracts, block_id: str, metric_name: str) -> bool:
