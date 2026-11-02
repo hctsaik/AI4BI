@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta http-equiv="X-UA-Compatible" content="IE=edge" />
-<title>AI4BI 啟動器</title>
+<title>AI4BI React Web 啟動器</title>
 <hta:application
     id="ai4biLauncher"
     applicationname="AI4BI Launcher"
@@ -48,11 +48,13 @@
 </style>
 <script language="JScript">
 // ===========================================================================
-// 設定（如想固定預設值，直接改這裡）
+// 啟動目前目錄中的 React Web API；首次使用前請依 README 完成建置。
 // ===========================================================================
-var PROJECT_DIR  = "c:\\code\\claude\\AI4BI";
-var APP_PATH     = "ai4bi/ui/app.py";
-var WIN_TITLE    = "AI4BI-Streamlit";   // 用來辨識/關閉啟動的視窗
+var fso = new ActiveXObject("Scripting.FileSystemObject");
+var PROJECT_DIR = fso.GetParentFolderName(
+    unescape(window.location.pathname).replace(/^\\/, "").replace(/\//g, "\\")
+);
+var WIN_TITLE    = "AI4BI-React-Web";   // 用來辨識/關閉啟動的視窗
 // 想免輸入金鑰可填在這（注意：等於把金鑰存在純文字檔，請自行評估風險）
 var DEFAULT_API_KEY = "";
 // ===========================================================================
@@ -71,7 +73,8 @@ function toggleLLM() {
 
 function startApp() {
     var shell = new ActiveXObject("WScript.Shell");
-    var port  = document.getElementById("port").value || "8502";
+    shell.CurrentDirectory = PROJECT_DIR;
+    var port  = document.getElementById("port").value || "8765";
     var llmOn = document.getElementById("llmMode").checked;
 
     var env = "";
@@ -84,35 +87,34 @@ function startApp() {
     } else {
         env += "set LLM_MODE=mock&& ";
     }
+    env += "set AI4BI_PORT=" + port + "&& ";
 
     var cmd = 'cmd /k "title ' + WIN_TITLE
-            + '&& cd /d ' + PROJECT_DIR
             + '&& ' + env
-            + 'python -m streamlit run ' + APP_PATH
-            + ' --server.port ' + port + '"';
+            + 'python scripts/serve_dev.py"';
 
     shell.Run(cmd, 1, false);
 }
 
 function openBrowser() {
     var shell = new ActiveXObject("WScript.Shell");
-    var port  = document.getElementById("port").value || "8502";
+    var port  = document.getElementById("port").value || "8765";
     shell.Run("http://localhost:" + port, 1, false);
 }
 
 function stopApp() {
     var shell = new ActiveXObject("WScript.Shell");
-    // 關閉標題為 WIN_TITLE 的 cmd 視窗（連同底下的 python/streamlit）
+    // 關閉標題為 WIN_TITLE 的 cmd 視窗（連同底下的 Python API）
     shell.Run('cmd /c taskkill /FI "WINDOWTITLE eq ' + WIN_TITLE + '*" /T /F', 0, false);
 }
 </script>
 </head>
 <body onload="init()">
     <h1>AI4BI 啟動器</h1>
-    <div class="sub">Streamlit BI Demo &middot; 雙擊即可啟動</div>
+    <div class="sub">React Web &middot; 首次啟動前請先建置</div>
 
     <label for="port">Port</label>
-    <input type="text" id="port" value="8502" />
+    <input type="text" id="port" value="8765" />
 
     <div class="row">
         <input type="checkbox" id="llmMode" onclick="toggleLLM()" />
@@ -135,9 +137,9 @@ function stopApp() {
     </div>
 
     <div class="hint">
-        啟動後會跳出一個 cmd 視窗顯示 Streamlit 日誌（首次啟動需數秒）。<br />
-        待日誌出現 <b>Local URL</b> 後，按「開啟瀏覽器」即可。<br />
-        「停止」會關閉該啟動視窗與其下的 streamlit 程序。
+        先依 README 安裝相依並執行 React 建置。啟動後 cmd 會顯示本機 URL 與配對碼。<br />
+        按「開啟瀏覽器」後輸入該配對碼即可。<br />
+        「停止」會關閉該視窗及其下的 Python API 程序。
     </div>
 </body>
 </html>

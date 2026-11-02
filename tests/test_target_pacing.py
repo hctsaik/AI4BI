@@ -7,7 +7,7 @@ import pytest
 from ai4bi.ai.nl2proposal import (
     NL2ProposalService, _looks_like_set_target, _extract_target_value,
 )
-from ai4bi.ui.components.kpi_card import _pacing_status
+from ai4bi.target_pacing import _pacing_status
 from ai4bi.report.models import apply_report_proposal
 from ai4bi.report.retail_template import build_retail_demo_report, build_retail_sales_block
 
@@ -38,6 +38,10 @@ def test_pacing_lte_lower_is_better():
 
 def test_pacing_zero_target_is_none():
     assert _pacing_status(10.0, 0.0, "gte") is None
+
+
+def test_pacing_missing_value_is_none():
+    assert _pacing_status(float("nan"), 10.0, "gte") is None
 
 
 # ---- NL parsing -------------------------------------------------------------

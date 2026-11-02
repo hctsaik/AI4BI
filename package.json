@@ -1,0 +1,12 @@
+{
+  "name": "ai4bi-web-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["apps/web"],
+  "devDependencies": { "@playwright/test": "1.63.0" },
+  "scripts": {
+    "build:web": "npm run build --workspace ai4bi-web",
+    "test:web": "node --test tests/web/*.test.mjs",
+    "test:e2e": "npm run test:e2e --workspace ai4bi-web"
+  }
+}

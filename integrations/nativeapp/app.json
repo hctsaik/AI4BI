@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "app_id": "ai4bi-web",
+  "version": "0.1.0",
+  "title": "AI4BI",
+  "integration_mode": "native",
+  "host_compat": {"min": "0.1.0"},
+  "protocol_version": 1,
+  "ui": {"loader": "http", "entry": "scripts/launcher.py"},
+  "backend": {"kind": "managed_python", "lock_file": "runtime/requirements.lock"},
+  "sheets": ["sheet.json"],
+  "launch_profile": "launch.json",
+  "grants": ["file_read", "file_write"]
+}

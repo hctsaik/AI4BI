@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai4bi-web-api"
+version = "0.1.0"
+description = "Durable local BI workspace with a governed AI4BI engine"
+requires-python = ">=3.11"
+dependencies = [
+  "ai4bi==0.1.0", "fastapi==0.136.3", "uvicorn==0.48.0",
+  "python-multipart==0.0.29", "filelock==3.29.0", "statsmodels==0.15.0"
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.0.3", "httpx==0.28.1", "pypdf==6.0.0"]
+
+[project.scripts]
+ai4bi-web = "ai4bi_web_api.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ai4bi_web_api = ["static/**/*", "static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

@@ -5082,7 +5082,7 @@ class NL2ProposalService:
         if executor is None:
             return None
 
-        from ai4bi.ui.components.kpi_card import _pacing_status
+        from ai4bi.target_pacing import _pacing_status
 
         targets = []
         for pid, page in report.pages.items():

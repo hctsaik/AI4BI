@@ -1,0 +1,115 @@
+/** UI projection of the versioned engine report. HTTP DTOs live in generated/. */
+import type {components} from './generated/api';
+export type SavedRfmAnalysis=Pick<components['schemas']['RfmRequest'],'block_id'|'customer_column'|'date_column'|'monetary_column'|'anchor'> & {
+  analysis_id:string;name:string;page_id:string;selected_component_id:string|null;field_types:Record<string,string>;analysis_contract:'rfm-v1'};
+export type SavedCrossFactAnalysis=Pick<components['schemas']['CrossFactRequest'],'block_a'|'block_b'|'key_a'|'key_b'|'metric_a'|'metric_b'> & {
+  analysis_id:string;name:string;page_id:string;selected_component_id:string|null;operation:'ratio'|'diff'|'margin_pct';quantiles:number;
+  field_types:Record<string,Record<string,string>>;analysis_contract:'crossfact-v1'};
+export type Row = Record<string, string | number | null | boolean>;
+export type SavedChangeAnalysis=Pick<components['schemas']['ChangeRequest'],'block_id'|'metric_name'|'date_column'|'dimension_column'> & {
+  analysis_id:string;name:string;page_id:string;selected_component_id:string|null;
+  period:'week'|'month'|'quarter'|'year';filter_policy:'keep'|'replace';anchor:string|null;
+  field_types:Record<string,string>;metric_signature:string;analysis_contract:'change-v2'};
+export type ChangeResult = {
+  analysis_id?:string;name?:string;page_id?:string;
+  analysis_contract:'change-v2';status:'ready'|'empty';anchor:string|null;period:string;additive:boolean;
+  windows:{current:[string,string];previous:[string,string]}|null;timezone:'UTC';filter_policy:'keep'|'replace';
+  overall_current:number|string|null;overall_previous:number|string|null;overall_delta:number|string|null;group_count:number;
+  rows:{group:Row[string];current:number|string|null;previous:number|string|null;delta:number|string|null;delta_pct:number|string|null;contribution_pct:number|string|null}[];
+  settings:{block_id:string;metric_name:string;date_column:string;dimension_column:string};
+  metric_formula:string;metric_unit:string|null;notice:string;revision:number;data_versions:Record<string,string>;
+};
+export type SpcResult = {status:'ready'|'empty'|'insufficient_groups'|'zero_variance';notice:string;
+  block_id:string;entity_column:string;value_column:string;k:number;aggregation:'mean'|'sum';
+  analysis_id?:string;name?:string;page_id?:string;
+  revision:number;entity_count:number;input_rows:number;used_rows:number;excluded_rows:number;
+  limits:{mean:number;sigma:number;ucl:number;lcl:number;k:number;n:number}|null;
+  points:{entity:Row[string];value:number}[];outliers:{columns:string[];rows:Row[]}};
+export type Field = { block_id: string; column_name: string; alias?: string; truncate_date_to?: string | null };
+export type Metric = { block_id: string; metric_name: string; alias?: string; agg_override?: string | null };
+export type AggregateFilter = {block_id:string;metric_name:string;operator:'eq'|'neq'|'gt'|'gte'|'lt'|'lte'|'between';value:number|number[]};
+export type Visual = {
+  component_id: string; col_span: number;
+  query: { spec_id: string; block_refs: {block_id: string; pinned_version?: string | null}[];
+    metrics: Metric[]; dimensions: Field[]; filters: unknown[]; sort: unknown[]; having?:AggregateFilter[];
+    [key: string]: unknown };
+  visualization: { visual_type: string; title?: string; height_px: number;
+    show_legend: boolean; color_scheme?: string; extra: Record<string, unknown>; [key:string]: unknown };
+};
+export type Page = { page_id: string; title: string; visuals: Record<string, Visual>; visual_order: string[]; display_name?: string };
+export type ParameterRange = {minimum:number;maximum:number;step:number};
+export type Scenario = {scenario_id:string;name:string;parameters:Record<string,number>};
+export type DrillState = {block_id:string;hierarchy:string[];field_types:string[];path:{column:string;value:string|number|boolean|null}[]};
+export type ExplorationView = {page_id:string;selected_visual_id:string|null;filters:Filter[];filter_bookmark_id?:string|null;drill_state?:Record<string,DrillState>};
+export type Bookmark = {bookmark_id:string;name:string;view:ExplorationView;persistent_filters?:PersistentFilter[]|null;fields:{block_id:string;column_name:string;data_type:string}[]};
+export type FilterPredicate = Filter & {data_type:string};
+export type FilterExpression = {operator:'and'|'or';children:(FilterPredicate|FilterExpression)[]};
+export type FilterScope = {filter_id:string;scope:'report'|'page'|'visual';page_id:string|null;visual_id:string|null};
+export type PersistentFilter = FilterScope & (FilterPredicate | {block_id:string;expression:FilterExpression});
+export type SavedSpcAnalysis = {analysis_id:string;name:string;page_id:string;selected_component_id:string|null;
+  block_id:string;entity_column:string;value_column:string;k:number;aggregation:'mean'|'sum';
+  entity_type:string;value_type:string;analysis_contract:'spc-entity-v2'};
+export type SavedCommonalityAnalysis = {analysis_id:string;name:string;page_id:string;selected_component_id:string|null;
+  block_id:string;outcome_block_id:string;entity_column:string;group_column:string;outcome_group_column:string;
+  value_column:string;threshold:number;aggregation:'mean'|'sum';comparison:'lt'|'lte'|'gt'|'gte';
+  field_types:Record<string,string>;analysis_contract:'commonality-v1'};
+export type ReportExtensions = {version:1;parameters:Record<string,number>;parameter_ranges?:Record<string,ParameterRange>;scenarios?:Scenario[];spc_analyses?:SavedSpcAnalysis[];commonality_analyses?:SavedCommonalityAnalysis[];crossfact_analyses?:SavedCrossFactAnalysis[];change_analyses?:SavedChangeAnalysis[];rfm_analyses?:SavedRfmAnalysis[];bookmarks?:Bookmark[];persistent_filters?:PersistentFilter[];calculated_metrics:{block_id:string;name:string;formula:string}[];page_order?:string[]|null};
+export type Report = { title: string; pages: Record<string, Page>; global_filters: Record<string, unknown>; web_extensions?:ReportExtensions;
+  audit: { report_id: string; revision: number }; read_only: boolean; [key:string]: unknown };
+export type ReportState = {report_id: string; workspace_id: string; revision: number; saved_revision: number;
+  dirty: boolean; can_undo: boolean; can_redo: boolean; report: Report};
+export type Dataset = { dataset_id: string; version: string; status: string; contract: {
+  block_id: string; block_type?: string; description?: string; columns: {name: string; data_type: string}[];
+  metrics: {name: string; formula: string; description?: string; unit?: string}[] } };
+export type Result = { status: string; columns?: string[]; rows?: Row[]; row_count?: number; truncated?: boolean;
+  kpi?:{version:1;status:'ready'|'unavailable'|'table';value:number|null;label:string|null;unit:string;reason:string|null;
+    sparkline?:{version:1;status:'ready'|'unavailable';reason:string|null;caption:string;truncated:boolean;limit:number;points:{date:string;value:number|string|null}[]}|null;
+    comparison?:{version:1;period:string;mode:string;filter_policy:string;timezone:string;anchor:string|null;
+      current:number|null;previous:number|null;delta:number|null;delta_percent:number|null;
+      current_window:string[]|null;previous_window:string[]|null;status:'ready'|'unavailable';reason:string|null;captions:string[]};
+    rag:{state:'good'|'warning'|'bad';target:number;warn:number|null;good_if:'gte'|'lte';label:string}|null;
+    pacing:{status:'ready'|'unavailable';target:number;good_if:'gte'|'lte';on_track:boolean;fraction:number|null;
+      percent_of_target:number|null;label:string;reason:string|null}|null};
+  bar?:{version:1;orientation:'vertical'|'horizontal';mode:'group'|'stack'|'overlay';grouped:boolean;
+    categories:{label:string;filter_value:string|number|boolean|null}[];
+    series:{name:string;metric_key:string;points:{row_index:number;category_index:number;value:number|null}[]}[]};
+  chart_format?:{version:1;y_scale:'linear'|'log';y_min:number|null;y_max:number|null;x_title:string;y_title:string;
+    legend_position:string;show_legend:boolean;data_labels:boolean;labels:Record<string,string[]>;
+    baseline?:{kind:'mean'|'custom';status:'ready'|'unavailable';value:number|null;label:string|null;reason:string|null;
+      metric_key:string|null;valid_count:number;excluded_count:number;scope:'query_result'}|null};
+  pie?: {version:1;metric_key:string;status:'ready'|'unavailable';reason:string|null;excluded_count:number;weight_total:number|null;
+    settings:{hole:number;show_percent:boolean;data_labels:boolean;legend_position:'top'|'bottom'|'left'|'right'|'hide';show_legend:boolean};
+    slices:{row_index:number;label:string;value:number;percent:number;filter_value:string|number|boolean|null}[]};
+  scatter?: {version:1;x_key:string;y_key:string|null;group_key:string|null;size_key:string|null;excluded_count:number;
+    trendline?:'ols'|'lowess'|null;trendlines?:{group:string|number|boolean|null;method:'ols'|'lowess';n:number;status:'ready'|'unavailable';reason?:string;
+      x:number[];y:number[];intercept:number|null;slope:number|null;r_squared:number|null}[];
+    points:{row_index:number;x:number;y:number;group:string|number|boolean|null;size:number|null}[]};
+  histogram?: {version:1;field:Field&{key:string};bins:number;source_count:number;valid_count:number;excluded_count:number;
+    query_limit:number|null;filter_ranges:[number,number][];mean:number|null;median:number|null;min:number|null;max:number|null};
+  geo?: {version:1;location_field:Field&{key:string};resolver:string;mapped_count:number;unmapped_count:number;
+    points:{row_index:number;latitude:number;longitude:number}[]};
+  pivot?: {version:1;row_field:Field&{key:string};column_field:(Field&{key:string})|null;
+    metrics:(Metric&{key:string})[];totals_scope:'filtered_population';having_scope:'each_aggregation_grain';
+    row_totals:Result;column_totals:Result|null;grand_total:Result;truncated:boolean};
+  query?:Visual['query'];drill?:DrillState|null;
+  metadata?: {blocks_used: string[]; metrics_used: unknown[]; filters_applied: string[]; quality_warnings: string[]};
+  error?: {message: string} };
+export type Filter = {source_visual_id?: string|null; block_id: string; column_name: string; operator: string; value: unknown};
+export type Workspace = {workspace_id: string; title: string; report_ids: string[]};
+
+export type CommonalityResult={analysis_id?:string;name?:string;page_id?:string;status:'ready'|'empty'|'no_qualifying_groups'|'no_comparison_groups';
+  population_count:number;qualifying_count:number;comparison_count:number;
+  unmeasured_group_count:number;unexposed_group_count:number;excluded_detail_rows:number;excluded_outcome_rows:number;
+  rows:{entity:unknown;qualifying_count:number;coverage_percent:number;lift:number;p_value:number|null}[];notice:string};
+
+export type CrossFactResult={analysis_id?:string;name?:string;page_id?:string;
+  settings?:Pick<SavedCrossFactAnalysis,'block_a'|'block_b'|'key_a'|'key_b'|'metric_a'|'metric_b'|'operation'|'quantiles'>;} & {status:'ready'|'empty';aligned_count:number;paired_count:number;missing_pair_count:number;zero_denominator_count:number;
+  sources:Record<'a'|'b',{input_rows:number;excluded_key_rows:number;missing_measure_rows:number;group_count:number;unmatched_groups:number}>;
+  rows:{key:string|number;a:number|string|null;b:number|string|null;result:number|string|null}[];notice:string;
+  correlation_status:string;correlation:{r:number;n:number;direction:string;strength:string}|null;
+  cohort_status:string;requested_quantiles:number;actual_quantiles:number;cohorts:{bucket:string;range:string;count:number;mean_b:number}[]};
+
+export type RfmResult={analysis_id?:string;name?:string;page_id?:string;anchor:string;customer_count:number;included_rows:number;source_rows:number;
+  excluded_missing_identity_or_date:number;excluded_after_anchor:number;revision:number;data_versions:Record<string,string>;
+  rows:{customer:string|number;last_purchase:string;recency_days:number;frequency:number;monetary:string|number;
+    r:number;f:number;m:number;segment:string;at_risk:boolean}[]};

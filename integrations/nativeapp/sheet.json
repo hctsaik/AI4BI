@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "sheet_id": "ai4bi-workspace",
+  "title": "AI4BI",
+  "features": [{
+    "feature_id": "ai4bi-main",
+    "title": "分析工作區",
+    "app_ref": "ai4bi-web",
+    "entry_ref": "scripts/launcher.py",
+    "view_mode": "iframe",
+    "keep_alive": true,
+    "close_policy": "prompt"
+  }]
+}

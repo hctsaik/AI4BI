@@ -4,6 +4,14 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+.artifacts/
+services/api/src/ai4bi_web_api/static/
+services/api/build/
 .streamlit/secrets.toml
 data/semiconductor_demo/draft_reports/
 published/

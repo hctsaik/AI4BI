@@ -4,27 +4,40 @@ A governed, AI-assisted BI platform where data scientists deliver reusable JSON 
 
 ## Quick Start
 
+The supported local app is React Web served by the Python API. From the repository root:
+
 ```bash
-pip install -e ".[dev]"
-streamlit run ai4bi/ui/app.py          # ETCH Queue-Time Explorer demo
-python -m pytest tests/ -q             # run full test suite
+npm ci
+python -m pip install -e . -e services/api
+python scripts/build_app.py
+python scripts/serve_dev.py
 ```
 
-### Windows 一鍵啟動器
+Open the printed `http://127.0.0.1:<port>` URL and enter the local pairing code
+printed by the server. The build embeds React assets in the Python package; the
+runtime does not need a Vite development server or the Streamlit dependency.
 
-雙擊專案根目錄的 `launch.hta`（Windows 內建，免安裝）即可圖形化啟動：可選 port、切換 Claude API（LLM）/mock 模式、一鍵開瀏覽器與停止。等同執行：
+On Windows, after this first build, `launch.hta` can start the same API, open the
+browser and stop its process. The pairing code remains in the server console.
 
-```powershell
-cd c:\code\claude\AI4BI; $env:LLM_MODE="anthropic"; $env:ANTHROPIC_API_KEY="sk-ant-..."; python -m streamlit run ai4bi/ui/app.py --server.port 8502
+### Legacy parity tests
+
+The old Streamlit UI is retained as an internal behavior reference while React
+parity work continues. It is not a supported app launch path. Install the
+development extra only when running those legacy regression tests:
+
+```bash
+python -m pip install -e ".[dev]" -e services/api
+python -m pytest tests/ -q
+npm run test:web
 ```
 
-> LLM 模式由 `LLM_MODE`（`mock`|`anthropic`）、`ANTHROPIC_API_KEY`、`ANTHROPIC_MODEL` 三個環境變數控制；未設或出錯會自動 fallback 回 mock。
+## Existing Analysis Semantics
 
-## Current Implementation Status
-
-The platform is well past the original P0–R022 MVP. As of **Round 166** the
-non-e2e suite is **1118 passing** (plus a Playwright E2E suite that needs a live
-server). Highlights since the MVP:
+These capabilities describe the existing Python analysis engine and are the
+behavioral reference for the React migration. They do not mean the React UI has
+feature parity; current migration progress and validation limits are tracked in
+[`docs/implementation-plan.md`](docs/implementation-plan.md).
 
 - **Power BI parity (R041–137):** global slicers, semantic cross-filter,
   derived/calculated metrics, time-intelligence (WoW/MoM/YoY, calendar YoY),
@@ -52,6 +65,9 @@ and the validation logs under [`docs/`](docs/).
 
 ```
 AI4BI/
+├── apps/web/                 # React + TypeScript interface
+├── services/api/             # FastAPI local runtime and analysis adapters
+├── scripts/                  # build and local startup
 ├── ai4bi/
 │   ├── blocks/          # Model: DataBlockContract, BlockLoader, registry, datastore, upgrade_validator
 │   ├── planning/        # Control: FanoutGuard, SafeJoinPlanner, composition_plan
@@ -65,8 +81,8 @@ AI4BI/
 │   ├── routing/         # Control: prompt_router
 │   ├── query_spec.py    # BlockRef, VisualQuerySpec, VisualizationSpec, HavingSpec
 │   ├── spec_models.py   # PatchProposal, apply_proposal, PageSpec
-│   └── ui/              # View: Streamlit
-│       ├── app.py       # Main entry point (view-mode IA, canvas, NL ask box)
+│   └── ui/              # Legacy Streamlit reference; not the supported app UI
+│       ├── app.py       # Legacy entry point retained for parity testing
 │       ├── theme.py     # Design system: themes, colorway, app_css, on_color (R164–166)
 │       ├── workspace.py / state_manager.py  # Session state (undo/redo/staging)
 │       ├── cache.py     # QueryCache (L1 @st.cache_data + L2 session_state)
@@ -76,9 +92,11 @@ AI4BI/
 │       └── components/  # kpi_card, line/bar/pie/scatter/histogram/map/small_multiples,
 │                        #   data_table, pivot_table, filter_bar, field_well (React/TS)
 ├── data/semiconductor_demo/   # Demo dataset (blocks/, semantic_model.json, baselines.json)
-├── .streamlit/config.toml     # Startup theme chrome (R164–166)
+├── .streamlit/config.toml     # Legacy reference UI configuration
 ├── docs/                      # spec.md, design-council-log.md, validation logs
-└── tests/                     # ~1118 non-e2e + Playwright E2E (tests/e2e, needs live server)
+├── tests/                     # Core and legacy UI regression tests
+├── tests/web/                 # React unit tests
+└── tests/e2e/                 # Playwright browser workflows
 ```
 
 ## MVC Layering
@@ -87,7 +105,7 @@ AI4BI/
 |-------|------|-----------|
 | **Model** | Trusted data building blocks and semantic truth | `DataBlockContract`, `semantic_model.json`, metric definitions, certified relationships |
 | **Control** | User intent → valid analysis behavior | `VisualQuerySpec`, `SafeJoinPlanner`, `Executor`, `StateManager` |
-| **View** | Interactive BI authoring surface | Streamlit canvas, prompt command area, KPI/trend/chart/table visuals |
+| **View** | Interactive BI authoring surface | React Web canvas, prompt command area, KPI/trend/chart/table visuals |
 | **AI Assistant** | Suggests controlled spec/style edits | `PromptRouter`, `prompt_to_proposal()` — Proposal Author only, never semantic authority |
 
 ## Demo: ETCH Queue-Time Explorer
@@ -125,9 +143,7 @@ All design discussions are in [`docs/design-council-log.md`](docs/design-council
 
 ## Development Workflow
 
-Each round follows this sequence:
-1. Launch 4 parallel design/implementation agents
-2. Collect results, synthesize into `docs/design-council-log.md`
-3. Run `python -m pytest tests/ -q` — must pass
-4. `git add -A && git commit && git push`
-5. Start next round
+1. Install the Python API and React workspace dependencies.
+2. Run `python scripts/build_app.py` to generate API types and embed the React build.
+3. Run `python scripts/serve_dev.py` and use the local URL and pairing code it prints.
+4. Run the focused API, React, and browser checks for the behavior being changed.

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "profile_id": "ai4bi-http",
+  "loader": "http",
+  "cwd": ".",
+  "entry": "scripts/launcher.py",
+  "env_allowlist": [],
+  "managed_env": {"AI4BI_DATA_ROOT": "{data_dir}/workspace", "LLM_MODE": "mock"},
+  "readiness": {"http_path": "/ready", "timeout_s": 60},
+  "stop": {"grace_s": 5, "kill_process_tree": true}
+}
