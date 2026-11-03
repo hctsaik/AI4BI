@@ -22,6 +22,12 @@ cd c:\code\claude\AI4BI; $env:LLM_MODE="anthropic"; $env:ANTHROPIC_API_KEY="sk-a
 
 ## Current Implementation Status
 
+### NativeApp 私有資料目錄（2026-10-05）
+
+原 Streamlit UI 可選用 `AI4BI_DATA_ROOT`，必須是 App 來源目錄之外的絕對路徑。設定後，草稿、registry、published 與 outbox 使用該私有資料根；示範 blocks／semantic model 仍從 App 內容唯讀載入。首次只複製示範 registry，不搬入原有草稿或報表，也不覆寫已存在的私有 registry。未設定時保留既有獨立執行路徑。
+
+NativeApp 接入包由 `C:\code\claude\nativeApp_v2\integrations\ai4bi-streamlit` 維護；`LLM_MODE=mock` 是快測選項，不代表真 LLM 驗收。路徑與草稿／發布聚焦測試 18 項通過（2.87 秒）；殼內與發布驗證以 NativeApp 的 `docs/validation/implementation-status.md` 為準。
+
 The platform is well past the original P0–R022 MVP. As of **Round 166** the
 non-e2e suite is **1118 passing** (plus a Playwright E2E suite that needs a live
 server). Highlights since the MVP:

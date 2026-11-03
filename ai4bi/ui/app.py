@@ -69,13 +69,15 @@ from ai4bi.ui.trend_streak_panel import (  # Round 085
 from ai4bi.ui.format_controls import FORMAT_CONTROL_VTYPES as _FMT_VTYPES  # Round 135
 from ai4bi.ui import theme as _theme  # Round 164: design-system / themes
 from ai4bi.report.share_auth import hash_password, verify_password  # Round 064
+from ai4bi.ui.runtime_paths import runtime_paths
 
 _DEMO_ROOT = Path(__file__).parents[2] / "data" / "semiconductor_demo"
 _BLOCKS_DIR = _DEMO_ROOT / "blocks"
 _SEMANTIC_MODEL = _DEMO_ROOT / "semantic_model.json"
-_DRAFT_STORE = _DEMO_ROOT / "draft_reports"
-_REGISTRY_DIR = _DEMO_ROOT / "registry"
-_PROJECT_ROOT = Path(__file__).parent.parent.parent
+_WRITABLE = runtime_paths(Path(__file__).parent.parent.parent)
+_DRAFT_STORE = _WRITABLE.drafts
+_REGISTRY_DIR = _WRITABLE.registry
+_PROJECT_ROOT = _WRITABLE.project_data
 _ASSISTANT_PLAN_KEY = "visual_assistant_analysis_plan"
 _ASSISTANT_TRUST_KEY = "visual_assistant_trust_notes"
 _ASSISTANT_ANSWER_KEY = "visual_assistant_direct_answer"  # Round 078
