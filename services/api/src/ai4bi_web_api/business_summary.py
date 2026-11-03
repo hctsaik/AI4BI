@@ -42,6 +42,7 @@ def run_summary(root: Path, snapshot: dict) -> dict:
             rule_id=f"summary-{index}", block_id=item["block_id"], metric_name=metric.name,
             metric_label=metric.description or metric.name, operator=item["operator"],
             threshold=item["threshold"], unit=metric.unit or None,
+            filter_column=item.get("filter_column"), filter_value=item.get("filter_value"),
         ))
 
     summary = generate_summary(executor, enriched, period=snapshot["period"], alert_rules=alert_rules,

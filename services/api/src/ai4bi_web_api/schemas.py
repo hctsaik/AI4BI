@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Annotated, Any, Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class StrictModel(BaseModel):
@@ -61,11 +61,43 @@ class QueryRequest(StrictModel):
         return result
 
 
-class SummaryAlertRule(StrictModel):
+class AlertRuleSpec(StrictModel):
     block_id: str = Field(min_length=1, max_length=200)
     metric_name: str = Field(min_length=1, max_length=200)
     operator: Literal["lt", "gt"]
     threshold: float = Field(allow_inf_nan=False, strict=True)
+    filter_column: str | None = Field(default=None, min_length=1, max_length=200)
+    filter_value: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def paired_scope(self):
+        if (self.filter_column is None) != (self.filter_value is None):
+            raise ValueError("Alert scope column and value must be provided together")
+        return self
+
+
+class AlertEvaluationRule(AlertRuleSpec):
+    rule_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class SummaryAlertRule(AlertRuleSpec):
+    pass
+
+
+class AlertEvaluationRequest(StrictModel):
+    idempotency_key: str = Field(min_length=8, max_length=128)
+    base_revision: int = Field(ge=1)
+    alert_rules: list[AlertEvaluationRule] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def unique_rule_ids(self):
+        ids = [item.rule_id for item in self.alert_rules]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Alert rule IDs must be unique")
+        return self
+
+    def execution_options(self):
+        return {"alert_rules": [item.model_dump() for item in self.alert_rules]}
 
 
 class SummaryRequest(StrictModel):

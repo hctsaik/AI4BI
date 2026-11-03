@@ -6,11 +6,13 @@
 
 本輪驗證：`npm run test:web` **34 通過**，React build 與 `scripts/build_app.py --wheel` 通過；API 專項 **4 通過**，Streamlit 依賴抽離後目標進度／AI 問答回歸 **16 通過**、報表 API 回歸 **1 通過**。另以 import hook 阻擋 Streamlit 後成功載入 API、AI service 與共用目標進度模組。本輪 wheel 為 2,100,221 bytes，SHA-256 `dee7c7732ecb6cf57a8a1a94cea5cd768c4b33ff5069490415c35e667987f4e0`。完整 API 套件曾為 **943 通過、1 失敗**（idle-worker 到期測試），該單一案例隔離重跑通過。Playwright 完整輪初次為 **33/36**；之後原先 2 個 PDF 下載等待案例單獨重跑通過，長篇本機工作區旅程在同步修正後單獨通過。三個失敗案例均有後續單案通過紀錄，但不是單次完整 36/36 回歸。`npm audit --omit=dev` 為 0 個弱點；開發相依鏈仍有 3 個 moderate findings。尚未執行乾淨離線安裝或用新版 NativeApp 驗證；完整 React／舊版逐功能 parity 及發布 gate 保持未完成。
 
+告警更新（2026-11-03）：React 已由 KPI-only 比較切換為完整事實指標清單及 worker 快照評估，支援明確欄位／值範圍，並將相同規則送入摘要。`test_workspace_api.py` **152 通過**、`npm run test:web` **34 通過**、真實工作區 Playwright 告警／週月摘要旅程 **1 通過，33.8 秒**、`scripts/build_app.py --wheel` 通過；wheel 為 2,106,433 bytes，SHA-256 `4cbc80714c1441da942bb61e5ea0cd3c92e133265aefede5ccf54eb90e7cb2c7`。完整 API 套件只覆蓋此 API 測試檔，未代表全部 943 項回歸重跑；未執行離線安裝或新版 NativeApp 驗收。
+
 RFM 完整交付已接入開發來源，驗收進行中：一般查詢新增嚴格布林 `include_rfm`，發布及四格式匯出強制執行全部保存 RFM 並核對完整性，提交發布另核對保存設定收據；過渡版 `RFM_DELIVERY_UNAVAILABLE` 已移除。執行契約升為 `web-query-v7`，v6 或更早發布保持可讀，執行須使用相容環境或重新發布，既有相容性拒絕矩陣已加入 v6。CSV／Excel／PDF 共用完整 summary／customers 資料表，JSON 保留原始結果；PDF 空客戶明示，不能使用 UI 100 列分頁上限截斷。新增 `RfmResultView.tsx` 歸屬共用結果呈現，由探索面板與發布唯讀頁使用，避免維護兩套數值格式／分頁邏輯。
 
 目前正式建置及 RFM／發布專項 **91 通過，53.13 秒**，已驗四格式實際文件讀回、保存設定與版本、固定發布在草稿刪除後重播／匯出。另於本工作樹重建 React package assets 後，重跑 `tests/e2e/workspace.spec.ts` 的 RFM 完整旅程 **1 通過，23.5 秒**：真實查詢、設定保存／重載／套用、空結果、600 客戶六頁瀏覽、接受後取消、刪除草稿設定後發布重播，以及 JSON／CSV／XLSX／PDF 實際下載；旅程逐值核對 JSON 設定與結果，其他三格式核對下載成功及非空檔案，截圖已目視檢查。`test_rfm.py`、`test_publications.py`、`test_exports.py` 後端專項重新執行 **181 通過，87.97 秒**；以 Python 3.11 安裝 `services/api/pyproject.toml` 所列的 `pypdf==6.0.0` 測試 extra 與 `statsmodels==0.15.0` runtime dependency 後通過。這些是 RFM／發布／匯出範圍驗證，完整 API 與瀏覽器套件仍在進行；尚未更新 wheel、離線安裝及 NativeApp。不把這些專項當作完整交付驗收完成；下段過渡拒絕及尚未串接敘述保留為歷史。
 
-React 告警增量：新增本頁 KPI 門檻規則，依目前 KPI 查詢值與篩選條件即時顯示觸發提醒；設定存在 `sessionStorage`，範圍限目前工作區／報表／頁面及瀏覽器工作階段，不執行背景工作或寄送。`npm run build --workspace ai4bi-web` 與 `scripts/build_app.py` 通過；`tests/e2e/workspace.spec.ts` 真實工作區旅程 **1 通過，14.7 秒**，驗證新增、高於門檻觸發、重載後恢復及刪除。這是舊版任意事實指標提醒的部分遷移；任意指標、條件範圍與排程／outbox 尚未接入，因此 P05 告警與排程整組仍未完成。
+React 告警增量：`AlertPanel` 現列出所有已就緒 fact／snapshot_fact／target_fact 的資料指標，不再受限於目前頁面的 KPI。React 透過新增的 `/alerts` 背景工作提交規則，worker 以接受時報表與資料快照呼叫既有 `evaluate_alerts`；可選欄位／值範圍沿用既有 `AlertRule.filter_column`／`filter_value` 查詢語義。規則仍存於目前瀏覽器工作階段，跨頁／工作區全域共用尚未加入；不執行背景排程或寄送。摘要請求保留提醒範圍。API **152 通過**、前端 **34 通過**、建置／wheel 通過；真實工作區旅程 **1 通過，33.8 秒**，使用 KPI 清單以外的 `unique_lots`、`step_name=Etch`，驗證觸發、重載、週／月摘要及下載內容。規則編輯與 worker 快照評估已接入；排程執行器／outbox 配送仍未接入，因此 P05 告警與排程整組未完成。
 
 React 業務摘要增量：新增 `POST /summaries` 背景工作，依接受時的報表／資料快照呼叫既有 `ai4bi.analysis.summary.generate_summary`，從目前頁面的第一個資料來源取得摘要，支援舊 Streamlit 提供的週報／月報、前三名與已觸發提醒；後端核對提醒規則僅引用現有 fact／snapshot_fact／target_fact 指標。React 可呈現結果並下載 Markdown；daily／weekly 排程頻率與摘要週期保存於目前瀏覽器工作階段，介面明示只記錄偏好，尚未自動執行或寄送。`scripts/build_app.py`（含 OpenAPI 型別生成／靜態資產封裝）及 React build 通過；摘要核心與 API 專項 **7 通過**，涵蓋舊支援週期、運算子拒絕及未註冊事實指標拒絕。真實工作區 Playwright 旅程 **1 通過，24.0 秒**，實際跑週報／月報、確認提醒出現在摘要、讀回下載 Markdown，並驗證排程與告警設定重載保存。此切片不等於告警全指標／任意範圍遷移、排程執行器／outbox 配送或完整 P05 驗收。
 
@@ -832,7 +834,8 @@ Commonality 前輪計算驗證：專項 **19 項通過，1.95 秒**，證據 `.a
 - [ ] 全部已登錄 NL intent、對話範圍、歧義、拒絕及資料 lineage。
 - [ ] 零售、半導體、CV 模板與所有適用分析面板。
 - [ ] 變化拆解、SPC／commonality／cross-fact、RFM／cohort 等結果對照。
-- [ ] 告警與排程設定；沒有外送 transport 時明示排隊／未配送狀態。
+- [x] React 門檻提醒可選任一已註冊事實指標，支援欄位／值範圍並由 API worker 以快照評估；相關證據見本文開頭與 React 告警增量。
+- [ ] 告警／摘要排程執行器及 outbox 配送；沒有外送 transport 時明示排隊／未配送狀態。
 
 完成條件：固定案例語義與數值通過；LLM live 測試與 deterministic 測試分開報告。
 

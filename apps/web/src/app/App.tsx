@@ -107,13 +107,12 @@ export function App() {
   const pageIds=report?.report.web_extensions?.page_order??Object.keys(report?.report.pages??{});
   const page = report?.report.pages[pageId];
   const alertStorageKey=report?`ai4bi-alert-rules:${wid}:${report.report_id}:${pageId}`:'';
-  const alertCandidates=useMemo<AlertCandidate[]>(()=>page?page.visual_order.flatMap(id=>{
-    const visual=page.visuals[id],result=results[id],value=result?.kpi?.status==='ready'?result.kpi.value:null;
-    const metric=visual.query.metrics[0];
-    if(visual.visualization.visual_type!=='kpi_card'||typeof value!=='number'||!Number.isFinite(value)||!metric)return [];
-    return [{visual_id:id,block_id:metric.block_id,metric_name:metric.metric_name,
-      label:visual.visualization.title||metric.metric_name,value,unit:result.kpi?.unit??''}];
-  }):[],[page,results]);
+  const alertCandidates=useMemo<AlertCandidate[]>(()=>sourceDatasets.flatMap(dataset=>{
+    const contract=dataset.contract;
+    if(dataset.status!=='ready'||!['fact','snapshot_fact','target_fact'].includes(contract.block_type??''))return [];
+    return contract.metrics.map(metric=>({block_id:contract.block_id,metric_name:metric.name,
+      label:metric.description||metric.name,unit:metric.unit??'',columns:contract.columns.map(column=>column.name)}));
+  }),[sourceDatasets]);
   useEffect(()=>{
     if(report&&!report.report.pages[pageId]){setPageId(pageIds[0]);setSelected('');setFilters([]);}
   },[report,pageId]);
@@ -334,6 +333,7 @@ export function App() {
       <div className="explore-body"><section className="canvas-area"><div className="canvas-toolbar"><div><span className="live-pill">{querying?'◌ 更新分析中':'● 資料探索'}</span>{querying&&Object.keys(results).length>0&&<small>暫時顯示上次結果</small>}</div>
         <button disabled={busy||!datasets.length||report?.report.read_only} onClick={startAdd}>＋ 新增圖表</button></div>
         {report&&page&&<AlertPanel key={`alerts-${wid}-${report.report_id}-${pageId}`}
+          base={`/workspaces/${wid}/reports/${report.report_id}`} revision={report.revision}
           storageKey={alertStorageKey} querying={querying} candidates={alertCandidates}/>}
         {report&&page&&<SummaryPanel key={`summary-${wid}-${report.report_id}-${pageId}`}
           base={`/workspaces/${wid}/reports/${report.report_id}`} revision={report.revision} pageId={pageId}

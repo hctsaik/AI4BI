@@ -414,6 +414,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{wid}/reports/{rid}/alerts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Evaluate Report Alerts */
+        post: operations["evaluate_report_alerts_api_v1_workspaces__wid__reports__rid__alerts_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/jobs/{jid}": {
         parameters: {
             query?: never;
@@ -555,6 +572,35 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AlertEvaluationRequest */
+        AlertEvaluationRequest: {
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Base Revision */
+            base_revision: number;
+            /** Alert Rules */
+            alert_rules?: components["schemas"]["AlertEvaluationRule"][];
+        };
+        /** AlertEvaluationRule */
+        AlertEvaluationRule: {
+            /** Block Id */
+            block_id: string;
+            /** Metric Name */
+            metric_name: string;
+            /**
+             * Operator
+             * @enum {string}
+             */
+            operator: "lt" | "gt";
+            /** Threshold */
+            threshold: number;
+            /** Filter Column */
+            filter_column?: string | null;
+            /** Filter Value */
+            filter_value?: string | null;
+            /** Rule Id */
+            rule_id: string;
+        };
         /** AssistantRequest */
         AssistantRequest: {
             /** Idempotency Key */
@@ -1039,6 +1085,10 @@ export interface components {
             operator: "lt" | "gt";
             /** Threshold */
             threshold: number;
+            /** Filter Column */
+            filter_column?: string | null;
+            /** Filter Value */
+            filter_value?: string | null;
         };
         /** SummaryRequest */
         SummaryRequest: {
@@ -1926,6 +1976,42 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["SummaryRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    evaluate_report_alerts_api_v1_workspaces__wid__reports__rid__alerts_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                wid: string;
+                rid: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AlertEvaluationRequest"];
             };
         };
         responses: {

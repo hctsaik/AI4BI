@@ -54,30 +54,31 @@ test('workspace creation shows progress while sample data is prepared',async({pa
   await expect(dialog).toHaveCount(0);
 });
 
-test('KPI alerts feed the weekly or monthly summary and schedule preferences survive reload',async({page},testInfo)=>{
+test('fact-metric alerts feed the weekly or monthly summary and schedule preferences survive reload',async({page},testInfo)=>{
   test.setTimeout(180_000);
   await connectWorkspace(page);
   await page.getByRole('button',{name:'新增工作區',exact:true}).click();
   await submitWorkspaceAndWaitForItsQuery(page);
-  const kpi=page.locator('.visual-card .kpi-value').first();
-  await expect(kpi).toBeVisible({timeout:120_000});
-  const current=Number((await kpi.innerText()).replace(/[^\d.-]/g,''));
-  expect(Number.isFinite(current)).toBe(true);
-
   const panel=page.locator('.alert-panel');
   await panel.locator('summary').click();
-  await panel.getByLabel('提醒圖表',{exact:true}).selectOption({index:1});
+  const metric=panel.getByLabel('提醒指標',{exact:true});
+  const metricOptions=await metric.locator('option').evaluateAll(options=>options.map(option=>({label:option.textContent??'',value:(option as HTMLOptionElement).value})));
+  const arbitraryFactMetric=metricOptions.find(option=>option.label.includes('不重複批號數'));
+  expect(arbitraryFactMetric).toBeDefined();
+  await metric.selectOption(arbitraryFactMetric!.value);
   await panel.getByLabel('提醒條件',{exact:true}).selectOption('gt');
-  await panel.getByLabel('提醒門檻',{exact:true}).fill(String(current-1));
+  await panel.getByLabel('提醒門檻',{exact:true}).fill('-1');
+  await panel.getByLabel('提醒範圍欄位',{exact:true}).selectOption('step_name');
+  await panel.getByLabel('提醒範圍值',{exact:true}).fill('Etch');
   await panel.getByRole('button',{name:'新增提醒',exact:true}).click();
-  await expect(page.getByRole('alert').filter({hasText:'已高於你設定的'})).toBeVisible();
+  await expect(page.getByRole('alert').filter({hasText:'已高於你設定的'})).toContainText('Etch');
   await expect(panel.getByRole('list',{name:'目前的提醒'})).toContainText('目前');
 
   await page.reload();
   await expect(page.locator('.visual-card .kpi-value').first()).toBeVisible({timeout:120_000});
   const restored=page.locator('.alert-panel');
   await expect(restored.locator('summary')).toContainText('提醒設定（1）');
-  await expect(page.getByRole('alert').filter({hasText:'已高於你設定的'})).toBeVisible();
+  await expect(page.getByRole('alert').filter({hasText:'已高於你設定的'})).toContainText('Etch');
   const summary=page.locator('.summary-panel');
   await summary.locator('summary').click();
   await summary.getByLabel('摘要週期',{exact:true}).selectOption('week');
@@ -104,6 +105,7 @@ test('KPI alerts feed the weekly or monthly summary and schedule preferences sur
   expect(markdown).toContain('## 本月重點');
   expect(markdown).toContain('## 提醒');
   expect(markdown).toContain('已高於你設定的');
+  expect(markdown).toContain('Etch');
 
   await page.reload();
   await expect(page.locator('.visual-card .kpi-value').first()).toBeVisible({timeout:120_000});

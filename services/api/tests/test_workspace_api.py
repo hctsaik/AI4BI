@@ -306,6 +306,42 @@ def test_summary_job_rejects_alerts_for_unregistered_fact_metrics(client):
     assert result["error"]["code"] == "INVALID_ALERT_RULE"
 
 
+def test_alert_job_evaluates_any_fact_metric_with_an_explicit_scope(client):
+    _, path, report = workspace(client)
+    response = client.post(path + "/alerts", json={
+        "idempotency_key": "fact-metric-scoped-alert",
+        "base_revision": report["revision"],
+        "alert_rules": [{
+            "rule_id": "lots-in-etch", "block_id": "fab_process_move",
+            "metric_name": "unique_lots", "operator": "gt", "threshold": -1,
+            "filter_column": "step_name", "filter_value": "Etch",
+        }],
+    })
+    assert response.status_code == 202, response.text
+    result = wait_job(client, response.json()["job_id"])
+    assert result["status"] == "succeeded", result
+    alert = result["result"]["alerts"][0]
+    assert alert["rule_id"] == "lots-in-etch"
+    assert alert["fired"] is True and alert["value"] > 0
+    assert "Etch" in alert["message"]
+    assert result["result"]["revision"] == report["revision"]
+
+
+def test_alert_request_requires_scope_column_and_value_together(client):
+    _, path, report = workspace(client)
+    response = client.post(path + "/alerts", json={
+        "idempotency_key": "alert-scope-requires-value",
+        "base_revision": report["revision"],
+        "alert_rules": [{
+            "rule_id": "scoped-rule", "block_id": "fab_process_move",
+            "metric_name": "unique_lots", "operator": "gt", "threshold": 0,
+            "filter_column": "step_name",
+        }],
+    })
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "INVALID_REQUEST"
+
+
 @pytest.mark.parametrize("kind,payload", [
     ("add_filter", {"filter":{"scope":"report","block_id":"fab_process_move","column_name":"step_name","operator":"eq","value":"Etch"}}),
     ("save_bookmark", {"name":"Shared verification","view":{"page_id":"main","selected_visual_id":"kpi_moves","filters":[]}}),
