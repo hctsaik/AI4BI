@@ -34,3 +34,14 @@ dialog.modal::backdrop{background:#102c4366;backdrop-filter:blur(3px)}
 :is(.spc-panel,.commonality-panel,.crossfact-panel,.change-analysis-panel,.rfm-panel){background:white;border:1px solid #e4eaf0;border-radius:12px;padding:18px;margin:14px 0}:is(.spc-panel,.commonality-panel,.crossfact-panel,.change-analysis-panel,.rfm-panel)>summary{cursor:pointer;font-weight:600}:is(.spc-panel,.commonality-panel,.crossfact-panel,.change-analysis-panel,.rfm-panel) p{line-height:1.7}:is(.spc-panel,.commonality-panel,.crossfact-panel,.change-analysis-panel,.rfm-panel) form{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;align-items:end;margin:16px 0}:is(.spc-panel,.commonality-panel,.crossfact-panel,.change-analysis-panel,.rfm-panel) label{display:flex;flex-direction:column;gap:6px;min-width:0}:is(.spc-panel,.commonality-panel,.crossfact-panel,.change-analysis-panel,.rfm-panel) select,:is(.spc-panel,.commonality-panel,.crossfact-panel,.change-analysis-panel,.rfm-panel) input{width:100%;min-width:0}:is(.spc-panel,.commonality-panel,.crossfact-panel,.change-analysis-panel,.rfm-panel) form button{position:static;align-self:end}:is(.spc-panel,.commonality-panel,.crossfact-panel,.change-analysis-panel,.rfm-panel) section{min-width:0}
 
 :is(.commonality-panel,.change-analysis-panel) form p{grid-column:1/-1;margin:0}
+
+.alert-panel{background:white;border:1px solid #e4eaf0;border-radius:10px;padding:14px 18px;margin:0 0 16px;font-size:12px}
+.alert-panel>summary{cursor:pointer;font-weight:600}
+.alert-panel p{color:#6e8290;line-height:1.7}
+.alert-panel form{display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin:14px 0}
+.alert-panel label{display:flex;flex-direction:column;gap:6px;min-width:150px;color:#6e8290}
+.alert-panel input,.alert-panel select{width:100%;font-size:11px}
+.alert-panel ul{padding-left:22px}
+.alert-panel li{margin:8px 0}
+.alert-panel li button{margin-left:12px}
+.alert-fired{margin:0 0 12px;padding:12px 15px;border-radius:7px;background:#fff0ef;color:#9f4646;font-size:12px}

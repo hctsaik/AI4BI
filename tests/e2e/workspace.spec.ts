@@ -54,6 +54,36 @@ test('workspace creation shows progress while sample data is prepared',async({pa
   await expect(dialog).toHaveCount(0);
 });
 
+test('KPI threshold alerts fire from current values and survive a page reload',async({page})=>{
+  test.setTimeout(180_000);
+  await connectWorkspace(page);
+  await page.getByRole('button',{name:'新增工作區',exact:true}).click();
+  await submitWorkspaceAndWaitForItsQuery(page);
+  const kpi=page.locator('.visual-card .kpi-value').first();
+  await expect(kpi).toBeVisible({timeout:120_000});
+  const current=Number((await kpi.innerText()).replace(/[^\d.-]/g,''));
+  expect(Number.isFinite(current)).toBe(true);
+
+  const panel=page.locator('.alert-panel');
+  await panel.locator('summary').click();
+  await panel.getByLabel('提醒圖表',{exact:true}).selectOption({index:1});
+  await panel.getByLabel('提醒條件',{exact:true}).selectOption('gt');
+  await panel.getByLabel('提醒門檻',{exact:true}).fill(String(current-1));
+  await panel.getByRole('button',{name:'新增提醒',exact:true}).click();
+  await expect(page.getByRole('alert').filter({hasText:'已高於你設定的'})).toBeVisible();
+  await expect(panel.getByRole('list',{name:'目前的提醒'})).toContainText('目前');
+
+  await page.reload();
+  await expect(page.locator('.visual-card .kpi-value').first()).toBeVisible({timeout:120_000});
+  const restored=page.locator('.alert-panel');
+  await expect(restored.locator('summary')).toContainText('提醒設定（1）');
+  await expect(page.getByRole('alert').filter({hasText:'已高於你設定的'})).toBeVisible();
+  await restored.locator('summary').click();
+  await restored.getByRole('button',{name:/刪除提醒/}).click();
+  await expect(restored.locator('summary')).toContainText('提醒設定（0）');
+  await expect(page.getByRole('alert').filter({hasText:'已高於你設定的'})).toHaveCount(0);
+});
+
 test('RFM runs a real scoped job and clears results when settings change',async({page},testInfo)=>{
   test.setTimeout(600_000);
   await connectWorkspace(page);

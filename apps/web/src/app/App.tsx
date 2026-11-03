@@ -16,6 +16,7 @@ import { CommonalityPanel } from '../components/CommonalityPanel';
 import { CrossFactPanel } from '../components/CrossFactPanel';
 import { ChangeAnalysisPanel } from '../components/ChangeAnalysisPanel';
 import { RfmPanel } from '../components/RfmPanel';
+import { AlertPanel } from '../components/AlertPanel';
 import type { Dataset, DrillState, ExplorationView, Filter, Page, Report, ReportState, Result, Visual, Workspace } from '../types';
 
 type Draft = {import_id:string; revision:number; name:string; status:string;
@@ -323,6 +324,13 @@ export function App() {
         {preview&&<DatasetPreview key={wid+preview} workspaceId={wid} datasetId={preview}/>}</section>:
       <div className="explore-body"><section className="canvas-area"><div className="canvas-toolbar"><div><span className="live-pill">{querying?'◌ 更新分析中':'● 資料探索'}</span>{querying&&Object.keys(results).length>0&&<small>暫時顯示上次結果</small>}</div>
         <button disabled={busy||!datasets.length||report?.report.read_only} onClick={startAdd}>＋ 新增圖表</button></div>
+        {report&&page&&<AlertPanel key={`alerts-${wid}-${report.report_id}-${pageId}`}
+          storageKey={`ai4bi-alert-rules:${wid}:${report.report_id}:${pageId}`} querying={querying}
+          candidates={page.visual_order.flatMap(id=>{
+            const visual=page.visuals[id],result=results[id],value=result?.kpi?.status==='ready'?result.kpi.value:null;
+            return visual.visualization.visual_type==='kpi_card'&&typeof value==='number'&&Number.isFinite(value)?[
+              {visual_id:id,label:visual.visualization.title||visual.query.metrics[0]?.metric_name||id,value,unit:result.kpi?.unit??''}]:[];
+          })}/>}
         {filterBookmarkId&&<p role="status">正在使用書籤「{activeFilterBookmark?.name}」的持久篩選。<button onClick={()=>setFilterBookmark(null)}>回到報表條件</button></p>}
         {Object.keys(drillState).length>0&&<p><button onClick={()=>setDrillState({})}>清除全部鑽取</button></p>}
         {report&&filterReport&&page&&<FilterPanel key={'filters-'+report.report_id} report={filterReport} datasets={sourceDatasets} pageId={pageId} selectedId={selected}
