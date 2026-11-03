@@ -1,15 +1,22 @@
 import { useEffect, useMemo, useState } from 'react';
+import type { components } from '../generated/api';
 
 export type AlertCandidate = {
   visual_id: string;
+  block_id: string;
+  metric_name: string;
   label: string;
   value: number;
   unit: string;
 };
 
+export type SummaryAlertRule = components['schemas']['SummaryAlertRule'];
+
 type AlertRule = {
   rule_id: string;
   visual_id: string;
+  block_id?: string;
+  metric_name?: string;
   label: string;
   unit: string;
   operator: 'lt' | 'gt';
@@ -34,6 +41,17 @@ function loadRules(storageKey: string): AlertRule[] {
   } catch {
     return [];
   }
+}
+
+export function readSummaryAlertRules(storageKey: string, candidates: AlertCandidate[]): SummaryAlertRule[] {
+  const byVisual = new Map(candidates.map(candidate => [candidate.visual_id, candidate]));
+  return loadRules(storageKey).flatMap(rule => {
+    const candidate = byVisual.get(rule.visual_id);
+    const blockId = rule.block_id || candidate?.block_id;
+    const metricName = rule.metric_name || candidate?.metric_name;
+    if (!blockId || !metricName || !Number.isFinite(rule.threshold)) return [];
+    return [{ block_id: blockId, metric_name: metricName, operator: rule.operator, threshold: rule.threshold }];
+  });
 }
 
 function formatNumber(value: number): string {
@@ -69,6 +87,7 @@ export function AlertPanel({ storageKey, candidates, querying }: Props) {
     if (!candidate || threshold.trim() === '' || !Number.isFinite(limit)) return;
     setRules(current => [...current, {
       rule_id: crypto.randomUUID(), visual_id: candidate.visual_id, label: candidate.label,
+      block_id: candidate.block_id, metric_name: candidate.metric_name,
       unit: candidate.unit, operator, threshold: limit,
     }]);
     setThreshold('');

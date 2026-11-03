@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError, downloadArtifact, key, pair, pollJob } from '../lib/api';
 import type { CommandKind } from '../lib/api';
 import { ChartBoundary, DataTable } from '../components/VisualChart';
@@ -16,7 +16,8 @@ import { CommonalityPanel } from '../components/CommonalityPanel';
 import { CrossFactPanel } from '../components/CrossFactPanel';
 import { ChangeAnalysisPanel } from '../components/ChangeAnalysisPanel';
 import { RfmPanel } from '../components/RfmPanel';
-import { AlertPanel } from '../components/AlertPanel';
+import { AlertPanel, type AlertCandidate } from '../components/AlertPanel';
+import { SummaryPanel } from '../components/SummaryPanel';
 import type { Dataset, DrillState, ExplorationView, Filter, Page, Report, ReportState, Result, Visual, Workspace } from '../types';
 
 type Draft = {import_id:string; revision:number; name:string; status:string;
@@ -105,6 +106,14 @@ export function App() {
   },[wid]);
   const pageIds=report?.report.web_extensions?.page_order??Object.keys(report?.report.pages??{});
   const page = report?.report.pages[pageId];
+  const alertStorageKey=report?`ai4bi-alert-rules:${wid}:${report.report_id}:${pageId}`:'';
+  const alertCandidates=useMemo<AlertCandidate[]>(()=>page?page.visual_order.flatMap(id=>{
+    const visual=page.visuals[id],result=results[id],value=result?.kpi?.status==='ready'?result.kpi.value:null;
+    const metric=visual.query.metrics[0];
+    if(visual.visualization.visual_type!=='kpi_card'||typeof value!=='number'||!Number.isFinite(value)||!metric)return [];
+    return [{visual_id:id,block_id:metric.block_id,metric_name:metric.metric_name,
+      label:visual.visualization.title||metric.metric_name,value,unit:result.kpi?.unit??''}];
+  }):[],[page,results]);
   useEffect(()=>{
     if(report&&!report.report.pages[pageId]){setPageId(pageIds[0]);setSelected('');setFilters([]);}
   },[report,pageId]);
@@ -325,12 +334,11 @@ export function App() {
       <div className="explore-body"><section className="canvas-area"><div className="canvas-toolbar"><div><span className="live-pill">{querying?'◌ 更新分析中':'● 資料探索'}</span>{querying&&Object.keys(results).length>0&&<small>暫時顯示上次結果</small>}</div>
         <button disabled={busy||!datasets.length||report?.report.read_only} onClick={startAdd}>＋ 新增圖表</button></div>
         {report&&page&&<AlertPanel key={`alerts-${wid}-${report.report_id}-${pageId}`}
-          storageKey={`ai4bi-alert-rules:${wid}:${report.report_id}:${pageId}`} querying={querying}
-          candidates={page.visual_order.flatMap(id=>{
-            const visual=page.visuals[id],result=results[id],value=result?.kpi?.status==='ready'?result.kpi.value:null;
-            return visual.visualization.visual_type==='kpi_card'&&typeof value==='number'&&Number.isFinite(value)?[
-              {visual_id:id,label:visual.visualization.title||visual.query.metrics[0]?.metric_name||id,value,unit:result.kpi?.unit??''}]:[];
-          })}/>}
+          storageKey={alertStorageKey} querying={querying} candidates={alertCandidates}/>}
+        {report&&page&&<SummaryPanel key={`summary-${wid}-${report.report_id}-${pageId}`}
+          base={`/workspaces/${wid}/reports/${report.report_id}`} revision={report.revision} pageId={pageId}
+          storageKey={`ai4bi-summary-preferences:${wid}:${report.report_id}:${pageId}`}
+          alertStorageKey={alertStorageKey} alertCandidates={alertCandidates} disabled={busy||querying}/>}
         {filterBookmarkId&&<p role="status">正在使用書籤「{activeFilterBookmark?.name}」的持久篩選。<button onClick={()=>setFilterBookmark(null)}>回到報表條件</button></p>}
         {Object.keys(drillState).length>0&&<p><button onClick={()=>setDrillState({})}>清除全部鑽取</button></p>}
         {report&&filterReport&&page&&<FilterPanel key={'filters-'+report.report_id} report={filterReport} datasets={sourceDatasets} pageId={pageId} selectedId={selected}

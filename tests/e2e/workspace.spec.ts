@@ -54,7 +54,7 @@ test('workspace creation shows progress while sample data is prepared',async({pa
   await expect(dialog).toHaveCount(0);
 });
 
-test('KPI threshold alerts fire from current values and survive a page reload',async({page})=>{
+test('KPI alerts feed the weekly or monthly summary and schedule preferences survive reload',async({page},testInfo)=>{
   test.setTimeout(180_000);
   await connectWorkspace(page);
   await page.getByRole('button',{name:'新增工作區',exact:true}).click();
@@ -78,9 +78,45 @@ test('KPI threshold alerts fire from current values and survive a page reload',a
   const restored=page.locator('.alert-panel');
   await expect(restored.locator('summary')).toContainText('提醒設定（1）');
   await expect(page.getByRole('alert').filter({hasText:'已高於你設定的'})).toBeVisible();
-  await restored.locator('summary').click();
-  await restored.getByRole('button',{name:/刪除提醒/}).click();
-  await expect(restored.locator('summary')).toContainText('提醒設定（0）');
+  const summary=page.locator('.summary-panel');
+  await summary.locator('summary').click();
+  await summary.getByLabel('摘要週期',{exact:true}).selectOption('week');
+  await summary.getByRole('button',{name:'✨ 產生摘要'}).click();
+  const summaryResult=summary.getByRole('region',{name:'業務摘要結果'});
+  await expect(summaryResult).toBeVisible({timeout:120_000});
+  await expect(summaryResult.getByRole('heading',{name:'本週重點'})).toBeVisible();
+  await expect(summaryResult.getByRole('heading',{name:'提醒',exact:true})).toBeVisible();
+  await summary.getByLabel('摘要週期',{exact:true}).selectOption('month');
+  await summary.getByLabel('排程定期摘要',{exact:true}).check();
+  await summary.getByLabel('摘要排程頻率',{exact:true}).selectOption('weekly');
+  await expect(summary.getByRole('status')).toContainText('自動執行與寄送尚未啟用');
+  await summary.getByRole('button',{name:'✨ 產生摘要'}).click();
+  await expect(summaryResult).toBeVisible({timeout:120_000});
+  await expect(summaryResult.getByRole('heading',{name:'本月重點'})).toBeVisible();
+  await expect(summaryResult.getByRole('heading',{name:'提醒',exact:true})).toBeVisible();
+  const downloading=page.waitForEvent('download');
+  await summaryResult.getByRole('button',{name:'⬇️ 下載摘要 (.md)'}).click();
+  const download=await downloading,file=testInfo.outputPath('business-summary-month.md');
+  await download.saveAs(file);
+  const {readFile}=await import('node:fs/promises');
+  const markdown=await readFile(file,'utf8');
+  expect(markdown).toContain('# 業務摘要');
+  expect(markdown).toContain('## 本月重點');
+  expect(markdown).toContain('## 提醒');
+  expect(markdown).toContain('已高於你設定的');
+
+  await page.reload();
+  await expect(page.locator('.visual-card .kpi-value').first()).toBeVisible({timeout:120_000});
+  const savedSummary=page.locator('.summary-panel');
+  await savedSummary.locator('summary').click();
+  await expect(savedSummary.getByLabel('排程定期摘要',{exact:true})).toBeChecked();
+  await expect(savedSummary.getByLabel('摘要排程頻率',{exact:true})).toHaveValue('weekly');
+  await expect(savedSummary.getByLabel('摘要週期',{exact:true})).toHaveValue('month');
+  const afterSummaryReload=page.locator('.alert-panel');
+  await expect(afterSummaryReload.locator('summary')).toContainText('提醒設定（1）');
+  await afterSummaryReload.locator('summary').click();
+  await afterSummaryReload.getByRole('button',{name:/刪除提醒/}).click();
+  await expect(afterSummaryReload.locator('summary')).toContainText('提醒設定（0）');
   await expect(page.getByRole('alert').filter({hasText:'已高於你設定的'})).toHaveCount(0);
 });
 

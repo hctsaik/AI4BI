@@ -192,6 +192,9 @@ def execute_assignment(root, jid, *, imports_ms, standby, sequence, wait_ms):
         elif row[0] == "rfm":
             from .rfm import run_rfm
             result = run_rfm(root, payload)
+        elif row[0] == "summary":
+            from .business_summary import run_summary
+            result = run_summary(root, payload)
         elif row[0] == "crossfact":
             from .crossfact import run_crossfact
             result = run_crossfact(root, payload)

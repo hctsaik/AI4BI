@@ -61,6 +61,21 @@ class QueryRequest(StrictModel):
         return result
 
 
+class SummaryAlertRule(StrictModel):
+    block_id: str = Field(min_length=1, max_length=200)
+    metric_name: str = Field(min_length=1, max_length=200)
+    operator: Literal["lt", "gt"]
+    threshold: float = Field(allow_inf_nan=False, strict=True)
+
+
+class SummaryRequest(StrictModel):
+    idempotency_key: str = Field(min_length=8, max_length=128)
+    base_revision: int = Field(ge=1)
+    period: Literal["week", "month"] = "week"
+    page_id: str = Field(min_length=1, max_length=100)
+    alert_rules: list[SummaryAlertRule] = Field(default_factory=list, max_length=100)
+
+
 class PublishRequest(StrictModel):
     idempotency_key: str = Field(min_length=8, max_length=128)
     base_revision: int = Field(ge=1)

@@ -279,6 +279,33 @@ def wait_job(client, jid):
     pytest.fail("Job did not reach terminal status")
 
 
+def test_summary_request_accepts_only_legacy_supported_periods_and_alert_operators(client):
+    _, path, report = workspace(client)
+    base = {"idempotency_key": "summary-request-check", "base_revision": report["revision"],
+            "page_id": "main", "alert_rules": []}
+    for extra in ({"period": "quarter"},
+                  {"period": "week", "alert_rules": [{"block_id": "fab_process_move",
+                    "metric_name": "moves", "operator": "gte", "threshold": 3}]}):
+        response = client.post(path + "/summaries", json={**base, **extra,
+            "idempotency_key": "summary-request-" + str(len(extra)) + str(extra.get("period"))})
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "INVALID_REQUEST"
+
+
+def test_summary_job_rejects_alerts_for_unregistered_fact_metrics(client):
+    _, path, report = workspace(client)
+    response = client.post(path + "/summaries", json={
+        "idempotency_key": "summary-invalid-metric-check", "base_revision": report["revision"],
+        "page_id": "main", "period": "week", "alert_rules": [{
+            "block_id": "not-a-fact", "metric_name": "arbitrary_metric", "operator": "gt", "threshold": 1,
+        }],
+    })
+    assert response.status_code == 202
+    result = wait_job(client, response.json()["job_id"])
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "INVALID_ALERT_RULE"
+
+
 @pytest.mark.parametrize("kind,payload", [
     ("add_filter", {"filter":{"scope":"report","block_id":"fab_process_move","column_name":"step_name","operator":"eq","value":"Etch"}}),
     ("save_bookmark", {"name":"Shared verification","view":{"page_id":"main","selected_visual_id":"kpi_moves","filters":[]}}),

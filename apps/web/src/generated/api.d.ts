@@ -397,6 +397,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{wid}/reports/{rid}/summaries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Business Summary */
+        post: operations["business_summary_api_v1_workspaces__wid__reports__rid__summaries_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/jobs/{jid}": {
         parameters: {
             query?: never;
@@ -1008,6 +1025,37 @@ export interface components {
             }[];
             /** Exploration Page Id */
             exploration_page_id?: string | null;
+        };
+        /** SummaryAlertRule */
+        SummaryAlertRule: {
+            /** Block Id */
+            block_id: string;
+            /** Metric Name */
+            metric_name: string;
+            /**
+             * Operator
+             * @enum {string}
+             */
+            operator: "lt" | "gt";
+            /** Threshold */
+            threshold: number;
+        };
+        /** SummaryRequest */
+        SummaryRequest: {
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Base Revision */
+            base_revision: number;
+            /**
+             * Period
+             * @default week
+             * @enum {string}
+             */
+            period: "week" | "month";
+            /** Page Id */
+            page_id: string;
+            /** Alert Rules */
+            alert_rules?: components["schemas"]["SummaryAlertRule"][];
         };
         /** ValidationError */
         ValidationError: {
@@ -1842,6 +1890,42 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["RfmRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    business_summary_api_v1_workspaces__wid__reports__rid__summaries_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                wid: string;
+                rid: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SummaryRequest"];
             };
         };
         responses: {

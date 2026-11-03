@@ -20,7 +20,7 @@ from .errors import AppError
 from .imports import create_import, get_import, validate_import, commit_import, list_imports
 from .jobs import Jobs
 from .schemas import (PairRequest, WorkspaceCreate, Command, QueryRequest, AssistantRequest,
-                      ImportConfig, ImportCommit, JobView, ExportRequest, PublishRequest, SpcRequest, CommonalityRequest, CrossFactRequest, ChangeRequest, RfmRequest)
+                      ImportConfig, ImportCommit, JobView, ExportRequest, PublishRequest, SpcRequest, CommonalityRequest, CrossFactRequest, ChangeRequest, RfmRequest, SummaryRequest)
 from .storage import Store, uid, encode
 from .static_assets import verify_manifest, validate_launch_identity
 
@@ -360,6 +360,11 @@ def create_app(data_root: Path, pairing_code: str | None = None, static_root: Pa
         options = body.model_dump(exclude={"idempotency_key", "base_revision"})
         options["analysis_contract"] = ANALYSIS_CONTRACT
         return app.state.jobs.submit_report(wid, rid, "rfm", body.base_revision, options, body.idempotency_key)
+
+    @app.post("/api/v1/workspaces/{wid}/reports/{rid}/summaries", status_code=202)
+    def business_summary(wid: str, rid: str, body: SummaryRequest):
+        options = body.model_dump(exclude={"idempotency_key", "base_revision"})
+        return app.state.jobs.submit_report(wid, rid, "summary", body.base_revision, options, body.idempotency_key)
 
     @app.get("/api/v1/jobs/{jid}", response_model=JobView)
     def job(jid: str):

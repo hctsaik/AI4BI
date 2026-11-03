@@ -45,3 +45,13 @@ dialog.modal::backdrop{background:#102c4366;backdrop-filter:blur(3px)}
 .alert-panel li{margin:8px 0}
 .alert-panel li button{margin-left:12px}
 .alert-fired{margin:0 0 12px;padding:12px 15px;border-radius:7px;background:#fff0ef;color:#9f4646;font-size:12px}
+.summary-panel{background:white;border:1px solid #e4eaf0;border-radius:10px;padding:14px 18px;margin:0 0 16px;font-size:12px}
+.summary-panel>summary{cursor:pointer;font-weight:600}
+.summary-panel p{color:#6e8290;line-height:1.7}
+.summary-controls{display:flex;align-items:end;gap:12px;flex-wrap:wrap;margin:14px 0}
+.summary-panel label{display:flex;flex-direction:column;gap:6px;min-width:150px;color:#6e8290}
+.summary-panel input,.summary-panel select{width:100%;font-size:11px}
+.summary-panel .summary-schedule-toggle{display:flex;flex-direction:row;align-items:center;gap:8px;margin:10px 0}
+.summary-panel .summary-schedule-toggle input{width:auto}
+.summary-result{margin:14px 0;padding:14px;background:#f7fafc;border-radius:8px}
+.summary-result h3{margin-bottom:6px}.summary-result h4{margin:14px 0 6px}.summary-result li{margin:5px 0;line-height:1.6}
